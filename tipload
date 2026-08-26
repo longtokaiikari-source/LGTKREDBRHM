@@ -18,8 +18,8 @@ for blockedName in pairs(blockedExecutors) do
 end
 
 -- URLs
-local URL_PC     = "https://raw.githubusercontent.com/longtokaihub-cell/REBM5/refs/heads/main/tokaihub_pc.lua"
-local URL_MOBILE = "https://raw.githubusercontent.com/longtokaihub-cell/REBM5/refs/heads/main/tokaihub_mobile.lua"
+local URL_PC     = "https://raw.githubusercontent.com/longtokaiikari-source/LGTKREDBRHM/refs/heads/main/tippc"
+local URL_MOBILE = "https://raw.githubusercontent.com/longtokaiikari-source/LGTKREDBRHM/refs/heads/main/tipmobile"
 
 -- ScreenGui
 local sg = Instance.new("ScreenGui")
