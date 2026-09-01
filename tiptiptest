@@ -3180,16 +3180,34 @@ pcall(function()
 -- THIRD PERSON UNLOCK
 -- Force FIRST_PERSON = false in GC memory → unlock 3rd person camera
 -- getgc rescan mỗi 1s — không rescan mỗi frame, getgc expensive
-local ThirdPerson = { Enabled = false, _connection = nil, _lastScan = 0 }
+local ThirdPerson = { Enabled = false, _connection = nil, _lastScan = 0, _origValues = {} }
 
 local function TP_Apply()
     local ok, gc = pcall(function() return getgc(true) end)
     if not ok or not gc then return end
     for _, obj in pairs(gc) do
         if type(obj) == "table" and rawget(obj, "FIRST_PERSON") ~= nil then
+            -- Lưu giá trị gốc lần đầu tiên
+            if ThirdPerson._origValues[obj] == nil then
+                ThirdPerson._origValues[obj] = rawget(obj, "FIRST_PERSON")
+            end
             pcall(function() obj.FIRST_PERSON = false end)
         end
     end
+end
+
+local function TP_Restore()
+    -- Restore giá trị GỐC — không hardcode true, vì original có thể là 2 hoặc false
+    for obj, origVal in pairs(ThirdPerson._origValues) do
+        pcall(function() obj.FIRST_PERSON = origVal end)
+    end
+    ThirdPerson._origValues = {}
+    -- Force Zoom = 0 trực tiếp — v34.Zoom = 0 trong CharacterCamera.Update là first person
+    pcall(function()
+        if ReplicatorService and ReplicatorService.LocalActor then
+            ReplicatorService.LocalActor.Zoom = 0
+        end
+    end)
 end
 
 local function TP_Tick()
@@ -3213,15 +3231,7 @@ function ThirdPerson.Stop()
         pcall(function() ThirdPerson._connection:Disconnect() end)
         ThirdPerson._connection = nil
     end
-    -- Restore FIRST_PERSON = true → trả về góc nhìn thứ nhất
-    local ok, gc = pcall(function() return getgc(true) end)
-    if ok and gc then
-        for _, obj in pairs(gc) do
-            if type(obj) == "table" and rawget(obj, "FIRST_PERSON") ~= nil then
-                pcall(function() obj.FIRST_PERSON = true end)
-            end
-        end
-    end
+    TP_Restore()
 end
 
 getgenv().ThirdPerson = ThirdPerson
@@ -3521,4 +3531,143 @@ end)
 -- đã register flags của mình — fix bug config không lưu AuraKill/AutoLockpick/BulletTracer/v.v.
 task.defer(function()
 	pcall(function() SaveManager:LoadAutoloadConfig() end)
+end)
+
+
+
+pcall(function()
+-- WEAPON APPEARANCE FX
+-- Target: actor.ViewModel.CurrentModel (weapon BaseParts)
+-- Fallback: camera descendants scan
+local WeaponFX = {
+    Enabled    = false,
+    Rainbow    = false,
+    RainbowSpeed = 5,
+    Transparency = 0,
+    _r = 255, _g = 255, _b = 255,
+    _hue       = 0,
+    _connection = nil,
+    _origData  = {},   -- [part] = {Color, Transparency}
+}
+WeaponFX.Color = Color3.fromRGB(255, 255, 255)
+
+local function WFX_GetParts()
+    local parts = {}
+    pcall(function()
+        local actor = ReplicatorService and ReplicatorService.LocalActor
+        local vm = actor and actor.ViewModel
+        local cur = vm and vm.CurrentModel
+        if cur then
+            for _, obj in ipairs(cur:GetDescendants()) do
+                if obj:IsA("BasePart") then
+                    table.insert(parts, obj)
+                end
+            end
+            return
+        end
+        -- Fallback: scan camera, skip invisible infrastructure parts
+        for _, obj in ipairs(workspace.CurrentCamera:GetDescendants()) do
+            if obj:IsA("BasePart") and obj.Transparency < 1
+                and obj.Name ~= "Root" and obj.Name ~= "Cam"
+                and obj.Name ~= "Left" and obj.Name ~= "Right"
+            then
+                table.insert(parts, obj)
+            end
+        end
+    end)
+    return parts
+end
+
+local function WFX_Save(part)
+    if not WeaponFX._origData[part] then
+        WeaponFX._origData[part] = {
+            Color = part.Color,
+            Transparency = part.Transparency
+        }
+    end
+end
+
+local function WFX_Tick(dt)
+    if not WeaponFX.Enabled then return end
+    local color = WeaponFX.Color
+    if WeaponFX.Rainbow then
+        WeaponFX._hue = (WeaponFX._hue + dt * WeaponFX.RainbowSpeed * 0.25) % 1
+        color = Color3.fromHSV(WeaponFX._hue, 1, 1)
+    end
+    local parts = WFX_GetParts()
+    for _, part in ipairs(parts) do
+        pcall(function()
+            WFX_Save(part)
+            part.Transparency = WeaponFX.Transparency
+            part.Color = color
+        end)
+    end
+end
+
+local function WFX_Restore()
+    for part, data in pairs(WeaponFX._origData) do
+        pcall(function()
+            part.Color = data.Color
+            part.Transparency = data.Transparency
+        end)
+    end
+    WeaponFX._origData = {}
+end
+
+function WeaponFX.Start()
+    if WeaponFX._connection then return end
+    WeaponFX._connection = RunService.Heartbeat:Connect(WFX_Tick)
+    table.insert(getgenv().Moon_Connections, WeaponFX._connection)
+    print("[WeaponFX] Started")
+end
+
+function WeaponFX.Stop()
+    if WeaponFX._connection then
+        pcall(function() WeaponFX._connection:Disconnect() end)
+        WeaponFX._connection = nil
+    end
+    WFX_Restore()
+    print("[WeaponFX] Stopped")
+end
+
+getgenv().WeaponFX = WeaponFX
+
+local S_WFX = MiscTab:DrawSection({Name="Weapon Appearance", Position="left"})
+
+S_WFX:AddToggle({Name="Enable Weapon FX", Flag="WFX_Enabled", Default=false,
+    Callback=function(v)
+        WeaponFX.Enabled = v
+        if v then WeaponFX.Start() else WeaponFX.Stop() end
+    end})
+
+S_WFX:AddSlider({Name="Transparency", Flag="WFX_Trans", Min=0, Max=90, Default=0, Suffix="%",
+    Callback=function(v) WeaponFX.Transparency = v / 100 end})
+
+S_WFX:AddToggle({Name="Rainbow Mode", Flag="WFX_Rainbow", Default=false,
+    Callback=function(v) WeaponFX.Rainbow = v end})
+
+-- Tốc độ đổi màu rainbow: 1 = chậm (~4s/cycle), 20 = nhanh (~0.2s/cycle)
+S_WFX:AddSlider({Name="Rainbow Speed", Flag="WFX_Speed", Min=1, Max=20, Default=5, Suffix="x",
+    Callback=function(v) WeaponFX.RainbowSpeed = v end})
+
+-- RGB sliders — active khi Rainbow tắt
+S_WFX:AddSlider({Name="Color R", Flag="WFX_R", Min=0, Max=255, Default=255, Suffix="",
+    Callback=function(v)
+        WeaponFX._r = v
+        WeaponFX.Color = Color3.fromRGB(WeaponFX._r, WeaponFX._g, WeaponFX._b)
+    end})
+
+S_WFX:AddSlider({Name="Color G", Flag="WFX_G", Min=0, Max=255, Default=255, Suffix="",
+    Callback=function(v)
+        WeaponFX._g = v
+        WeaponFX.Color = Color3.fromRGB(WeaponFX._r, WeaponFX._g, WeaponFX._b)
+    end})
+
+S_WFX:AddSlider({Name="Color B", Flag="WFX_B", Min=0, Max=255, Default=255, Suffix="",
+    Callback=function(v)
+        WeaponFX._b = v
+        WeaponFX.Color = Color3.fromRGB(WeaponFX._r, WeaponFX._g, WeaponFX._b)
+    end})
+
+print("[WeaponFX] Loaded")
 end)
