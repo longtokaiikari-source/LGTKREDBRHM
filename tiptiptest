@@ -3436,238 +3436,100 @@ end)
 
 
 -- ==========================================
--- GUN SKIN
--- Customize viewmodel: transparency, color, rainbow
+-- GUN APPEARANCE
+-- Merge GunSkin + WeaponFX: ColorPicker + Transparency + Rainbow
+-- Cache parts mỗi 0.5s, restore đúng cả Color lẫn Transparency
 -- ==========================================
 pcall(function()
-local GunSkin = {
-	Enabled=false, Transparency=0,
-	Color=Color3.new(1,1,1), Rainbow=false, RainbowSpeed=10,
-	_connection=nil, _hue=0, _origColors={},
+local GunAppear = {
+    Enabled=false, Transparency=0,
+    Color=Color3.new(1,1,1), Rainbow=false, RainbowSpeed=5,
+    _connection=nil, _hue=0, _origData={},
 }
 
-local function GS_GetParts()
-	local actor = ReplicatorService and ReplicatorService.LocalActor
-	if not actor then return nil end
-	local vm = actor.ViewModel
-	if not vm then return nil end
-	local model = vm.CurrentModel
-	if not model then return nil end
-	local parts = {}
-	for _, v in ipairs(model:GetDescendants()) do
-		if v:IsA("BasePart") then parts[#parts+1] = v end
-	end
-	return parts
+local _gaLastScan, _gaCached = 0, {}
+
+local function GA_GetParts()
+    local now = tick()
+    if now - _gaLastScan < 0.5 and #_gaCached > 0 then return _gaCached end
+    _gaLastScan = now
+    local parts = {}
+    pcall(function()
+        -- Primary: LocalActor.ViewModel.CurrentModel
+        local actor = ReplicatorService and ReplicatorService.LocalActor
+        local cur = actor and actor.ViewModel and actor.ViewModel.CurrentModel
+        if cur then
+            for _, obj in ipairs(cur:GetDescendants()) do
+                if obj:IsA("BasePart") then parts[#parts+1] = obj end
+            end
+        end
+        -- Fallback: scan CurrentCamera descendants
+        if #parts == 0 then
+            for _, obj in ipairs(workspace.CurrentCamera:GetDescendants()) do
+                if obj:IsA("BasePart") and obj.Transparency < 1
+                    and obj.Name ~= "Root" and obj.Name ~= "Cam"
+                then parts[#parts+1] = obj end
+            end
+        end
+    end)
+    _gaCached = parts
+    return parts
 end
 
-function GunSkin.Start()
-	if GunSkin._connection then return end
-	GunSkin._origColors = {}
-	-- Snapshot original colors
-	local ok, parts = pcall(GS_GetParts)
-	if ok and parts then
-		for _, p in ipairs(parts) do
-			GunSkin._origColors[p] = p.Color
-		end
-	end
-	GunSkin._connection = RunService.RenderStepped:Connect(function(dt)
-		local ok2, parts2 = pcall(GS_GetParts)
-		if not ok2 or not parts2 then return end
-		-- Snapshot any new parts from weapon switch
-		for _, p in ipairs(parts2) do
-			if not GunSkin._origColors[p] then
-				GunSkin._origColors[p] = p.Color
-			end
-		end
-		if GunSkin.Rainbow then
-			GunSkin._hue = (GunSkin._hue + dt * GunSkin.RainbowSpeed * 0.005) % 1
-		end
-		local color = GunSkin.Rainbow and Color3.fromHSV(GunSkin._hue, 1, 1) or GunSkin.Color
-		for _, part in ipairs(parts2) do
-			pcall(function()
-				part.LocalTransparencyModifier = GunSkin.Transparency
-				part.Color = color
-			end)
-		end
-	end)
-	table.insert(getgenv().Moon_Connections, GunSkin._connection)
+local function GA_Tick(dt)
+    if not GunAppear.Enabled then return end
+    local color = GunAppear.Color
+    if GunAppear.Rainbow then
+        GunAppear._hue = (GunAppear._hue + dt * GunAppear.RainbowSpeed * 0.25) % 1
+        color = Color3.fromHSV(GunAppear._hue, 1, 1)
+    end
+    for _, part in ipairs(GA_GetParts()) do
+        pcall(function()
+            if not GunAppear._origData[part] then
+                GunAppear._origData[part] = { Color=part.Color, Transparency=part.Transparency }
+            end
+            part.Transparency = GunAppear.Transparency
+            part.Color = color
+        end)
+    end
 end
 
-function GunSkin.Stop()
-	if GunSkin._connection then
-		pcall(function() GunSkin._connection:Disconnect() end)
-		GunSkin._connection = nil
-	end
-	-- Restore original colors and transparency
-	for part, color in pairs(GunSkin._origColors) do
-		pcall(function()
-			part.LocalTransparencyModifier = 0
-			part.Color = color
-		end)
-	end
-	GunSkin._origColors = {}
+function GunAppear.Start()
+    if GunAppear._connection then return end
+    GunAppear._connection = RunService.Heartbeat:Connect(GA_Tick)
+    table.insert(getgenv().Moon_Connections, GunAppear._connection)
 end
 
-getgenv().GunSkin = GunSkin
+function GunAppear.Stop()
+    if GunAppear._connection then
+        pcall(function() GunAppear._connection:Disconnect() end)
+        GunAppear._connection = nil
+    end
+    for part, data in pairs(GunAppear._origData) do
+        pcall(function() part.Color=data.Color; part.Transparency=data.Transparency end)
+    end
+    GunAppear._origData = {}
+    _gaCached = {}
+end
 
-local S_GS = MiscTab:DrawSection({Name="Gun Skin", Position="right"})
-S_GS:AddToggle({Name="Enable Gun Skin", Flag="GS_Enabled", Default=false,
-	Callback=function(v)
-		GunSkin.Enabled = v
-		if v then GunSkin.Start() else GunSkin.Stop() end
-	end})
-S_GS:AddSlider({Name="Transparency", Flag="GS_Transparency", Min=0, Max=100, Default=0, Rounding=0,
-	Callback=function(v) GunSkin.Transparency = v/100 end})
-S_GS:AddColorPicker({Name="Gun Color", Flag="GS_Color", Default=Color3.new(1,1,1),
-	Callback=function(v) GunSkin.Color = v end})
-S_GS:AddToggle({Name="Rainbow Mode", Flag="GS_Rainbow", Default=false,
-	Callback=function(v) GunSkin.Rainbow = v end})
-S_GS:AddSlider({Name="Rainbow Speed", Flag="GS_RainbowSpeed", Min=1, Max=100, Default=10, Rounding=0,
-	Callback=function(v) GunSkin.RainbowSpeed = v end})
-print("[GunSkin] Loaded")
+getgenv().GunAppear = GunAppear
+
+local S_GA = MiscTab:DrawSection({Name="Gun Appearance", Position="right"})
+S_GA:AddToggle({Name="Enable Gun Appearance", Flag="GA_Enabled", Default=false,
+    Callback=function(v) GunAppear.Enabled=v; if v then GunAppear.Start() else GunAppear.Stop() end end})
+S_GA:AddSlider({Name="Transparency", Flag="GA_Trans", Min=0, Max=100, Default=0, Suffix="%",
+    Callback=function(v) GunAppear.Transparency=v/100 end})
+S_GA:AddColorPicker({Name="Gun Color", Flag="GA_Color", Default=Color3.new(1,1,1),
+    Callback=function(v) GunAppear.Color=v end})
+S_GA:AddToggle({Name="Rainbow Mode", Flag="GA_Rainbow", Default=false,
+    Callback=function(v) GunAppear.Rainbow=v end})
+S_GA:AddSlider({Name="Rainbow Speed", Flag="GA_Speed", Min=1, Max=20, Default=5, Suffix="x",
+    Callback=function(v) GunAppear.RainbowSpeed=v end})
+print("[GunAppear] Loaded")
 end)
 
 -- Deferred autoload: chạy lại LoadAutoloadConfig sau khi TẤT CẢ pcall blocks
 -- đã register flags của mình — fix bug config không lưu AuraKill/AutoLockpick/BulletTracer/v.v.
 task.defer(function()
 	pcall(function() SaveManager:LoadAutoloadConfig() end)
-end)
-
-
-
-pcall(function()
--- WEAPON APPEARANCE FX
--- Target: actor.ViewModel.CurrentModel (weapon BaseParts)
--- Fallback: camera descendants scan
-local WeaponFX = {
-    Enabled    = false,
-    Rainbow    = false,
-    RainbowSpeed = 5,
-    Transparency = 0,
-    _r = 255, _g = 255, _b = 255,
-    _hue       = 0,
-    _connection = nil,
-    _origData  = {},   -- [part] = {Color, Transparency}
-}
-WeaponFX.Color = Color3.fromRGB(255, 255, 255)
-
-local function WFX_GetParts()
-    local parts = {}
-    pcall(function()
-        local actor = ReplicatorService and ReplicatorService.LocalActor
-        local vm = actor and actor.ViewModel
-        local cur = vm and vm.CurrentModel
-        if cur then
-            for _, obj in ipairs(cur:GetDescendants()) do
-                if obj:IsA("BasePart") then
-                    table.insert(parts, obj)
-                end
-            end
-            return
-        end
-        -- Fallback: scan camera, skip invisible infrastructure parts
-        for _, obj in ipairs(workspace.CurrentCamera:GetDescendants()) do
-            if obj:IsA("BasePart") and obj.Transparency < 1
-                and obj.Name ~= "Root" and obj.Name ~= "Cam"
-                and obj.Name ~= "Left" and obj.Name ~= "Right"
-            then
-                table.insert(parts, obj)
-            end
-        end
-    end)
-    return parts
-end
-
-local function WFX_Save(part)
-    if not WeaponFX._origData[part] then
-        WeaponFX._origData[part] = {
-            Color = part.Color,
-            Transparency = part.Transparency
-        }
-    end
-end
-
-local function WFX_Tick(dt)
-    if not WeaponFX.Enabled then return end
-    local color = WeaponFX.Color
-    if WeaponFX.Rainbow then
-        WeaponFX._hue = (WeaponFX._hue + dt * WeaponFX.RainbowSpeed * 0.25) % 1
-        color = Color3.fromHSV(WeaponFX._hue, 1, 1)
-    end
-    local parts = WFX_GetParts()
-    for _, part in ipairs(parts) do
-        pcall(function()
-            WFX_Save(part)
-            part.Transparency = WeaponFX.Transparency
-            part.Color = color
-        end)
-    end
-end
-
-local function WFX_Restore()
-    for part, data in pairs(WeaponFX._origData) do
-        pcall(function()
-            part.Color = data.Color
-            part.Transparency = data.Transparency
-        end)
-    end
-    WeaponFX._origData = {}
-end
-
-function WeaponFX.Start()
-    if WeaponFX._connection then return end
-    WeaponFX._connection = RunService.Heartbeat:Connect(WFX_Tick)
-    table.insert(getgenv().Moon_Connections, WeaponFX._connection)
-    print("[WeaponFX] Started")
-end
-
-function WeaponFX.Stop()
-    if WeaponFX._connection then
-        pcall(function() WeaponFX._connection:Disconnect() end)
-        WeaponFX._connection = nil
-    end
-    WFX_Restore()
-    print("[WeaponFX] Stopped")
-end
-
-getgenv().WeaponFX = WeaponFX
-
-local S_WFX = MiscTab:DrawSection({Name="Weapon Appearance", Position="left"})
-
-S_WFX:AddToggle({Name="Enable Weapon FX", Flag="WFX_Enabled", Default=false,
-    Callback=function(v)
-        WeaponFX.Enabled = v
-        if v then WeaponFX.Start() else WeaponFX.Stop() end
-    end})
-
-S_WFX:AddSlider({Name="Transparency", Flag="WFX_Trans", Min=0, Max=90, Default=0, Suffix="%",
-    Callback=function(v) WeaponFX.Transparency = v / 100 end})
-
-S_WFX:AddToggle({Name="Rainbow Mode", Flag="WFX_Rainbow", Default=false,
-    Callback=function(v) WeaponFX.Rainbow = v end})
-
--- Tốc độ đổi màu rainbow: 1 = chậm (~4s/cycle), 20 = nhanh (~0.2s/cycle)
-S_WFX:AddSlider({Name="Rainbow Speed", Flag="WFX_Speed", Min=1, Max=20, Default=5, Suffix="x",
-    Callback=function(v) WeaponFX.RainbowSpeed = v end})
-
--- RGB sliders — active khi Rainbow tắt
-S_WFX:AddSlider({Name="Color R", Flag="WFX_R", Min=0, Max=255, Default=255, Suffix="",
-    Callback=function(v)
-        WeaponFX._r = v
-        WeaponFX.Color = Color3.fromRGB(WeaponFX._r, WeaponFX._g, WeaponFX._b)
-    end})
-
-S_WFX:AddSlider({Name="Color G", Flag="WFX_G", Min=0, Max=255, Default=255, Suffix="",
-    Callback=function(v)
-        WeaponFX._g = v
-        WeaponFX.Color = Color3.fromRGB(WeaponFX._r, WeaponFX._g, WeaponFX._b)
-    end})
-
-S_WFX:AddSlider({Name="Color B", Flag="WFX_B", Min=0, Max=255, Default=255, Suffix="",
-    Callback=function(v)
-        WeaponFX._b = v
-        WeaponFX.Color = Color3.fromRGB(WeaponFX._r, WeaponFX._g, WeaponFX._b)
-    end})
-
-print("[WeaponFX] Loaded")
 end)
