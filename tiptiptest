@@ -158,7 +158,7 @@ function MoonUI.new(Data)
 			if SaveManager.SetSubFolder then SaveManager:SetSubFolder("specific-place") end
 			SaveManager:BuildConfigSection(SettingsTab); ThemeManager:ApplyToTab(SettingsTab)
 			SaveManager:LoadAutoloadConfig()
-			Wrapped._rawSettingsTab = SettingsTab
+			Wrapped._rawSettingsTab = SettingsTab  -- expose for Delete Config button
 			return { Init = function() end }
 		end,
 		SetMenuKey = function(_, Key) task.defer(function() Library.ToggleKeybind = getgenv().Options and getgenv().Options.MenuKeybind end) end,
@@ -678,8 +678,8 @@ GetCombatTarget = function(mode)
 	local candidates=getgenv()._targetCandidates or table.create(64)
 	table.clear(candidates); getgenv()._targetCandidates=candidates
 	local now=tick(); local ignoredTargets=ActorManager._ignoredTargets
-	local mouseX,mouseY
-	if useFOV then local sc=Camera.ViewportSize/2; mouseX,mouseY=sc.X,sc.Y end
+	local mouse,mouseX,mouseY
+	if useFOV then mouse=UserInputService:GetMouseLocation(); mouseX,mouseY=mouse.X,mouse.Y end
 	local enemyList
 	if mode=="Rage" and ActorManager._sectors and ActorManager._playerSector then
 		enemyList={}
@@ -812,11 +812,13 @@ local function HookController(controller)
 	end
 end
 
-local FOVCircle=Drawing.new("Circle")
-FOVCircle.Thickness=1
-pcall(function() FOVCircle.NumSides=60 end)
-FOVCircle.Radius=Config.SilentAimFOV
-FOVCircle.Filled=false; FOVCircle.Visible=false; FOVCircle.Color=Color3.fromRGB(255,255,255)
+local FOVCircle = Drawing.new("Circle")
+FOVCircle.Thickness = 1
+FOVCircle.NumSides = 60
+FOVCircle.Radius = Config.SilentAimFOV
+FOVCircle.Filled = false
+FOVCircle.Visible = false
+FOVCircle.Color = Color3.fromRGB(255, 255, 255)
 
 getgenv().VelocityCache={}
 getgenv().PredictionDot=Drawing.new("Circle")
@@ -1196,6 +1198,7 @@ local function UpdateCombat(frameId)
 				local chamberCount = (equippedController._item and equippedController._item.MetaData and equippedController._item.MetaData.Chamber) and 1 or 0
 				local totalAmmo = magCapacity + chamberCount
 				local isReloading = equippedController._reloading == true
+				-- Stuck detection: _reloading true > 4s → force reset
 				if isReloading then
 					local reloadStart = getgenv()._autoReloadStart or now_ar
 					getgenv()._autoReloadStart = reloadStart
@@ -1355,11 +1358,13 @@ local function UpdateCombat(frameId)
 			end
 		end
 	end
+	local mouse = UserInputService:GetMouseLocation()
 	if FOVCircle then
-		pcall(function() FOVCircle.Radius=Config.SilentAimFOV end)
-		local fovShow=Config.SilentAim and Config.ShowFOV
-		pcall(function() FOVCircle.Visible=fovShow end)
-		if fovShow then local sc=Camera.ViewportSize/2; pcall(function() FOVCircle.Position=Vector2.new(sc.X,sc.Y) end) end
+		FOVCircle.Visible = Config.SilentAim and Config.ShowFOV
+		if FOVCircle.Visible then
+			FOVCircle.Position = mouse
+			FOVCircle.Radius = Config.SilentAimFOV
+		end
 	end
 	local targetPart=targetPart_SA; local targetActor=ActorManager.SelectedActor_SA
 	if targetPart then
@@ -1506,24 +1511,14 @@ local function UpdateESPForActor(uid,espData,frameId,cachedCfg,localSquad)
 	if not actor or not actor.Alive then RemoveESP(uid); return end
 	if not ShouldShowEntity(actor,entityType,localSquad) then SetAllVisible(espData.Drawing,espData,false); return end
 	-- Tính distance thực nếu LOD_Distance không có
-	local distance = actor.LOD_Distance
-	if not distance or distance <= 0 then
-		local pos = actor.Position
-		if not pos and actor.Character and actor.Character.PrimaryPart then
-			pos = actor.Character.PrimaryPart.Position
-		end
-		if pos then
-			distance = (Camera.CFrame.Position - pos).Magnitude
-		else
-			distance = 0
-		end
-	end
+	local distance = actor.LOD_Distance or 9999
 	if distance > cachedCfg.MaxDistance then
 		SetAllVisible(espData.Drawing,espData,false)
 		if espData.SimpleESP and espData.SimpleESP.Box then pcall(function() espData.SimpleESP.Box.Visible=false end) end
 		return
 	end
-	if distance > 1500 and (frameId%2) ~= 0 then return end
+	if distance > 1500 and (frameId % 4) ~= 0 then return end
+	if distance > 500 and (frameId % 2) ~= 0 then return end
 	if cachedCfg.SimpleESP then
 		SetAllVisible(espData.Drawing,espData,false)
 		local sESP=espData.SimpleESP
@@ -1537,7 +1532,7 @@ local function UpdateESPForActor(uid,espData,frameId,cachedCfg,localSquad)
 		return
 	end
 	local drawings=espData.Drawing
-	local worldPos = actor.Position
+	local worldPos = actor.Position or (actor.RootPart and actor.RootPart.Position)
 	if not worldPos then
 		if actor.Character then
 			local pp = actor.Character.PrimaryPart or actor.Character:FindFirstChild("Head")
@@ -1546,8 +1541,15 @@ local function UpdateESPForActor(uid,espData,frameId,cachedCfg,localSquad)
 	end
 	if not worldPos then SetAllVisible(drawings,espData,false); return end
 	local screen_point,onScreen=Camera:WorldToViewportPoint(worldPos)
-	-- Chỉ dùng onScreen — reliable trên PC
-	if not onScreen then SetAllVisible(drawings,espData,false); return end
+	local engineVisible = actor.LOD_OnScreen or (distance < 128 and actor.ViewportOnScreen)
+	if not engineVisible then
+		SetAllVisible(drawings, espData, false)
+		return
+	end
+	if not onScreen then
+		SetAllVisible(drawings, espData, false)
+		return
+	end
 	local screenPos=Vector2_new(screen_point.X,screen_point.Y)
 	SetAllVisible(drawings,espData,true)
 	if espData.Highlight then espData.Highlight.FillColor=espData.Color;espData.Highlight.OutlineColor=espData.Color end
@@ -2011,6 +2013,7 @@ end })
 local ConfigUI=Window:DrawConfig({ Name="Configs", Icon="folder", Config=_ConfigManager })
 ConfigUI:Init()
 
+-- Delete Config button — Settings tab
 pcall(function()
 	local rawTab = Window._rawSettingsTab
 	if not rawTab then return end
@@ -2088,8 +2091,8 @@ local AutoFarm = {
 	_lastShot = 0,
 	_phase = "seek",          -- seek | shoot | switch | return
 	_enemyIndex = 1,
-	_originCF = nil,
-	_returnTimer = 0,
+	_originCF = nil,          -- vị trí lưu trước khi teleport đến target
+	_returnTimer = 0,         -- timestamp khi bắt đầu phase return
 }
 
 -- Teleport LocalActor đến vị trí gần target
@@ -2162,6 +2165,7 @@ local function AutoFarm_Tick()
 		local target = AutoFarm_NextTarget()
 		if not target then return end
 
+		-- Lưu vị trí hiện tại trước khi teleport — dùng để return về sau
 		if not AutoFarm._originCF then
 			local myActor = ReplicatorService and ReplicatorService.LocalActor
 			if myActor then
@@ -2241,6 +2245,7 @@ local function AutoFarm_Tick()
 
 	-- PHASE: RETURN — teleport về vị trí ban đầu trước khi seek target kế
 	if AutoFarm._phase == "return" then
+		-- Teleport về ngay lập tức mỗi tick (giữ nguyên vị trí nếu bị server push)
 		if AutoFarm._originCF then
 			local myActor = ReplicatorService and ReplicatorService.LocalActor
 			if myActor then
@@ -2251,6 +2256,7 @@ local function AutoFarm_Tick()
 				end)
 			end
 		end
+		-- Chờ 0.5s ổn định rồi mới seek target kế
 		if (now - AutoFarm._returnTimer) >= 0.5 then
 			AutoFarm._originCF = nil
 			AutoFarm._phase = "seek"
@@ -2768,7 +2774,6 @@ print("[AntiFall] Loaded")
 
 
 
--- ==========================================
 -- AURA KILL — Verified từ Flux_client.lua source
 -- Cipher đúng 100%: netEncode verified = RSpy dump match
 -- net:FireServer() = RemoteEvent:FireServer(netEncode(JSONEncode({_code,...}), _key))
@@ -3002,7 +3007,8 @@ S_AK:AddButton({Name="Rescan Network",
 
 print("[AuraKill] Loaded — Cipher verified vs RSpy dump")
 
--- ==========================================
+
+
 pcall(function()
 -- AUTO FARM
 local AutoFarm = {Enabled=false, OffsetY=-2, _connection=nil, _running=false}
@@ -3088,6 +3094,10 @@ S_AF:AddSlider({Name="Y Offset", Flag="AF_OffsetY", Min=-10, Max=0, Default=-2, 
 	Callback=function(v) AutoFarm.OffsetY=v end})
 print("[AutoFarm] Loaded")
 end)
+
+
+
+
 
 -- AUTO LOCKPICK v4
 -- InputService._mounts["PickLock"] là callback thật
@@ -3177,6 +3187,7 @@ local function TP_Apply()
     if not ok or not gc then return end
     for _, obj in pairs(gc) do
         if type(obj) == "table" and rawget(obj, "FIRST_PERSON") ~= nil then
+            -- Lưu giá trị gốc lần đầu tiên
             if ThirdPerson._origValues[obj] == nil then
                 ThirdPerson._origValues[obj] = rawget(obj, "FIRST_PERSON")
             end
@@ -3186,10 +3197,12 @@ local function TP_Apply()
 end
 
 local function TP_Restore()
+    -- Restore giá trị GỐC — không hardcode true, vì original có thể là 2 hoặc false
     for obj, origVal in pairs(ThirdPerson._origValues) do
         pcall(function() obj.FIRST_PERSON = origVal end)
     end
     ThirdPerson._origValues = {}
+    -- Force Zoom = 0 trực tiếp — v34.Zoom = 0 trong CharacterCamera.Update là first person
     pcall(function()
         if ReplicatorService and ReplicatorService.LocalActor then
             ReplicatorService.LocalActor.Zoom = 0
@@ -3236,14 +3249,18 @@ end)
 
 pcall(function()
 -- VEHICLE TELEPORTER
+-- ControllerService không được assign trong BulkScan → luôn nil
+-- Lấy vehicle qua VehicleService.Vehicles + LocalActor.Seat.UID
 local VehicleTeleport = { _savedCF = nil }
 
 local function VT_GetVehicle()
     local localActor = ReplicatorService and ReplicatorService.LocalActor
     if not localActor then return nil end
+
     local seat = localActor.Seat
     if not seat then return nil end
 
+    -- Method 1: VehicleService.Vehicles lookup theo UID
     local uid = seat.UID
     if uid and VehicleService and VehicleService.Vehicles then
         for _, veh in pairs(VehicleService.Vehicles) do
@@ -3251,6 +3268,7 @@ local function VT_GetVehicle()
         end
     end
 
+    -- Method 2: GC scan — tìm vehicle có Controlling = true + ComponentReplicates
     local ok, gc = pcall(function() return getgc(true) end)
     if not ok or not gc then return nil end
     for _, obj in pairs(gc) do
@@ -3266,6 +3284,7 @@ local function VT_GetVehicle()
 end
 
 local function VT_GetSolver(vehicle)
+    -- Tìm controller có _vehicle match để lấy solver
     local ok, gc = pcall(function() return getgc(true) end)
     if not ok or not gc then return nil end
     for _, obj in pairs(gc) do
@@ -3286,11 +3305,13 @@ local function TeleportVehicle(targetCF)
         return
     end
 
+    -- Step 1: set CFrame
     pcall(function()
         vehicle.CFrame = targetCF
         if vehicle.Hitbox then vehicle.Hitbox.CFrame = targetCF end
     end)
 
+    -- Step 2: reset solver velocity → không drift sau teleport
     pcall(function()
         local solver = VT_GetSolver(vehicle)
         if solver and solver.SetState then
@@ -3298,6 +3319,7 @@ local function TeleportVehicle(targetCF)
         end
     end)
 
+    -- Step 3: SimulatedPosition — cách VehicleFly replicate lên server
     pcall(function()
         if ReplicatorService and ReplicatorService.LocalActor then
             ReplicatorService.LocalActor.SimulatedPosition = targetCF.Position
@@ -3311,6 +3333,7 @@ getgenv().VehicleTeleport = VehicleTeleport
 
 local S_VT = VehicleTab:DrawSection({Name="Vehicle Teleporter", Position="left"})
 
+-- Button 1: Lấy toạ độ
 S_VT:AddButton({ Name="Lấy Toạ Độ", Callback=function()
     pcall(function()
         local vehicle = VT_GetVehicle()
@@ -3335,6 +3358,7 @@ S_VT:AddButton({ Name="Lấy Toạ Độ", Callback=function()
     end)
 end})
 
+-- Button 2: Teleport phương tiện
 S_VT:AddButton({ Name="Teleport Phương Tiện", Callback=function()
     pcall(function()
         if not VehicleTeleport._savedCF then
@@ -3345,6 +3369,7 @@ S_VT:AddButton({ Name="Teleport Phương Tiện", Callback=function()
     end)
 end})
 
+-- Button 3: Xóa toạ độ
 S_VT:AddButton({ Name="Xóa Toạ Độ", Callback=function()
     pcall(function()
         VehicleTeleport._savedCF = nil
@@ -3357,6 +3382,9 @@ end)
 
 
 
+-- ==========================================
+-- FULLBRIGHT
+-- ==========================================
 pcall(function()
 local FullBright = { Enabled=false, _original={}, _applied=false }
 
@@ -3407,7 +3435,11 @@ end)
 
 
 
-
+-- ==========================================
+-- GUN APPEARANCE
+-- Dùng getgc tìm ViewmodelClass qua fingerprint _container+_cutaways+WorldModel
+-- Không scan workspace.CurrentCamera — tránh hit objects không liên quan
+-- ==========================================
 pcall(function()
 local GunAppear = {
     Enabled=false, Transparency=0,
@@ -3418,6 +3450,7 @@ local GunAppear = {
 local _gaLastScan, _gaCached = 0, {}
 
 local function GA_FindViewmodels()
+    -- Fingerprint ViewmodelClass: table có _container(Model) + _cutaways(table) + WorldModel
     local vms = {}
     local ok, gc = pcall(function() return getgc(true) end)
     if not ok or not gc then return vms end
@@ -3505,4 +3538,104 @@ S_GA:AddToggle({Name="Rainbow Mode", Flag="GA_Rainbow", Default=false,
 S_GA:AddSlider({Name="Rainbow Speed", Flag="GA_Speed", Min=1, Max=20, Default=5, Suffix="x",
     Callback=function(v) GunAppear.RainbowSpeed=v end})
 print("[GunAppear] Loaded")
+end)
+
+-- Deferred autoload: chạy lại LoadAutoloadConfig sau khi TẤT CẢ pcall blocks
+-- đã register flags của mình — fix bug config không lưu AuraKill/AutoLockpick/BulletTracer/v.v.
+task.spawn(function()
+	task.wait(1)
+	pcall(function() SaveManager:LoadAutoloadConfig() end)
+end)
+
+
+pcall(function()
+-- SKYBOX COLOR CUSTOMIZER
+-- Thay đổi màu bầu trời qua Lighting.Ambient + Atmosphere + ColorCorrectionEffect
+local _L = game:GetService("Lighting")
+local Sky = {
+	Enabled = false,
+	Color = Color3.fromRGB(135, 206, 235),
+	_origAmbient = nil,
+	_origOutdoor = nil,
+	_origFog = nil,
+	_origAtm = nil,
+	_effect = nil,
+}
+
+local function Sky_Apply(color)
+	pcall(function()
+		-- Lưu giá trị gốc lần đầu
+		if Sky._origAmbient == nil then
+			Sky._origAmbient   = _L.Ambient
+			Sky._origOutdoor   = _L.OutdoorAmbient
+			Sky._origFog       = _L.FogColor
+			local atm = _L:FindFirstChildOfClass("Atmosphere")
+			if atm then
+				Sky._origAtm = {
+					Color   = atm.Color,
+					Density = atm.Density,
+					Haze    = atm.Haze,
+				}
+			end
+		end
+		-- Set ambient + fog
+		_L.Ambient        = color
+		_L.OutdoorAmbient = color
+		_L.FogColor       = color
+		-- Set atmosphere nếu có
+		local atm = _L:FindFirstChildOfClass("Atmosphere")
+		if atm then
+			atm.Color   = color
+			atm.Density = 0.3
+			atm.Haze    = 2
+		end
+		-- ColorCorrectionEffect → tint toàn cảnh
+		if not Sky._effect or not Sky._effect.Parent then
+			local existing = _L:FindFirstChild("TokaihubSky")
+			Sky._effect = existing or Instance.new("ColorCorrectionEffect")
+			Sky._effect.Name = "TokaihubSky"
+			pcall(function() Sky._effect.Parent = _L end)
+		end
+		Sky._effect.TintColor  = color
+		Sky._effect.Saturation = 0.3
+		Sky._effect.Enabled    = true
+	end)
+end
+
+local function Sky_Restore()
+	pcall(function()
+		if Sky._origAmbient then
+			_L.Ambient        = Sky._origAmbient
+			_L.OutdoorAmbient = Sky._origOutdoor
+			_L.FogColor       = Sky._origFog
+		end
+		local atm = _L:FindFirstChildOfClass("Atmosphere")
+		if atm and Sky._origAtm then
+			atm.Color   = Sky._origAtm.Color
+			atm.Density = Sky._origAtm.Density
+			atm.Haze    = Sky._origAtm.Haze
+		end
+		if Sky._effect and Sky._effect.Parent then
+			pcall(function() Sky._effect:Destroy() end)
+		end
+		Sky._effect      = nil
+		Sky._origAmbient = nil
+		Sky._origAtm     = nil
+	end)
+end
+
+getgenv().SkyboxColor = Sky
+
+local S_Sky = MiscTab:DrawSection({Name="Skybox Color", Position="right"})
+S_Sky:AddToggle({Name="Enable Skybox Color", Flag="Sky_Enabled", Default=false,
+	Callback=function(v)
+		Sky.Enabled = v
+		if v then Sky_Apply(Sky.Color) else Sky_Restore() end
+	end})
+S_Sky:AddColorPicker({Name="Sky Color", Flag="Sky_Color", Default=Color3.fromRGB(135, 206, 235),
+	Callback=function(color)
+		Sky.Color = color
+		if Sky.Enabled then Sky_Apply(color) end
+	end})
+print("[SkyboxColor] Loaded")
 end)
