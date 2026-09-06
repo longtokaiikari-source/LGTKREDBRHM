@@ -3340,9 +3340,9 @@ end)
 
 pcall(function()
 -- ==========================================
--- RAINBOW GUN SKIN
--- Tô màu rainbow cho weapon model của local player
--- Scan parts qua InventoryService + GC fallback
+-- RAINBOW GUN SKIN v2
+-- Hook vào _heroModel + _lodModel từ FirearmInventoryReplicator
+-- Fields đúng theo source: _firearm, _actor, _heroModel, _lodModel
 -- ==========================================
 local RainbowGun = {
 	Enabled = false,
@@ -3355,49 +3355,74 @@ local RainbowGun = {
 	_lastScan = 0,
 }
 
+-- Scan BaseParts từ _heroModel và _lodModel của local player weapon
 local function RG_ScanParts()
 	local parts = {}
-	-- Method 1: InventoryService.Equipped handler models
-	if InventoryService and InventoryService.Equipped then
-		local handler = InventoryService.Equipped.Handler or InventoryService.Equipped
-		for _, field in ipairs({"_model","_viewmodel","_vm","Model","Viewmodel"}) do
-			local model = rawget(handler, field)
-			if model and typeof(model) == "Instance" then
-				for _, p in ipairs(model:GetDescendants()) do
+
+	-- WeaponManager.Visuals là FirearmInventoryReplicator instances
+	-- Mỗi instance có: _firearm, _actor, _heroModel, _lodModel
+	local visuals = WeaponManager and WeaponManager.Visuals
+	if visuals then
+		for _, controller in ipairs(visuals) do
+			if type(controller) ~= "table" then continue end
+			-- Chỉ lấy weapon của local player
+			local actor = rawget(controller, "_actor")
+			if not actor then continue end
+			local isLocal = false
+			if actor.IsLocalPlayer then
+				isLocal = true
+			elseif ReplicatorService and ReplicatorService.LocalActor and actor == ReplicatorService.LocalActor then
+				isLocal = true
+			end
+			if not isLocal then continue end
+
+			-- _heroModel là first-person / hero model
+			local heroModel = rawget(controller, "_heroModel")
+			if heroModel and typeof(heroModel) == "Instance" then
+				for _, p in ipairs(heroModel:GetDescendants()) do
+					if p:IsA("BasePart") then table.insert(parts, p) end
+				end
+			end
+			-- _lodModel là third-person model
+			local lodModel = rawget(controller, "_lodModel")
+			if lodModel and typeof(lodModel) == "Instance" then
+				for _, p in ipairs(lodModel:GetDescendants()) do
 					if p:IsA("BasePart") then table.insert(parts, p) end
 				end
 			end
 		end
 	end
-	-- Method 2: LocalPlayer character tools
-	if #parts == 0 and LocalPlayer.Character then
-		for _, obj in ipairs(LocalPlayer.Character:GetDescendants()) do
-			if obj:IsA("BasePart") then table.insert(parts, obj) end
-		end
-	end
-	-- Method 3: GC scan — tìm FirearmInventory instance có _model
+
+	-- Fallback: GC scan tìm table có _heroModel + _firearm + _actor
 	if #parts == 0 then
 		local ok, gc = pcall(function() return getgc(true) end)
 		if ok and gc then
 			for _, obj in pairs(gc) do
-				if type(obj) == "table"
-					and rawget(obj, "_firearm")
-					and rawget(obj, "_bulletsShot")
-				then
-					for _, field in ipairs({"_model","_viewmodel","_vm"}) do
-						local model = rawget(obj, field)
-						if model and typeof(model) == "Instance" then
-							for _, p in ipairs(model:GetDescendants()) do
-								if p:IsA("BasePart") then table.insert(parts, p) end
-							end
-							break
-						end
+				if type(obj) ~= "table" then continue end
+				local hero = rawget(obj, "_heroModel")
+				local firearm = rawget(obj, "_firearm")
+				local actor = rawget(obj, "_actor")
+				if not (hero and firearm and actor) then continue end
+				-- check local player
+				local isLocal = actor.IsLocalPlayer or
+					(ReplicatorService and ReplicatorService.LocalActor and actor == ReplicatorService.LocalActor)
+				if not isLocal then continue end
+				if typeof(hero) == "Instance" then
+					for _, p in ipairs(hero:GetDescendants()) do
+						if p:IsA("BasePart") then table.insert(parts, p) end
 					end
-					if #parts > 0 then break end
 				end
+				local lod = rawget(obj, "_lodModel")
+				if lod and typeof(lod) == "Instance" then
+					for _, p in ipairs(lod:GetDescendants()) do
+						if p:IsA("BasePart") then table.insert(parts, p) end
+					end
+				end
+				if #parts > 0 then break end
 			end
 		end
 	end
+
 	return parts
 end
 
@@ -3469,7 +3494,7 @@ function RainbowGun.Start()
 		RG_Tick(dt)
 	end)
 	table.insert(getgenv().Moon_Connections, RainbowGun._connection)
-	print("[RainbowGun] Started")
+	print("[RainbowGun] Started — parts found: " .. #RainbowGun._parts)
 end
 
 function RainbowGun.Stop()
@@ -3520,7 +3545,8 @@ S_RG:AddButton({
 		RainbowGun._originals = {}
 		RainbowGun._parts = {}
 		RainbowGun._lastScan = 0
-		Notifier.new({ Title = "Rainbow Gun", Content = "Rescanned weapon parts", Duration = 2 })
+		local found = RG_ScanParts()
+		Notifier.new({ Title = "Rainbow Gun", Content = "Found " .. #found .. " parts", Duration = 3 })
 	end
 })
 
