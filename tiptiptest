@@ -158,7 +158,6 @@ function MoonUI.new(Data)
 			if SaveManager.SetSubFolder then SaveManager:SetSubFolder("specific-place") end
 			SaveManager:BuildConfigSection(SettingsTab); ThemeManager:ApplyToTab(SettingsTab)
 			SaveManager:LoadAutoloadConfig()
-			Wrapped._rawSettingsTab = SettingsTab  -- expose for Delete Config button
 			return { Init = function() end }
 		end,
 		SetMenuKey = function(_, Key) task.defer(function() Library.ToggleKeybind = getgenv().Options and getgenv().Options.MenuKeybind end) end,
@@ -2013,28 +2012,6 @@ end })
 local ConfigUI=Window:DrawConfig({ Name="Configs", Icon="folder", Config=_ConfigManager })
 ConfigUI:Init()
 
--- Delete Config button — Settings tab
-pcall(function()
-	local rawTab = Window._rawSettingsTab
-	if not rawTab then return end
-	local gb = rawTab:AddRightGroupbox("Danger Zone")
-	gb:AddButton("Delete Config", function()
-		pcall(function()
-			local folder = "Tokaihub/specific-game/specific-place"
-			local autoloadPath = folder .. "/autoload.txt"
-			local configName = (isfile and isfile(autoloadPath) and readfile(autoloadPath)) or "Tokaihub"
-			local configPath = folder .. "/" .. configName .. ".json"
-			if isfile and isfile(configPath) then
-				delfile(configPath)
-				if isfile(autoloadPath) then delfile(autoloadPath) end
-				Library:Notify("Config deleted: " .. configName, 3)
-			else
-				Library:Notify("No saved config found.", 3)
-			end
-		end)
-	end)
-end)
-
 -- Main Loop
 local frameCount=0
 local espLoop=RunService.RenderStepped:Connect(function()
@@ -3180,34 +3157,16 @@ pcall(function()
 -- THIRD PERSON UNLOCK
 -- Force FIRST_PERSON = false in GC memory → unlock 3rd person camera
 -- getgc rescan mỗi 1s — không rescan mỗi frame, getgc expensive
-local ThirdPerson = { Enabled = false, _connection = nil, _lastScan = 0, _origValues = {} }
+local ThirdPerson = { Enabled = false, _connection = nil, _lastScan = 0 }
 
 local function TP_Apply()
     local ok, gc = pcall(function() return getgc(true) end)
     if not ok or not gc then return end
     for _, obj in pairs(gc) do
         if type(obj) == "table" and rawget(obj, "FIRST_PERSON") ~= nil then
-            -- Lưu giá trị gốc lần đầu tiên
-            if ThirdPerson._origValues[obj] == nil then
-                ThirdPerson._origValues[obj] = rawget(obj, "FIRST_PERSON")
-            end
             pcall(function() obj.FIRST_PERSON = false end)
         end
     end
-end
-
-local function TP_Restore()
-    -- Restore giá trị GỐC — không hardcode true, vì original có thể là 2 hoặc false
-    for obj, origVal in pairs(ThirdPerson._origValues) do
-        pcall(function() obj.FIRST_PERSON = origVal end)
-    end
-    ThirdPerson._origValues = {}
-    -- Force Zoom = 0 trực tiếp — v34.Zoom = 0 trong CharacterCamera.Update là first person
-    pcall(function()
-        if ReplicatorService and ReplicatorService.LocalActor then
-            ReplicatorService.LocalActor.Zoom = 0
-        end
-    end)
 end
 
 local function TP_Tick()
@@ -3231,7 +3190,6 @@ function ThirdPerson.Stop()
         pcall(function() ThirdPerson._connection:Disconnect() end)
         ThirdPerson._connection = nil
     end
-    TP_Restore()
 end
 
 getgenv().ThirdPerson = ThirdPerson
@@ -3380,262 +3338,191 @@ end})
 print("[VehicleTeleport] Loaded")
 end)
 
-
-
--- ==========================================
--- FULLBRIGHT
--- ==========================================
 pcall(function()
-local FullBright = { Enabled=false, _original={}, _applied=false }
-
-local function FB_Store()
-	local L = game:GetService("Lighting")
-	FullBright._original = {
-		Brightness    = L.Brightness,
-		ClockTime     = L.ClockTime,
-		FogEnd        = L.FogEnd,
-		GlobalShadows = L.GlobalShadows,
-		Ambient       = L.Ambient,
-	}
-end
-
-local function FB_Apply()
-	local L = game:GetService("Lighting")
-	L.Brightness    = 2
-	L.ClockTime     = 12
-	L.FogEnd        = 100000
-	L.GlobalShadows = false
-	L.Ambient       = Color3.new(1, 1, 1)
-	FullBright._applied = true
-end
-
-local function FB_Restore()
-	local L = game:GetService("Lighting")
-	for prop, val in pairs(FullBright._original) do
-		pcall(function() L[prop] = val end)
-	end
-	FullBright._applied = false
-end
-
-getgenv().FullBright = FullBright
-
-local S_FB = MiscTab:DrawSection({Name="Full Bright", Position="left"})
-S_FB:AddToggle({Name="Enable Full Bright", Flag="FB_Enabled", Default=false,
-	Callback=function(v)
-		FullBright.Enabled = v
-		if v then
-			pcall(FB_Store)
-			pcall(FB_Apply)
-		else
-			pcall(FB_Restore)
-		end
-	end})
-print("[FullBright] Loaded")
-end)
-
-
-
 -- ==========================================
--- GUN APPEARANCE
--- Dùng getgc tìm ViewmodelClass qua fingerprint _container+_cutaways+WorldModel
--- Không scan workspace.CurrentCamera — tránh hit objects không liên quan
+-- RAINBOW GUN SKIN
+-- Tô màu rainbow cho weapon model của local player
+-- Scan parts qua InventoryService + GC fallback
 -- ==========================================
-pcall(function()
-local GunAppear = {
-    Enabled=false, Transparency=0,
-    Color=Color3.new(1,1,1), Rainbow=false, RainbowSpeed=5,
-    _connection=nil, _hue=0, _origData={},
-}
-
-local _gaLastScan, _gaCached = 0, {}
-
-local function GA_FindViewmodels()
-    -- Fingerprint ViewmodelClass: table có _container(Model) + _cutaways(table) + WorldModel
-    local vms = {}
-    local ok, gc = pcall(function() return getgc(true) end)
-    if not ok or not gc then return vms end
-    for _, obj in pairs(gc) do
-        if type(obj) == "table"
-            and rawget(obj, "_container") ~= nil
-            and rawget(obj, "_cutaways") ~= nil
-            and rawget(obj, "WorldModel") ~= nil
-        then
-            vms[#vms+1] = obj
-        end
-    end
-    return vms
-end
-
-local function GA_GetParts()
-    local now = tick()
-    if now - _gaLastScan < 0.5 and #_gaCached > 0 then return _gaCached end
-    _gaLastScan = now
-    local parts = {}
-    pcall(function()
-        local vms = GA_FindViewmodels()
-        for _, vm in ipairs(vms) do
-            local container = rawget(vm, "_container")
-            if container and container:IsA("Model") then
-                for _, obj in ipairs(container:GetDescendants()) do
-                    if obj:IsA("BasePart") and obj.Transparency < 0.99 then
-                        parts[#parts+1] = obj
-                    end
-                end
-            end
-        end
-    end)
-    _gaCached = parts
-    return parts
-end
-
-local function GA_Tick(dt)
-    if not GunAppear.Enabled then return end
-    local color = GunAppear.Color
-    if GunAppear.Rainbow then
-        GunAppear._hue = (GunAppear._hue + dt * GunAppear.RainbowSpeed * 0.25) % 1
-        color = Color3.fromHSV(GunAppear._hue, 1, 1)
-    end
-    for _, part in ipairs(GA_GetParts()) do
-        pcall(function()
-            if not GunAppear._origData[part] then
-                GunAppear._origData[part] = { Color=part.Color, Transparency=part.Transparency }
-            end
-            part.Transparency = GunAppear.Transparency
-            part.Color = color
-        end)
-    end
-end
-
-function GunAppear.Start()
-    if GunAppear._connection then return end
-    GunAppear._connection = RunService.Heartbeat:Connect(GA_Tick)
-    table.insert(getgenv().Moon_Connections, GunAppear._connection)
-end
-
-function GunAppear.Stop()
-    if GunAppear._connection then
-        pcall(function() GunAppear._connection:Disconnect() end)
-        GunAppear._connection = nil
-    end
-    for part, data in pairs(GunAppear._origData) do
-        pcall(function() part.Color=data.Color; part.Transparency=data.Transparency end)
-    end
-    GunAppear._origData = {}
-    _gaCached = {}
-end
-
-getgenv().GunAppear = GunAppear
-
-local S_GA = MiscTab:DrawSection({Name="Gun Appearance", Position="right"})
-S_GA:AddToggle({Name="Enable Gun Appearance", Flag="GA_Enabled", Default=false,
-    Callback=function(v) GunAppear.Enabled=v; if v then GunAppear.Start() else GunAppear.Stop() end end})
-S_GA:AddSlider({Name="Transparency", Flag="GA_Trans", Min=0, Max=100, Default=0, Suffix="%",
-    Callback=function(v) GunAppear.Transparency=v/100 end})
-S_GA:AddColorPicker({Name="Gun Color", Flag="GA_Color", Default=Color3.new(1,1,1),
-    Callback=function(v) GunAppear.Color=v end})
-S_GA:AddToggle({Name="Rainbow Mode", Flag="GA_Rainbow", Default=false,
-    Callback=function(v) GunAppear.Rainbow=v end})
-S_GA:AddSlider({Name="Rainbow Speed", Flag="GA_Speed", Min=1, Max=20, Default=5, Suffix="x",
-    Callback=function(v) GunAppear.RainbowSpeed=v end})
-print("[GunAppear] Loaded")
-end)
-
--- Deferred autoload: chạy lại LoadAutoloadConfig sau khi TẤT CẢ pcall blocks
--- đã register flags của mình — fix bug config không lưu AuraKill/AutoLockpick/BulletTracer/v.v.
-task.spawn(function()
-	task.wait(1)
-	pcall(function() SaveManager:LoadAutoloadConfig() end)
-end)
-
-
-pcall(function()
--- SKYBOX COLOR CUSTOMIZER
--- Thay đổi màu bầu trời qua Lighting.Ambient + Atmosphere + ColorCorrectionEffect
-local _L = game:GetService("Lighting")
-local Sky = {
+local RainbowGun = {
 	Enabled = false,
-	Color = Color3.fromRGB(135, 206, 235),
-	_origAmbient = nil,
-	_origOutdoor = nil,
-	_origFog = nil,
-	_origAtm = nil,
-	_effect = nil,
+	Transparency = 0,
+	Speed = 1.0,
+	Material = Enum.Material.Neon,
+	_connection = nil,
+	_parts = {},
+	_originals = {},
+	_lastScan = 0,
 }
 
-local function Sky_Apply(color)
-	pcall(function()
-		-- Lưu giá trị gốc lần đầu
-		if Sky._origAmbient == nil then
-			Sky._origAmbient   = _L.Ambient
-			Sky._origOutdoor   = _L.OutdoorAmbient
-			Sky._origFog       = _L.FogColor
-			local atm = _L:FindFirstChildOfClass("Atmosphere")
-			if atm then
-				Sky._origAtm = {
-					Color   = atm.Color,
-					Density = atm.Density,
-					Haze    = atm.Haze,
-				}
+local function RG_ScanParts()
+	local parts = {}
+	-- Method 1: InventoryService.Equipped handler models
+	if InventoryService and InventoryService.Equipped then
+		local handler = InventoryService.Equipped.Handler or InventoryService.Equipped
+		for _, field in ipairs({"_model","_viewmodel","_vm","Model","Viewmodel"}) do
+			local model = rawget(handler, field)
+			if model and typeof(model) == "Instance" then
+				for _, p in ipairs(model:GetDescendants()) do
+					if p:IsA("BasePart") then table.insert(parts, p) end
+				end
 			end
 		end
-		-- Set ambient + fog
-		_L.Ambient        = color
-		_L.OutdoorAmbient = color
-		_L.FogColor       = color
-		-- Set atmosphere nếu có
-		local atm = _L:FindFirstChildOfClass("Atmosphere")
-		if atm then
-			atm.Color   = color
-			atm.Density = 0.3
-			atm.Haze    = 2
+	end
+	-- Method 2: LocalPlayer character tools
+	if #parts == 0 and LocalPlayer.Character then
+		for _, obj in ipairs(LocalPlayer.Character:GetDescendants()) do
+			if obj:IsA("BasePart") then table.insert(parts, obj) end
 		end
-		-- ColorCorrectionEffect → tint toàn cảnh
-		if not Sky._effect or not Sky._effect.Parent then
-			local existing = _L:FindFirstChild("TokaihubSky")
-			Sky._effect = existing or Instance.new("ColorCorrectionEffect")
-			Sky._effect.Name = "TokaihubSky"
-			pcall(function() Sky._effect.Parent = _L end)
+	end
+	-- Method 3: GC scan — tìm FirearmInventory instance có _model
+	if #parts == 0 then
+		local ok, gc = pcall(function() return getgc(true) end)
+		if ok and gc then
+			for _, obj in pairs(gc) do
+				if type(obj) == "table"
+					and rawget(obj, "_firearm")
+					and rawget(obj, "_bulletsShot")
+				then
+					for _, field in ipairs({"_model","_viewmodel","_vm"}) do
+						local model = rawget(obj, field)
+						if model and typeof(model) == "Instance" then
+							for _, p in ipairs(model:GetDescendants()) do
+								if p:IsA("BasePart") then table.insert(parts, p) end
+							end
+							break
+						end
+					end
+					if #parts > 0 then break end
+				end
+			end
 		end
-		Sky._effect.TintColor  = color
-		Sky._effect.Saturation = 0.3
-		Sky._effect.Enabled    = true
-	end)
+	end
+	return parts
 end
 
-local function Sky_Restore()
-	pcall(function()
-		if Sky._origAmbient then
-			_L.Ambient        = Sky._origAmbient
-			_L.OutdoorAmbient = Sky._origOutdoor
-			_L.FogColor       = Sky._origFog
+local function RG_SaveOriginals(parts)
+	for _, p in ipairs(parts) do
+		local id = tostring(p)
+		if not RainbowGun._originals[id] then
+			RainbowGun._originals[id] = {
+				part = p,
+				Color = p.Color,
+				Material = p.Material,
+				Transparency = p.Transparency,
+			}
 		end
-		local atm = _L:FindFirstChildOfClass("Atmosphere")
-		if atm and Sky._origAtm then
-			atm.Color   = Sky._origAtm.Color
-			atm.Density = Sky._origAtm.Density
-			atm.Haze    = Sky._origAtm.Haze
-		end
-		if Sky._effect and Sky._effect.Parent then
-			pcall(function() Sky._effect:Destroy() end)
-		end
-		Sky._effect      = nil
-		Sky._origAmbient = nil
-		Sky._origAtm     = nil
-	end)
+	end
 end
 
-getgenv().SkyboxColor = Sky
+local function RG_Restore()
+	for _, data in pairs(RainbowGun._originals) do
+		local p = data.part
+		if p and p.Parent then
+			pcall(function()
+				p.Color = data.Color
+				p.Material = data.Material
+				p.Transparency = data.Transparency
+			end)
+		end
+	end
+	RainbowGun._originals = {}
+	RainbowGun._parts = {}
+end
 
-local S_Sky = MiscTab:DrawSection({Name="Skybox Color", Position="right"})
-S_Sky:AddToggle({Name="Enable Skybox Color", Flag="Sky_Enabled", Default=false,
-	Callback=function(v)
-		Sky.Enabled = v
-		if v then Sky_Apply(Sky.Color) else Sky_Restore() end
-	end})
-S_Sky:AddColorPicker({Name="Sky Color", Flag="Sky_Color", Default=Color3.fromRGB(135, 206, 235),
-	Callback=function(color)
-		Sky.Color = color
-		if Sky.Enabled then Sky_Apply(color) end
-	end})
-print("[SkyboxColor] Loaded")
+local _rgHue = 0
+
+local function RG_Tick(dt)
+	if not RainbowGun.Enabled then return end
+	local now = tick()
+	-- Rescan mỗi 0.5s để bắt weapon swap
+	if (now - RainbowGun._lastScan) > 0.5 then
+		RainbowGun._lastScan = now
+		local newParts = RG_ScanParts()
+		if #newParts > 0 then
+			if #newParts ~= #RainbowGun._parts then
+				RG_Restore()
+				RG_SaveOriginals(newParts)
+			end
+			RainbowGun._parts = newParts
+		end
+	end
+	if #RainbowGun._parts == 0 then return end
+	_rgHue = (_rgHue + RainbowGun.Speed * dt) % 1
+	local color = Color3.fromHSV(_rgHue, 1, 1)
+	for _, p in ipairs(RainbowGun._parts) do
+		if p and p.Parent then
+			pcall(function()
+				p.Color = color
+				p.Material = RainbowGun.Material
+				p.Transparency = RainbowGun.Transparency
+			end)
+		end
+	end
+end
+
+function RainbowGun.Start()
+	if RainbowGun._connection then return end
+	RainbowGun._parts = RG_ScanParts()
+	RG_SaveOriginals(RainbowGun._parts)
+	RainbowGun._connection = RunService.Heartbeat:Connect(function(dt)
+		RG_Tick(dt)
+	end)
+	table.insert(getgenv().Moon_Connections, RainbowGun._connection)
+	print("[RainbowGun] Started")
+end
+
+function RainbowGun.Stop()
+	if RainbowGun._connection then
+		pcall(function() RainbowGun._connection:Disconnect() end)
+		RainbowGun._connection = nil
+	end
+	RG_Restore()
+	print("[RainbowGun] Stopped")
+end
+
+getgenv().RainbowGun = RainbowGun
+
+local S_RG = MiscTab:DrawSection({ Name = "Rainbow Gun", Position = "right" })
+
+S_RG:AddToggle({
+	Name = "Enable Rainbow Gun", Flag = "RG_Enabled", Default = false,
+	Callback = function(v)
+		RainbowGun.Enabled = v
+		if v then RainbowGun.Start() else RainbowGun.Stop() end
+	end
+})
+
+S_RG:AddSlider({
+	Name = "Speed", Flag = "RG_Speed",
+	Min = 1, Max = 20, Default = 5, Rounding = 0,
+	Callback = function(v) RainbowGun.Speed = v / 5 end
+})
+
+S_RG:AddSlider({
+	Name = "Transparency", Flag = "RG_Transparency",
+	Min = 0, Max = 100, Default = 0, Rounding = 0,
+	Callback = function(v) RainbowGun.Transparency = v / 100 end
+})
+
+S_RG:AddDropdown({
+	Name = "Material", Flag = "RG_Material",
+	Values = { "Neon", "SmoothPlastic", "Glass", "ForceField" },
+	Default = "Neon",
+	Callback = function(v)
+		RainbowGun.Material = Enum.Material[v]
+	end
+})
+
+S_RG:AddButton({
+	Name = "Force Rescan",
+	Callback = function()
+		RainbowGun._originals = {}
+		RainbowGun._parts = {}
+		RainbowGun._lastScan = 0
+		Notifier.new({ Title = "Rainbow Gun", Content = "Rescanned weapon parts", Duration = 2 })
+	end
+})
+
+print("[RainbowGun] Loaded")
 end)
