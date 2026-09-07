@@ -3338,98 +3338,101 @@ end})
 print("[VehicleTeleport] Loaded")
 end)
 
+
 pcall(function()
 -- ==========================================
--- RAINBOW GUN SKIN v8
--- Scan: WeaponManager.Visuals → _heroModel/_lodModel (đã confirm ra 12 parts)
--- Fix: set CẢ BasePart.Color VÀ SurfaceAppearance.Color3
--- isTintable_1.lua: AlphaMode.TintMask → SA.Color3 là property render màu thật
+-- RAINBOW GUN SKIN v9
+-- Source confirmed từ FirearmInventoryReplicator_1.lua line 783:
+--   ctrl._fpFirearm = v_u_16.Deserialize(ctrl._build)
+-- line 605: ctrl._fpFirearm.ParentModel.PrimaryPart
+-- → ctrl._fpFirearm.ParentModel là Model weapon FP thật sự
+-- Dùng WeaponManager.Equipped (= InventoryService.Equipped.Handler) trực tiếp
 -- ==========================================
 local RainbowGun = {
-	Enabled = false,
+	Enabled      = false,
 	Transparency = 0,
-	Speed = 1.0,
-	Material = Enum.Material.Neon,
-	_connection = nil,
-	_parts = {},
-	_originals = {},
-	_lastScan = 0,
-	_lastKey = nil,
+	Speed        = 1.0,
+	Material     = Enum.Material.Neon,
+	_connection  = nil,
+	_targets     = {},   -- { part=BasePart, sa=SurfaceAppearance|nil, origColor, origMat, origTrans, origSAColor }
+	_lastScan    = 0,
+	_lastKey     = nil,
 }
 
-local function RG_ScanParts()
-	local parts = {}
+local function RG_GetTargets()
+	local targets = {}
 	local key = nil
 
-	RefreshFirearmControllers(true)
+	-- Path: WeaponManager.Equipped = InventoryService.Equipped.Handler (FirearmInventory)
+	-- _fpFirearm = Deserialize(build) → AttachableComponent
+	-- _fpFirearm.ParentModel = Model chứa weapon parts
+	local ctrl = WeaponManager.Equipped
+	if not ctrl then
+		RefreshFirearmControllers(true)
+		ctrl = WeaponManager.Equipped
+	end
 
-	local myActor = ReplicatorService and ReplicatorService.LocalActor
-	local visuals = WeaponManager and WeaponManager.Visuals
+	if ctrl then
+		key = tostring(ctrl)
+		local fp = rawget(ctrl, "_fpFirearm")
+		if fp then
+			local pm = rawget(fp, "ParentModel") or fp.ParentModel
+			if pm and typeof(pm) == "Instance" then
+				for _, obj in ipairs(pm:GetDescendants()) do
+					if obj:IsA("BasePart") then
+						local sa = obj:FindFirstChildOfClass("SurfaceAppearance")
+						table.insert(targets, {
+							part       = obj,
+							sa         = sa,
+							origColor  = obj.Color,
+							origMat    = obj.Material,
+							origTrans  = obj.Transparency,
+							origSACol  = sa and sa.Color3,
+						})
+					end
+				end
+			end
+		end
 
-	if visuals and myActor then
-		for _, ctrl in ipairs(visuals) do
-			if type(ctrl) == "table" then
-				local actor = rawget(ctrl, "_actor")
-				if actor == myActor then
-					key = tostring(ctrl)
-					local hero = rawget(ctrl, "_heroModel")
-					if hero and typeof(hero) == "Instance" then
-						for _, p in ipairs(hero:GetDescendants()) do
-							if p:IsA("BasePart") then
-								table.insert(parts, p)
-							end
-						end
+		-- Fallback: _heroModel nếu _fpFirearm nil (e.g. third-person only)
+		if #targets == 0 then
+			local hero = rawget(ctrl, "_heroModel")
+			if hero and typeof(hero) == "Instance" then
+				for _, obj in ipairs(hero:GetDescendants()) do
+					if obj:IsA("BasePart") then
+						local sa = obj:FindFirstChildOfClass("SurfaceAppearance")
+						table.insert(targets, {
+							part       = obj,
+							sa         = sa,
+							origColor  = obj.Color,
+							origMat    = obj.Material,
+							origTrans  = obj.Transparency,
+							origSACol  = sa and sa.Color3,
+						})
 					end
-					local lod = rawget(ctrl, "_lodModel")
-					if lod and typeof(lod) == "Instance" then
-						for _, p in ipairs(lod:GetDescendants()) do
-							if p:IsA("BasePart") then
-								table.insert(parts, p)
-							end
-						end
-					end
-					if #parts > 0 then break end
 				end
 			end
 		end
 	end
 
-	return parts, key
-end
-
-local function RG_SaveOriginals(parts)
-	for _, p in ipairs(parts) do
-		local id = tostring(p)
-		if not RainbowGun._originals[id] then
-			local sa = p:FindFirstChildOfClass("SurfaceAppearance")
-			RainbowGun._originals[id] = {
-				part        = p,
-				Color       = p.Color,
-				Material    = p.Material,
-				Transparency = p.Transparency,
-				SA          = sa,
-				SAColor     = sa and sa.Color3,
-			}
-		end
-	end
+	return targets, key
 end
 
 local function RG_Restore()
-	for _, data in pairs(RainbowGun._originals) do
-		local p = data.part
+	for _, t in ipairs(RainbowGun._targets) do
+		local p = t.part
 		if p and p.Parent then
 			pcall(function()
-				p.Color       = data.Color
-				p.Material    = data.Material
-				p.Transparency = data.Transparency
-				if data.SA and data.SA.Parent then
-					data.SA.Color3 = data.SAColor
+				p.Color       = t.origColor
+				p.Material    = t.origMat
+				p.Transparency = t.origTrans
+				if t.sa and t.sa.Parent then
+					t.sa.Color3 = t.origSACol
 				end
 			end)
 		end
 	end
-	RainbowGun._originals = {}
-	RainbowGun._parts = {}
+	RainbowGun._targets = {}
 end
 
 local _rgHue = 0
@@ -3437,36 +3440,35 @@ local _rgHue = 0
 local function RG_Tick(dt)
 	if not RainbowGun.Enabled then return end
 	local now = tick()
+
 	if (now - RainbowGun._lastScan) > 0.5 then
 		RainbowGun._lastScan = now
-		local newParts, key = RG_ScanParts()
-		if #newParts > 0 then
-			if key ~= RainbowGun._lastKey or #newParts ~= #RainbowGun._parts then
-				RG_Restore()
-				RG_SaveOriginals(newParts)
-				RainbowGun._lastKey = key
-			end
-			RainbowGun._parts = newParts
-		else
-			if #RainbowGun._parts > 0 then RG_Restore() end
+		local newTargets, key = RG_GetTargets()
+		if key ~= RainbowGun._lastKey then
+			RG_Restore()
+			RainbowGun._lastKey = key
+		end
+		if #newTargets > 0 then
+			RainbowGun._targets = newTargets
+		elseif #RainbowGun._targets > 0 then
+			RG_Restore()
 		end
 	end
-	if #RainbowGun._parts == 0 then return end
+
+	if #RainbowGun._targets == 0 then return end
 
 	_rgHue = (_rgHue + RainbowGun.Speed * dt) % 1
 	local color = Color3.fromHSV(_rgHue, 1, 1)
 
-	for _, p in ipairs(RainbowGun._parts) do
+	for _, t in ipairs(RainbowGun._targets) do
+		local p = t.part
 		if p and p.Parent then
 			pcall(function()
-				-- BasePart.Color
 				p.Color        = color
 				p.Material     = RainbowGun.Material
 				p.Transparency = RainbowGun.Transparency
-				-- SurfaceAppearance.Color3 — cái này mới render màu thật
-				local sa = p:FindFirstChildOfClass("SurfaceAppearance")
-				if sa then
-					sa.Color3 = color
+				if t.sa and t.sa.Parent then
+					t.sa.Color3 = color
 				end
 			end)
 		end
@@ -3475,15 +3477,14 @@ end
 
 function RainbowGun.Start()
 	if RainbowGun._connection then return end
-	local parts, key = RG_ScanParts()
-	RainbowGun._parts    = parts
-	RainbowGun._lastKey  = key
-	RG_SaveOriginals(parts)
+	local t, k = RG_GetTargets()
+	RainbowGun._targets = t
+	RainbowGun._lastKey = k
 	RainbowGun._connection = RunService.Heartbeat:Connect(function(dt)
 		RG_Tick(dt)
 	end)
 	table.insert(getgenv().Moon_Connections, RainbowGun._connection)
-	print("[RainbowGun] Started — parts: " .. #parts)
+	print("[RainbowGun] Started — targets: " .. #t)
 end
 
 function RainbowGun.Stop()
@@ -3508,35 +3509,32 @@ S_RG:AddToggle({
 })
 
 S_RG:AddSlider({
-	Name = "Speed", Flag = "RG_Speed",
+	Name     = "Speed", Flag = "RG_Speed",
 	Min = 1, Max = 20, Default = 5, Rounding = 0,
 	Callback = function(v) RainbowGun.Speed = v / 5 end
 })
 
 S_RG:AddSlider({
-	Name = "Transparency", Flag = "RG_Transparency",
+	Name     = "Transparency", Flag = "RG_Transparency",
 	Min = 0, Max = 100, Default = 0, Rounding = 0,
 	Callback = function(v) RainbowGun.Transparency = v / 100 end
 })
 
 S_RG:AddDropdown({
-	Name = "Material", Flag = "RG_Material",
-	Values = { "Neon", "SmoothPlastic", "Glass", "ForceField" },
-	Default = "Neon",
-	Callback = function(v)
-		RainbowGun.Material = Enum.Material[v]
-	end
+	Name     = "Material", Flag = "RG_Material",
+	Values   = { "Neon", "SmoothPlastic", "Glass", "ForceField" },
+	Default  = "Neon",
+	Callback = function(v) RainbowGun.Material = Enum.Material[v] end
 })
 
 S_RG:AddButton({
 	Name = "Force Rescan",
 	Callback = function()
-		RainbowGun._originals = {}
-		RainbowGun._parts    = {}
+		RainbowGun._targets  = {}
 		RainbowGun._lastScan = 0
 		RainbowGun._lastKey  = nil
-		local found, _       = RG_ScanParts()
-		Notifier.new({ Title = "Rainbow Gun", Content = "Found " .. #found .. " parts", Duration = 3 })
+		local found, _ = RG_GetTargets()
+		Notifier.new({ Title = "Rainbow Gun", Content = "Found " .. #found .. " targets", Duration = 3 })
 	end
 })
 
