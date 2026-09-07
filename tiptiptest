@@ -3340,11 +3340,11 @@ end)
 
 pcall(function()
 -- ==========================================
--- RAINBOW GUN SKIN v6
--- Path xác nhận từ source:
--- InventoryService.Equipped.Handler = FirearmInventory instance
--- Handler._firearm = weapon object (AttachableComponent)
--- Handler._firearm.ParentModel = Model instance trong Character
+-- RAINBOW GUN SKIN v7
+-- Dùng WeaponManager.Visuals (FirearmInventoryReplicator collection)
+-- đã được RefreshFirearmControllers() populate sẵn trong script
+-- Filter _actor == ReplicatorService.LocalActor → lấy _heroModel + _lodModel
+-- Confirmed từ FirearmInventoryReplicator_1.lua constructor line 488-504
 -- ==========================================
 local RainbowGun = {
 	Enabled = false,
@@ -3355,64 +3355,61 @@ local RainbowGun = {
 	_parts = {},
 	_originals = {},
 	_lastScan = 0,
-	_lastHandlerKey = nil,
+	_lastKey = nil,
 }
-
-local function RG_GetParentModel()
-	-- Path: InventoryService → Equipped → Handler → _firearm → ParentModel
-	local IS = InventoryService
-	if not IS then return nil end
-
-	-- InventoryService là singleton — lấy instance local player
-	-- Trong script context: getgenv().InventoryService hoặc tìm qua GC
-	local inv = rawget(IS, "Equipped") and IS
-	if not inv then
-		-- InventoryService có thể là class — tìm instance qua _inventories
-		local ok, gc = pcall(function() return getgc(true) end)
-		if ok and gc then
-			for _, obj in pairs(gc) do
-				if type(obj) ~= "table" then continue end
-				if rawget(obj, "_inventories") and rawget(obj, "Equipped") then
-					inv = obj
-					break
-				end
-			end
-		end
-	end
-
-	if not inv then return nil end
-
-	local equipped = rawget(inv, "Equipped")
-	if not equipped then return nil end
-
-	local handler = rawget(equipped, "Handler")
-	if not handler then
-		-- Equipped có thể là item table, Handler là field trực tiếp
-		handler = equipped.Handler
-	end
-	if not handler then return nil end
-
-	local firearm = rawget(handler, "_firearm")
-	if not firearm then return nil end
-
-	local pm = rawget(firearm, "ParentModel")
-	if not pm then
-		-- ParentModel là field trên firearm object
-		pm = firearm.ParentModel
-	end
-	if not pm or typeof(pm) ~= "Instance" then return nil end
-
-	return pm, tostring(handler)
-end
 
 local function RG_ScanParts()
 	local parts = {}
-	local pm, key = RG_GetParentModel()
-	if not pm then return parts, nil end
+	local key = nil
 
-	for _, p in ipairs(pm:GetDescendants()) do
-		if p:IsA("BasePart") then
-			table.insert(parts, p)
+	RefreshFirearmControllers(true)
+
+	local myActor = ReplicatorService and ReplicatorService.LocalActor
+	local visuals = WeaponManager and WeaponManager.Visuals
+
+	if visuals and myActor then
+		for _, ctrl in ipairs(visuals) do
+			if type(ctrl) ~= "table" then continue end
+			local actor = rawget(ctrl, "_actor")
+			if actor ~= myActor then continue end
+
+			key = tostring(ctrl)
+
+			-- _heroModel = first-person weapon model
+			local hero = rawget(ctrl, "_heroModel")
+			if hero and typeof(hero) == "Instance" then
+				for _, p in ipairs(hero:GetDescendants()) do
+					if p:IsA("BasePart") then table.insert(parts, p) end
+				end
+			end
+
+			-- _lodModel = third-person weapon model
+			local lod = rawget(ctrl, "_lodModel")
+			if lod and typeof(lod) == "Instance" then
+				for _, p in ipairs(lod:GetDescendants()) do
+					if p:IsA("BasePart") then table.insert(parts, p) end
+				end
+			end
+
+			if #parts > 0 then break end
+		end
+	end
+
+	-- Fallback: InventoryService.Equipped.Handler._firearm.ParentModel
+	if #parts == 0 then
+		local inv = InventoryService
+		if inv and inv.Equipped and inv.Equipped.Handler then
+			local handler = inv.Equipped.Handler
+			local firearm = rawget(handler, "_firearm")
+			if firearm then
+				local pm = rawget(firearm, "ParentModel") or firearm.ParentModel
+				if pm and typeof(pm) == "Instance" then
+					key = tostring(handler)
+					for _, p in ipairs(pm:GetDescendants()) do
+						if p:IsA("BasePart") then table.insert(parts, p) end
+					end
+				end
+			end
 		end
 	end
 
@@ -3457,17 +3454,14 @@ local function RG_Tick(dt)
 		RainbowGun._lastScan = now
 		local newParts, key = RG_ScanParts()
 		if #newParts > 0 then
-			if key ~= RainbowGun._lastHandlerKey or #newParts ~= #RainbowGun._parts then
+			if key ~= RainbowGun._lastKey or #newParts ~= #RainbowGun._parts then
 				RG_Restore()
 				RG_SaveOriginals(newParts)
-				RainbowGun._lastHandlerKey = key
+				RainbowGun._lastKey = key
 			end
 			RainbowGun._parts = newParts
 		else
-			-- Weapon unequipped — restore và clear
-			if #RainbowGun._parts > 0 then
-				RG_Restore()
-			end
+			if #RainbowGun._parts > 0 then RG_Restore() end
 		end
 	end
 	if #RainbowGun._parts == 0 then return end
@@ -3488,7 +3482,7 @@ function RainbowGun.Start()
 	if RainbowGun._connection then return end
 	local parts, key = RG_ScanParts()
 	RainbowGun._parts = parts
-	RainbowGun._lastHandlerKey = key
+	RainbowGun._lastKey = key
 	RG_SaveOriginals(parts)
 	RainbowGun._connection = RunService.Heartbeat:Connect(function(dt)
 		RG_Tick(dt)
@@ -3545,7 +3539,7 @@ S_RG:AddButton({
 		RainbowGun._originals = {}
 		RainbowGun._parts = {}
 		RainbowGun._lastScan = 0
-		RainbowGun._lastHandlerKey = nil
+		RainbowGun._lastKey = nil
 		local found, _ = RG_ScanParts()
 		Notifier.new({ Title = "Rainbow Gun", Content = "Found " .. #found .. " parts", Duration = 3 })
 	end
