@@ -770,8 +770,10 @@ GetCombatTarget = function(mode)
 	table.sort(candidates,function(a,b) return a.score<b.score end)
 	for i=1,#candidates do
 		local candle=candidates[i]; local actor=candle.actor; local char=candle.char
-		local part=char:FindFirstChild(targetPartName)
-		if not part then part=char:FindFirstChild("Head") or char:FindFirstChild("UpperTorso") end
+		local part=(actor.Parts and actor.Parts[targetPartName] and actor.Parts[targetPartName].Parent and actor.Parts[targetPartName])
+			or char:FindFirstChild(targetPartName,true)
+			or char:FindFirstChild("Head",true)
+			or char:FindFirstChild("UpperTorso",true)
 		if part and part.Parent then
 			if IsVisible(actor,part,checkOrigin) then return part,actor end
 			if getgenv().RaycastBudget<=0 then break end
@@ -799,7 +801,12 @@ local function HookController(controller)
 			local combatTarget=ActorManager.SelectedTarget_RB or ActorManager.SelectedTarget_SA
 			local targetActor=ActorManager.SelectedActor_RB or ActorManager.SelectedActor_SA
 			if (Config.SilentAim or Config.RageMode) and combatTarget and targetActor then
-				local targetPos=combatTarget.Position; local gravity=32.2; local muzzle_velocity=2000
+				local targetPos=combatTarget.Position
+				if targetActor.Seat and targetActor.Position then
+					local actorPos=targetActor.Position
+					if (targetPos-actorPos).Magnitude>2 then targetPos=actorPos+Vector3_new(0,1.5,0) end
+				end
+				local gravity=32.2; local muzzle_velocity=2000
 				if self._firearm and self._firearm.Tune then
 					local caliberName=self._firearm.Tune.Caliber; local barrelLen=self._firearm.Tune.Barrel
 					if BulletService and BulletService.GetInfo then
@@ -1170,7 +1177,12 @@ local function InitializeServices()
 				local targetHead=ActorManager.SelectedTarget_RB or ActorManager.SelectedTarget_SA
 				local targetActor=ActorManager.SelectedActor_RB or ActorManager.SelectedActor_SA
 				if targetHead then
-					local targetPos=targetHead.Position; local muzzle_velocity=2000
+					local targetPos=targetHead.Position
+					if targetActor and targetActor.Seat and targetActor.Position then
+						local actorPos=targetActor.Position
+						if (targetPos-actorPos).Magnitude>2 then targetPos=actorPos+Vector3_new(0,1.5,0) end
+					end
+					local muzzle_velocity=2000
 					if p49==lastUsedCaliber then muzzle_velocity=lastUsedVelocity
 					elseif p49 and BulletService.GetInfo then
 						local vel=BulletService:GetInfo(p49,p50)
