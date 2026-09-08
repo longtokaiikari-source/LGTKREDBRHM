@@ -440,6 +440,36 @@ local function GetTargetVelocity(actor, targetPart)
 	return Vector3_new(0,0,0)
 end
 
+local function GetActorPartCFrame(actor, part)
+	if not part then return nil end
+	local root = actor.RootPart
+	if not root or root:IsDescendantOf(Workspace) then return part.CFrame end
+	local pose = typeof(actor.CFrame) == "CFrame" and actor.CFrame.Rotation or CFrame.identity
+	local actorFrame = pose + actor.Position
+	return actorFrame * root.CFrame:ToObjectSpace(part.CFrame)
+end
+
+local function GetActorPartPosition(actor, part)
+	local cf = GetActorPartCFrame(actor, part)
+	if cf then return cf.Position end
+	return actor.Position + Vector3_new(0, 1.5, 0)
+end
+
+local _velSamples = {}
+local function SampleActorVelocity(actor)
+	local now = tick()
+	local sample = _velSamples[actor]
+	local vel = Vector3_new(0,0,0)
+	if sample and sample.model == actor.Character and (now - sample.time) > 0.001 then
+		local measured = (actor.Position - sample.position) / (now - sample.time)
+		if measured.Magnitude < 300 then
+			vel = sample.velocity:Lerp(measured, 0.5)
+		end
+	end
+	_velSamples[actor] = {position=actor.Position, time=now, velocity=vel, model=actor.Character}
+	return vel
+end
+
 function GetSecureContainer()
 	if SecureESPContainer and SecureESPContainer.Parent then return SecureESPContainer end
 	local function TryCreate(parent)
@@ -801,11 +831,7 @@ local function HookController(controller)
 			local combatTarget=ActorManager.SelectedTarget_RB or ActorManager.SelectedTarget_SA
 			local targetActor=ActorManager.SelectedActor_RB or ActorManager.SelectedActor_SA
 			if (Config.SilentAim or Config.RageMode) and combatTarget and targetActor then
-				local targetPos=combatTarget.Position
-				if targetActor.Seat and targetActor.Position then
-					local actorPos=targetActor.Position
-					if (targetPos-actorPos).Magnitude>2 then targetPos=actorPos+Vector3_new(0,1.5,0) end
-				end
+				local targetPos = GetActorPartPosition(targetActor, combatTarget)
 				local gravity=32.2; local muzzle_velocity=2000
 				if self._firearm and self._firearm.Tune then
 					local caliberName=self._firearm.Tune.Caliber; local barrelLen=self._firearm.Tune.Barrel
@@ -814,7 +840,7 @@ local function HookController(controller)
 						if success and vel then muzzle_velocity=vel end
 					end
 				end
-				local targetVelocity = GetTargetVelocity(targetActor, combatTarget)
+				local targetVelocity = SampleActorVelocity(targetActor)
 				local aimPos,travelTime=SolveLead(muzzleCF.Position,targetPos,targetVelocity,muzzle_velocity,gravity)
 				local zeroAngle=0; local actor=self._actor
 				if actor and actor.ADS and actor.ViewModel and actor.ViewModel.Zero then
@@ -1177,18 +1203,16 @@ local function InitializeServices()
 				local targetHead=ActorManager.SelectedTarget_RB or ActorManager.SelectedTarget_SA
 				local targetActor=ActorManager.SelectedActor_RB or ActorManager.SelectedActor_SA
 				if targetHead then
-					local targetPos=targetHead.Position
-					if targetActor and targetActor.Seat and targetActor.Position then
-						local actorPos=targetActor.Position
-						if (targetPos-actorPos).Magnitude>2 then targetPos=actorPos+Vector3_new(0,1.5,0) end
-					end
+					local targetPos = GetActorPartPosition(targetActor, targetHead)
 					local muzzle_velocity=2000
 					if p49==lastUsedCaliber then muzzle_velocity=lastUsedVelocity
 					elseif p49 and BulletService.GetInfo then
 						local vel=BulletService:GetInfo(p49,p50)
 						if vel and vel>0 then muzzle_velocity=vel; lastUsedCaliber=p49; lastUsedVelocity=vel end
 					end
-					local targetVelocity=getgenv()._lastPredVel or Vector3_new(0,0,0); local gravity=32.2
+					local sv = _velSamples[targetActor]
+					local targetVelocity = (sv and sv.velocity) or getgenv()._lastPredVel or Vector3_new(0,0,0)
+					local gravity=32.2
 					if originCF then muzzlePos=originCF.Position end
 					if not muzzlePos and GetMuzzlePosition then muzzlePos=GetMuzzlePosition() end
 					if muzzlePos and targetPos then
@@ -1416,7 +1440,7 @@ local function UpdateCombat(frameId)
 	end
 	local targetPart=targetPart_SA; local targetActor=ActorManager.SelectedActor_SA
 	if targetPart then
-		local rawVel = GetTargetVelocity(targetActor, targetPart)
+		local rawVel = SampleActorVelocity(targetActor)
 		if not getgenv()._lastPredVel then getgenv()._lastPredVel=rawVel
 		else getgenv()._lastPredVel=getgenv()._lastPredVel:Lerp(rawVel,0.15) end
 	end
