@@ -412,6 +412,34 @@ function GetMuzzlePosition()
 	return Camera.CFrame.Position
 end
 
+-- Vehicle-aware velocity resolver cho prediction
+-- Ưu tiên: xe > _oldDirection > character PrimaryPart
+local function GetTargetVelocity(actor, targetPart)
+	if actor.Seat then
+		local seat = actor.Seat
+		if seat.Model and seat.Model.PrimaryPart then
+			local v = seat.Model.PrimaryPart.AssemblyLinearVelocity
+			if v and v.Magnitude > 0.5 then return v end
+		end
+		if VehicleService and VehicleService.Vehicles then
+			for _, veh in pairs(VehicleService.Vehicles) do
+				if veh.Model and (veh.UID == (seat.UID or "") or veh.Model == seat.Model) then
+					if veh.Model.PrimaryPart then
+						return veh.Model.PrimaryPart.AssemblyLinearVelocity or Vector3_new(0,0,0)
+					end
+				end
+			end
+		end
+	end
+	if actor._oldDirection and actor._oldDirection.Magnitude > 0.01 then
+		return actor._oldDirection * 60
+	end
+	if targetPart and targetPart.Parent and targetPart.Parent.PrimaryPart then
+		return targetPart.Parent.PrimaryPart.AssemblyLinearVelocity or Vector3_new(0,0,0)
+	end
+	return Vector3_new(0,0,0)
+end
+
 function GetSecureContainer()
 	if SecureESPContainer and SecureESPContainer.Parent then return SecureESPContainer end
 	local function TryCreate(parent)
@@ -761,11 +789,7 @@ local function HookController(controller)
 						if success and vel then muzzle_velocity=vel end
 					end
 				end
-				local targetVelocity=Vector3_new(0,0,0)
-				if targetActor._oldDirection then targetVelocity=targetActor._oldDirection*60
-				elseif combatTarget.Parent and combatTarget.Parent.PrimaryPart then
-					targetVelocity=combatTarget.Parent.PrimaryPart.AssemblyLinearVelocity or Vector3_new(0,0,0)
-				end
+				local targetVelocity = GetTargetVelocity(targetActor, combatTarget)
 				local aimPos,travelTime=SolveLead(muzzleCF.Position,targetPos,targetVelocity,muzzle_velocity,gravity)
 				local zeroAngle=0; local actor=self._actor
 				if actor and actor.ADS and actor.ViewModel and actor.ViewModel.Zero then
@@ -1367,11 +1391,7 @@ local function UpdateCombat(frameId)
 	end
 	local targetPart=targetPart_SA; local targetActor=ActorManager.SelectedActor_SA
 	if targetPart then
-		local rawVel=Vector3_new(0,0,0)
-		if targetActor and targetActor._oldDirection then rawVel=targetActor._oldDirection*60
-		elseif targetPart.Parent and targetPart.Parent.PrimaryPart then
-			rawVel=targetPart.Parent.PrimaryPart.AssemblyLinearVelocity or Vector3_new(0,0,0)
-		end
+		local rawVel = GetTargetVelocity(targetActor, targetPart)
 		if not getgenv()._lastPredVel then getgenv()._lastPredVel=rawVel
 		else getgenv()._lastPredVel=getgenv()._lastPredVel:Lerp(rawVel,0.15) end
 	end
@@ -3336,207 +3356,4 @@ S_VT:AddButton({ Name="Xóa Toạ Độ", Callback=function()
 end})
 
 print("[VehicleTeleport] Loaded")
-end)
-
-
-pcall(function()
--- ==========================================
--- RAINBOW GUN SKIN v9
--- Source confirmed từ FirearmInventoryReplicator_1.lua line 783:
---   ctrl._fpFirearm = v_u_16.Deserialize(ctrl._build)
--- line 605: ctrl._fpFirearm.ParentModel.PrimaryPart
--- → ctrl._fpFirearm.ParentModel là Model weapon FP thật sự
--- Dùng WeaponManager.Equipped (= InventoryService.Equipped.Handler) trực tiếp
--- ==========================================
-local RainbowGun = {
-	Enabled      = false,
-	Transparency = 0,
-	Speed        = 1.0,
-	Material     = Enum.Material.Neon,
-	_connection  = nil,
-	_targets     = {},   -- { part=BasePart, sa=SurfaceAppearance|nil, origColor, origMat, origTrans, origSAColor }
-	_lastScan    = 0,
-	_lastKey     = nil,
-}
-
-local function RG_GetTargets()
-	local targets = {}
-	local key = nil
-
-	-- Path: WeaponManager.Equipped = InventoryService.Equipped.Handler (FirearmInventory)
-	-- _fpFirearm = Deserialize(build) → AttachableComponent
-	-- _fpFirearm.ParentModel = Model chứa weapon parts
-	local ctrl = WeaponManager.Equipped
-	if not ctrl then
-		RefreshFirearmControllers(true)
-		ctrl = WeaponManager.Equipped
-	end
-
-	if ctrl then
-		key = tostring(ctrl)
-		local fp = rawget(ctrl, "_fpFirearm")
-		if fp then
-			local pm = rawget(fp, "ParentModel") or fp.ParentModel
-			if pm and typeof(pm) == "Instance" then
-				for _, obj in ipairs(pm:GetDescendants()) do
-					if obj:IsA("BasePart") then
-						local sa = obj:FindFirstChildOfClass("SurfaceAppearance")
-						table.insert(targets, {
-							part       = obj,
-							sa         = sa,
-							origColor  = obj.Color,
-							origMat    = obj.Material,
-							origTrans  = obj.Transparency,
-							origSACol  = sa and sa.Color3,
-						})
-					end
-				end
-			end
-		end
-
-		-- Fallback: _heroModel nếu _fpFirearm nil (e.g. third-person only)
-		if #targets == 0 then
-			local hero = rawget(ctrl, "_heroModel")
-			if hero and typeof(hero) == "Instance" then
-				for _, obj in ipairs(hero:GetDescendants()) do
-					if obj:IsA("BasePart") then
-						local sa = obj:FindFirstChildOfClass("SurfaceAppearance")
-						table.insert(targets, {
-							part       = obj,
-							sa         = sa,
-							origColor  = obj.Color,
-							origMat    = obj.Material,
-							origTrans  = obj.Transparency,
-							origSACol  = sa and sa.Color3,
-						})
-					end
-				end
-			end
-		end
-	end
-
-	return targets, key
-end
-
-local function RG_Restore()
-	for _, t in ipairs(RainbowGun._targets) do
-		local p = t.part
-		if p and p.Parent then
-			pcall(function()
-				p.Color       = t.origColor
-				p.Material    = t.origMat
-				p.Transparency = t.origTrans
-				if t.sa and t.sa.Parent then
-					t.sa.Color3 = t.origSACol
-				end
-			end)
-		end
-	end
-	RainbowGun._targets = {}
-end
-
-local _rgHue = 0
-
-local function RG_Tick(dt)
-	if not RainbowGun.Enabled then return end
-	local now = tick()
-
-	if (now - RainbowGun._lastScan) > 0.5 then
-		RainbowGun._lastScan = now
-		local newTargets, key = RG_GetTargets()
-		if key ~= RainbowGun._lastKey then
-			RG_Restore()
-			RainbowGun._lastKey = key
-		end
-		if #newTargets > 0 then
-			RainbowGun._targets = newTargets
-		elseif #RainbowGun._targets > 0 then
-			RG_Restore()
-		end
-	end
-
-	if #RainbowGun._targets == 0 then return end
-
-	_rgHue = (_rgHue + RainbowGun.Speed * dt) % 1
-	local color = Color3.fromHSV(_rgHue, 1, 1)
-
-	for _, t in ipairs(RainbowGun._targets) do
-		local p = t.part
-		if p and p.Parent then
-			pcall(function()
-				p.Color        = color
-				p.Material     = RainbowGun.Material
-				p.Transparency = RainbowGun.Transparency
-				if t.sa and t.sa.Parent then
-					t.sa.Color3 = color
-				end
-			end)
-		end
-	end
-end
-
-function RainbowGun.Start()
-	if RainbowGun._connection then return end
-	local t, k = RG_GetTargets()
-	RainbowGun._targets = t
-	RainbowGun._lastKey = k
-	RainbowGun._connection = RunService.Heartbeat:Connect(function(dt)
-		RG_Tick(dt)
-	end)
-	table.insert(getgenv().Moon_Connections, RainbowGun._connection)
-	print("[RainbowGun] Started — targets: " .. #t)
-end
-
-function RainbowGun.Stop()
-	if RainbowGun._connection then
-		pcall(function() RainbowGun._connection:Disconnect() end)
-		RainbowGun._connection = nil
-	end
-	RG_Restore()
-	print("[RainbowGun] Stopped")
-end
-
-getgenv().RainbowGun = RainbowGun
-
-local S_RG = MiscTab:DrawSection({ Name = "Rainbow Gun", Position = "right" })
-
-S_RG:AddToggle({
-	Name = "Enable Rainbow Gun", Flag = "RG_Enabled", Default = false,
-	Callback = function(v)
-		RainbowGun.Enabled = v
-		if v then RainbowGun.Start() else RainbowGun.Stop() end
-	end
-})
-
-S_RG:AddSlider({
-	Name     = "Speed", Flag = "RG_Speed",
-	Min = 1, Max = 20, Default = 5, Rounding = 0,
-	Callback = function(v) RainbowGun.Speed = v / 5 end
-})
-
-S_RG:AddSlider({
-	Name     = "Transparency", Flag = "RG_Transparency",
-	Min = 0, Max = 100, Default = 0, Rounding = 0,
-	Callback = function(v) RainbowGun.Transparency = v / 100 end
-})
-
-S_RG:AddDropdown({
-	Name     = "Material", Flag = "RG_Material",
-	Values   = { "Neon", "SmoothPlastic", "Glass", "ForceField" },
-	Default  = "Neon",
-	Callback = function(v) RainbowGun.Material = Enum.Material[v] end
-})
-
-S_RG:AddButton({
-	Name = "Force Rescan",
-	Callback = function()
-		RainbowGun._targets  = {}
-		RainbowGun._lastScan = 0
-		RainbowGun._lastKey  = nil
-		local found, _ = RG_GetTargets()
-		Notifier.new({ Title = "Rainbow Gun", Content = "Found " .. #found .. " targets", Duration = 3 })
-	end
-})
-
-print("[RainbowGun] Loaded")
 end)
