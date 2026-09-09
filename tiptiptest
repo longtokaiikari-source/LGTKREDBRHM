@@ -440,6 +440,7 @@ local function GetTargetVelocity(actor, targetPart)
 	return Vector3_new(0,0,0)
 end
 
+-- PORT TỪ LEAN: reconstruct world CFrame khi NPC trong xe
 local function GetActorPartCFrame(actor, part)
 	if not part then return nil end
 	local root = actor.RootPart
@@ -448,148 +449,163 @@ local function GetActorPartCFrame(actor, part)
 	local actorFrame = pose + actor.Position
 	return actorFrame * root.CFrame:ToObjectSpace(part.CFrame)
 end
-
 local function GetActorPartPosition(actor, part)
 	local cf = GetActorPartCFrame(actor, part)
 	if cf then return cf.Position end
 	return actor.Position + Vector3_new(0, 1.5, 0)
 end
-
 local _velSamples = {}
 local function SampleActorVelocity(actor)
-	local now = tick()
-	local sample = _velSamples[actor]
-	local vel = Vector3_new(0,0,0)
+	local now = tick(); local sample = _velSamples[actor]; local vel = Vector3_new(0,0,0)
 	if sample and sample.model == actor.Character and (now - sample.time) > 0.001 then
 		local measured = (actor.Position - sample.position) / (now - sample.time)
-		if measured.Magnitude < 300 then
-			vel = sample.velocity:Lerp(measured, 0.5)
-		end
+		if measured.Magnitude < 300 then vel = sample.velocity:Lerp(measured, 0.5) end
 	end
 	_velSamples[actor] = {position=actor.Position, time=now, velocity=vel, model=actor.Character}
 	return vel
 end
 
-local GunVisualsConfig={Enabled=false,Material="Original",Transparency=0,WeaponColor=Color3.fromRGB(150,80,255),visualParts={},visualModel=nil,nextScan=0}
-local function GunVisuals_Restore()
-	for part,saved in pairs(GunVisualsConfig.visualParts) do
-		if part.Parent then for key,value in pairs(saved.original) do if part[key]==saved.applied[key] then part[key]=value end end end
-	end
-	GunVisualsConfig.visualParts={}; GunVisualsConfig.visualModel=nil; GunVisualsConfig.nextScan=0
-end
-local function GunVisuals_Update()
-	if not ReplicatorService then return end
-	local actor=ReplicatorService.LocalActor; local weapon=actor and actor._inventory and actor._inventory[actor._equipped]
-	local model=weapon and weapon._firearm and actor.ViewModel and actor.ViewModel.CurrentModel
-	if not GunVisualsConfig.Enabled or model~=GunVisualsConfig.visualModel then GunVisuals_Restore() end
-	if not GunVisualsConfig.Enabled or not model or not model.Parent then return end
-	GunVisualsConfig.visualModel=model; local now=tick()
-	if now>=GunVisualsConfig.nextScan then
-		GunVisualsConfig.nextScan=now+0.2
-		for _,part in ipairs(model:GetDescendants()) do
-			if part:IsA("BasePart") and part.Transparency<1 and not GunVisualsConfig.visualParts[part] then
-				GunVisualsConfig.visualParts[part]={original={Material=part.Material,MaterialVariant=part.MaterialVariant,Transparency=part.Transparency,Color=part.Color},applied={}}
-			end
-		end
-	end
-	for part,saved in pairs(GunVisualsConfig.visualParts) do
-		if not part:IsDescendantOf(model) then
+-- === GUN APPEARANCE ===
+local GunVisualsConfig = {Enabled=false,Material="Original",Transparency=0,WeaponColor=Color3.fromRGB(150,80,255),visualParts={},visualModel=nil,nextScan=0}
+local GunVisuals_Restore = function() end
+local GunVisuals_Update = function() end
+pcall(function()
+	GunVisuals_Restore = function()
+		for part,saved in pairs(GunVisualsConfig.visualParts) do
 			if part.Parent then for key,value in pairs(saved.original) do if part[key]==saved.applied[key] then part[key]=value end end end
-			GunVisualsConfig.visualParts[part]=nil
-		else
-			local mat=GunVisualsConfig.Material=="Original" and saved.original.Material or Enum.Material[GunVisualsConfig.Material]
-			local vals={Material=mat,MaterialVariant=GunVisualsConfig.Material=="Original" and saved.original.MaterialVariant or "",Transparency=GunVisualsConfig.Transparency/100,Color=GunVisualsConfig.Material~="Original" and GunVisualsConfig.WeaponColor or saved.original.Color}
-			for key,value in pairs(vals) do saved.applied[key]=value; if part[key]~=value then part[key]=value end end
 		end
+		GunVisualsConfig.visualParts={}; GunVisualsConfig.visualModel=nil; GunVisualsConfig.nextScan=0
 	end
-end
-local BeamTracer={Enabled=false,Style="Lightning",Color=Color3.fromRGB(150,80,255),Duration=0.6,Width=0.08,folder=nil,rng=Random.new()}
-local function BeamTracer_Points(from,to,style)
-	local length=(to-from).Magnitude; if length<.01 then return {} end
-	local cf=CFrame.lookAt(from,to); local turns=math.clamp(length/18,2,5)
-	local smooth=style=="DNA"; local count=style=="Line" and 1 or (smooth and math.ceil(turns*12) or math.clamp(math.ceil(length/3),12,48))
-	local strands=style=="DNA" and 2 or 1; local paths={}
-	for strand=1,strands do
-		local pts={}
-		for i=0,count do
-			local t=i/count; local offset=Vector3.zero
-			if i>0 and i<count then
-				if style=="Lightning" then local r=math.min(length*.025,.65); offset=cf.RightVector*BeamTracer.rng:NextNumber(-r,r)+cf.UpVector*BeamTracer.rng:NextNumber(-r,r)
-				elseif style=="DNA" then
-					local angle=t*math.pi*2*turns+(strand-1)*math.pi*2/strands; local env=math.sin(math.min(1,math.min(t,1-t)*8)*math.pi*.5)
-					local r=math.min(length*.03,.45)*env; offset=(cf.RightVector*math.cos(angle)+cf.UpVector*math.sin(angle))*r
+	GunVisuals_Update = function()
+		if not ReplicatorService then return end
+		local actor=ReplicatorService.LocalActor; local weapon=actor and actor._inventory and actor._inventory[actor._equipped]
+		local model=weapon and weapon._firearm and actor.ViewModel and actor.ViewModel.CurrentModel
+		if not GunVisualsConfig.Enabled or model~=GunVisualsConfig.visualModel then GunVisuals_Restore() end
+		if not GunVisualsConfig.Enabled or not model or not model.Parent then return end
+		GunVisualsConfig.visualModel=model; local now=tick()
+		if now>=GunVisualsConfig.nextScan then
+			GunVisualsConfig.nextScan=now+0.2
+			for _,part in ipairs(model:GetDescendants()) do
+				if part:IsA("BasePart") and part.Transparency<1 and not GunVisualsConfig.visualParts[part] then
+					GunVisualsConfig.visualParts[part]={original={Material=part.Material,MaterialVariant=part.MaterialVariant,Transparency=part.Transparency,Color=part.Color},applied={}}
 				end
 			end
-			pts[#pts+1]=from:Lerp(to,t)+offset
 		end
-		paths[#paths+1]=pts
+		for part,saved in pairs(GunVisualsConfig.visualParts) do
+			if not part:IsDescendantOf(model) then
+				if part.Parent then for key,value in pairs(saved.original) do if part[key]==saved.applied[key] then part[key]=value end end end
+				GunVisualsConfig.visualParts[part]=nil
+			else
+				local mat=GunVisualsConfig.Material=="Original" and saved.original.Material or Enum.Material[GunVisualsConfig.Material]
+				local vals={Material=mat,MaterialVariant=GunVisualsConfig.Material=="Original" and saved.original.MaterialVariant or "",Transparency=GunVisualsConfig.Transparency/100,Color=GunVisualsConfig.Material~="Original" and GunVisualsConfig.WeaponColor or saved.original.Color}
+				for key,value in pairs(vals) do saved.applied[key]=value; if part[key]~=value then part[key]=value end end
+			end
+		end
 	end
-	return paths
-end
-local function BeamTracer_Draw(from,to)
-	if not BeamTracer.Enabled or typeof(from)~="Vector3" or typeof(to)~="Vector3" then return end
-	local paths=BeamTracer_Points(from,to,BeamTracer.Style); if #paths==0 then return end
-	local cam=workspace.CurrentCamera; if not cam then return end
-	if not BeamTracer.folder then BeamTracer.folder=Instance.new("Folder"); BeamTracer.folder.Name="BeamTracers" end
-	BeamTracer.folder.Parent=cam; local existing=BeamTracer.folder:GetChildren(); if #existing>=24 then existing[1]:Destroy() end
-	local anchor=Instance.new("Part"); anchor.Name="BT"; anchor.Anchored=true; anchor.Transparency=1
-	anchor.Size=Vector3.one*.01; anchor.CanCollide=false; anchor.CanQuery=false; anchor.CanTouch=false; anchor.CastShadow=false
-	anchor.CFrame=CFrame.new(from); anchor.Parent=BeamTracer.folder
-	local function connect(a,b,w)
-		local beam=Instance.new("Beam"); beam.Attachment0=a; beam.Attachment1=b; beam.FaceCamera=true
-		beam.Width0=w; beam.Width1=w; beam.Segments=1; beam.Color=ColorSequence.new(BeamTracer.Color)
-		beam.LightEmission=1; beam.LightInfluence=0; beam.Transparency=NumberSequence.new(0); beam.Parent=anchor
-		game:GetService("TweenService"):Create(beam,TweenInfo.new(BeamTracer.Duration),{Width0=0,Width1=0}):Play()
+	print("[Gun Appearance] Loaded")
+end)
+
+-- === BEAM TRACER ===
+local BeamTracer={Enabled=false,Style="Lightning",Color=Color3.fromRGB(150,80,255),Duration=0.6,Width=0.08,folder=nil,rng=Random.new()}
+local BeamTracer_Draw = function() end
+pcall(function()
+	local function BT_Points(from,to,style)
+		local length=(to-from).Magnitude; if length<.01 then return {} end
+		local cf=CFrame.lookAt(from,to); local turns=math.clamp(length/18,2,5)
+		local count=style=="Line" and 1 or (style=="DNA" and math.ceil(turns*12) or math.clamp(math.ceil(length/3),12,48))
+		local strands=style=="DNA" and 2 or 1; local paths={}
+		for strand=1,strands do
+			local pts={}
+			for i=0,count do
+				local t=i/count; local offset=Vector3.zero
+				if i>0 and i<count then
+					if style=="Lightning" then local r=math.min(length*.025,.65); offset=cf.RightVector*BeamTracer.rng:NextNumber(-r,r)+cf.UpVector*BeamTracer.rng:NextNumber(-r,r)
+					elseif style=="DNA" then
+						local angle=t*math.pi*2*turns+(strand-1)*math.pi*2/strands
+						local env=math.sin(math.min(1,math.min(t,1-t)*8)*math.pi*.5)
+						local r=math.min(length*.03,.45)*env; offset=(cf.RightVector*math.cos(angle)+cf.UpVector*math.sin(angle))*r
+					end
+				end
+				pts[#pts+1]=from:Lerp(to,t)+offset
+			end
+			paths[#paths+1]=pts
+		end
+		return paths
 	end
-	local atts={}
-	for idx,pts in ipairs(paths) do local lst={}; atts[idx]=lst
-		for i,pt in ipairs(pts) do local a=Instance.new("Attachment"); a.Position=pt-from; a.Parent=anchor; lst[i]=a; if i>1 then connect(lst[i-1],a,BeamTracer.Width) end end
+	BeamTracer_Draw = function(from,to)
+		if not BeamTracer.Enabled or typeof(from)~="Vector3" or typeof(to)~="Vector3" then return end
+		local paths=BT_Points(from,to,BeamTracer.Style); if #paths==0 then return end
+		local cam=workspace.CurrentCamera; if not cam then return end
+		if not BeamTracer.folder then BeamTracer.folder=Instance.new("Folder"); BeamTracer.folder.Name="BeamTracers" end
+		BeamTracer.folder.Parent=cam
+		local existing=BeamTracer.folder:GetChildren(); if #existing>=24 then existing[1]:Destroy() end
+		local anchor=Instance.new("Part"); anchor.Name="BT"; anchor.Anchored=true; anchor.Transparency=1
+		anchor.Size=Vector3.one*.01; anchor.CanCollide=false; anchor.CanQuery=false; anchor.CanTouch=false; anchor.CastShadow=false
+		anchor.CFrame=CFrame.new(from); anchor.Parent=BeamTracer.folder
+		local function connect(a,b,w)
+			local beam=Instance.new("Beam"); beam.Attachment0=a; beam.Attachment1=b; beam.FaceCamera=true
+			beam.Width0=w; beam.Width1=w; beam.Segments=1; beam.Color=ColorSequence.new(BeamTracer.Color)
+			beam.LightEmission=1; beam.LightInfluence=0; beam.Transparency=NumberSequence.new(0); beam.Parent=anchor
+			game:GetService("TweenService"):Create(beam,TweenInfo.new(BeamTracer.Duration),{Width0=0,Width1=0}):Play()
+		end
+		local atts={}
+		for idx,pts in ipairs(paths) do local lst={}; atts[idx]=lst
+			for i,pt in ipairs(pts) do local a=Instance.new("Attachment"); a.Position=pt-from; a.Parent=anchor; lst[i]=a; if i>1 then connect(lst[i-1],a,BeamTracer.Width) end end
+		end
+		if BeamTracer.Style=="DNA" and #atts==2 then for i=4,#atts[1]-3,3 do connect(atts[1][i],atts[2][i],BeamTracer.Width*.35) end end
+		game:GetService("Debris"):AddItem(anchor,BeamTracer.Duration)
 	end
-	if BeamTracer.Style=="DNA" and #atts==2 then for i=4,#atts[1]-3,3 do connect(atts[1][i],atts[2][i],BeamTracer.Width*.35) end end
-	game:GetService("Debris"):AddItem(anchor,BeamTracer.Duration)
-end
+	print("[Beam Tracer] Loaded")
+end)
+
+-- === GUN HOOKS (Force Headshot, Instant ADS, No Sway) ===
 local GunHooksConfig={ForceHeadshot=false,InstantADS=false,NoSway=false,_effectsDone=false,_impactDone=false,_viewmodelDone=false,nextResolve=0}
-local function ResolveGunHooks()
-	local now=tick(); if now<GunHooksConfig.nextResolve then return end; GunHooksConfig.nextResolve=now+2
-	local rep=ReplicatorService
-	if rep and not GunHooksConfig._effectsDone and type(rawget(rep,"_bulletEffects"))=="function" then
-		local orig=rep._bulletEffects
-		rep._bulletEffects=function(self,from,to,part,normal,material,caliber,isLocal,...)
-			local r=table.pack(pcall(orig,self,from,to,part,normal,material,caliber,isLocal,...))
-			if isLocal then pcall(BeamTracer_Draw,from,to) end
-			if not r[1] then return end; return table.unpack(r,2,r.n)
-		end; GunHooksConfig._effectsDone=true
-	end
-	if rep and not GunHooksConfig._impactDone and type(rawget(rep,"_bulletProcess"))=="function" then
-		local orig=rep._bulletProcess
-		rep._bulletProcess=function(self,uid,replicate,position,part,normal,material,elapsed,...)
-			if GunHooksConfig.ForceHeadshot and replicate and part then
-				local ok,actorUID=pcall(function() return(self:GetFromBodyPart(part)) end)
-				if ok and actorUID then local actor=rep.Actors and rep.Actors[actorUID]; local head=actor and actor.Parts and actor.Parts.Head
-					if head and head.Parent and head:IsDescendantOf(actor.Character) then part=head end end
-			end
-			return orig(self,uid,replicate,position,part,normal,material,elapsed,...)
-		end; GunHooksConfig._impactDone=true
-	end
-	if not GunHooksConfig._viewmodelDone then
-		for _,m in ipairs(getloadedmodules()) do
-			if m.Name=="ViewmodelClass" then
-				local ok,class=pcall(require,m)
-				if ok and type(class)=="table" and type(class.Update)=="function" then
-					local orig=class.Update
-					class.Update=function(vm,...)
-						local actor=rep and rep.LocalActor; if not actor or vm.Actor~=actor then return orig(vm,...) end
-						if GunHooksConfig.InstantADS then vm.ADSLerp=(actor.ADS and not vm.Reloading and not actor.Sliding) and 1 or 0 end
-						local sway,kick=vm._swaySpring,vm.Kick
-						if GunHooksConfig.NoSway and sway then vm._swaySpring={Position={ToCFrame=function() return CFrame.identity end}} end
-						local r=table.pack(pcall(orig,vm,...)); vm._swaySpring=sway; vm.Kick=kick
-						if not r[1] then return end; return table.unpack(r,2,r.n)
-					end; GunHooksConfig._viewmodelDone=true
-				end; break
+local ResolveGunHooks = function() end
+pcall(function()
+	ResolveGunHooks = function()
+		local now=tick(); if now<GunHooksConfig.nextResolve then return end; GunHooksConfig.nextResolve=now+2
+		local rep=ReplicatorService
+		if rep and not GunHooksConfig._effectsDone and type(rawget(rep,"_bulletEffects"))=="function" then
+			local orig=rep._bulletEffects
+			rep._bulletEffects=function(self,from,to,part,normal,material,caliber,isLocal,...)
+				local r=table.pack(pcall(orig,self,from,to,part,normal,material,caliber,isLocal,...))
+				if isLocal then pcall(BeamTracer_Draw,from,to) end
+				if not r[1] then return end; return table.unpack(r,2,r.n)
+			end; GunHooksConfig._effectsDone=true
+		end
+		if rep and not GunHooksConfig._impactDone and type(rawget(rep,"_bulletProcess"))=="function" then
+			local orig=rep._bulletProcess
+			rep._bulletProcess=function(self,uid,replicate,position,part,normal,material,elapsed,...)
+				if GunHooksConfig.ForceHeadshot and replicate and part then
+					local ok,actorUID=pcall(function() return(self:GetFromBodyPart(part)) end)
+					if ok and actorUID then local actor=rep.Actors and rep.Actors[actorUID]; local head=actor and actor.Parts and actor.Parts.Head
+						if head and head.Parent and head:IsDescendantOf(actor.Character) then part=head end end
+				end
+				return orig(self,uid,replicate,position,part,normal,material,elapsed,...)
+			end; GunHooksConfig._impactDone=true
+		end
+		if not GunHooksConfig._viewmodelDone then
+			for _,m in ipairs(getloadedmodules()) do
+				if m.Name=="ViewmodelClass" then
+					local ok,class=pcall(require,m)
+					if ok and type(class)=="table" and type(class.Update)=="function" then
+						local orig=class.Update
+						class.Update=function(vm,...)
+							local actor=rep and rep.LocalActor; if not actor or vm.Actor~=actor then return orig(vm,...) end
+							if GunHooksConfig.InstantADS then vm.ADSLerp=(actor.ADS and not vm.Reloading and not actor.Sliding) and 1 or 0 end
+							local sway,kick=vm._swaySpring,vm.Kick
+							if GunHooksConfig.NoSway and sway then vm._swaySpring={Position={ToCFrame=function() return CFrame.identity end}} end
+							local r=table.pack(pcall(orig,vm,...)); vm._swaySpring=sway; vm.Kick=kick
+							if not r[1] then return end; return table.unpack(r,2,r.n)
+						end; GunHooksConfig._viewmodelDone=true
+					end; break
+				end
 			end
 		end
 	end
-end
+	print("[Gun Hooks] Loaded")
+end)
+
 function GetSecureContainer()
 	if SecureESPContainer and SecureESPContainer.Parent then return SecureESPContainer end
 	local function TryCreate(parent)
@@ -873,8 +889,8 @@ GetCombatTarget = function(mode)
 	local candidates=getgenv()._targetCandidates or table.create(64)
 	table.clear(candidates); getgenv()._targetCandidates=candidates
 	local now=tick(); local ignoredTargets=ActorManager._ignoredTargets
-	local mouseX,mouseY
-	if useFOV then local sc=Camera.ViewportSize/2; mouseX,mouseY=sc.X,sc.Y end
+	local mouse,mouseX,mouseY
+	if useFOV then mouse=UserInputService:GetMouseLocation(); mouseX,mouseY=mouse.X,mouse.Y end
 	local enemyList
 	if mode=="Rage" and ActorManager._sectors and ActorManager._playerSector then
 		enemyList={}
@@ -905,9 +921,11 @@ GetCombatTarget = function(mode)
 		local score=dist
 		if useFOV then
 			if not actor.ViewportOnScreen and dist>50 then continue end
-			local root=char.PrimaryPart or char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
-			if not root then continue end
-			local pos,onScreen=Camera:WorldToViewportPoint(root.Position)
+			-- Dùng GetActorPartPosition để lấy world position đúng khi NPC trong xe
+			local rootPart = (actor.Parts and actor.Parts[targetPartName]) or char:FindFirstChild("Head",true) or char:FindFirstChild("HumanoidRootPart",true)
+			if not rootPart then continue end
+			local worldPos = GetActorPartPosition(actor, rootPart)
+			local pos,onScreen=Camera:WorldToViewportPoint(worldPos)
 			if not onScreen then continue end
 			local dx=pos.X-mouseX; local dy=pos.Y-mouseY
 			local screenDistSq=(dx*dx)+(dy*dy)
@@ -925,6 +943,7 @@ GetCombatTarget = function(mode)
 			or char:FindFirstChild("Head",true)
 			or char:FindFirstChild("UpperTorso",true)
 		if part and part.Parent then
+			-- Dùng world position thật (handle xe) cho IsVisible
 			if IsVisible(actor,part,checkOrigin) then return part,actor end
 			if getgenv().RaycastBudget<=0 then break end
 		end
@@ -951,6 +970,7 @@ local function HookController(controller)
 			local combatTarget=ActorManager.SelectedTarget_RB or ActorManager.SelectedTarget_SA
 			local targetActor=ActorManager.SelectedActor_RB or ActorManager.SelectedActor_SA
 			if (Config.SilentAim or Config.RageMode) and combatTarget and targetActor then
+				-- GetActorPartPosition: reconstruct world position đúng khi NPC trong xe (port từ Lean)
 				local targetPos = GetActorPartPosition(targetActor, combatTarget)
 				local gravity=32.2; local muzzle_velocity=2000
 				if self._firearm and self._firearm.Tune then
@@ -960,6 +980,7 @@ local function HookController(controller)
 						if success and vel then muzzle_velocity=vel end
 					end
 				end
+				-- SampleActorVelocity: sample từ actor.Position delta theo thời gian, đúng cho xe/máy bay
 				local targetVelocity = SampleActorVelocity(targetActor)
 				local aimPos,travelTime=SolveLead(muzzleCF.Position,targetPos,targetVelocity,muzzle_velocity,gravity)
 				local zeroAngle=0; local actor=self._actor
@@ -1006,46 +1027,61 @@ local function HookController(controller)
 	end
 end
 
-local FOVCircle=Drawing.new("Circle")
-FOVCircle.Thickness=1
-pcall(function() FOVCircle.NumSides=60 end)
-FOVCircle.Radius=Config.SilentAimFOV
-FOVCircle.Filled=false; FOVCircle.Visible=false; FOVCircle.Color=Color3.fromRGB(255,255,255)
+local FOVCircle = Drawing.new("Circle")
+FOVCircle.Thickness = 1
+FOVCircle.NumSides = 60
+FOVCircle.Radius = Config.SilentAimFOV
+FOVCircle.Filled = false
+FOVCircle.Visible = false
+FOVCircle.Color = Color3.fromRGB(255, 255, 255)
 
-local GunFOVConfig={FillFOV=false,FOVFillColor=Color3.fromRGB(255,255,255),FOVFillTransparency=0.4,GradientFOV=false,GradientColorA=Color3.fromRGB(150,80,255),GradientColorB=Color3.fromRGB(255,110,60),GradientSpin=false,GradientSpinSpeed=1}
-local SilentFOVFill
+-- Gradient FOV + Fill (từ Lean)
+local GunFOVConfig = {
+	FillFOV=false, FOVFillColor=Color3.fromRGB(255,255,255), FOVFillTransparency=0.4,
+	GradientFOV=false, GradientColorA=Color3.fromRGB(150,80,255), GradientColorB=Color3.fromRGB(255,110,60),
+	GradientSpin=false, GradientSpinSpeed=1
+}
+local SilentFOVFill, DrawGradientFOV, HideGradientFOV
+local _gradPhase = 0; local _gradSegments = {}
 pcall(function()
-	SilentFOVFill=Drawing.new("Circle"); SilentFOVFill.NumSides=64; SilentFOVFill.Filled=true
+	SilentFOVFill = Drawing.new("Circle"); SilentFOVFill.NumSides=64; SilentFOVFill.Filled=true
 	SilentFOVFill.Color=GunFOVConfig.FOVFillColor; SilentFOVFill.Transparency=GunFOVConfig.FOVFillTransparency; SilentFOVFill.Visible=false
-end)
-local GRAD_SEGS=48; local _gradPhase=0; local _gradSegments={}
-pcall(function()
-	for i=1,GRAD_SEGS do local ln=Drawing.new("Line"); ln.Thickness=2; ln.Transparency=1; ln.Visible=false; _gradSegments[i]=ln end
-end)
-local _gradGui,_gradFill,_gradGradient
-pcall(function()
-	_gradGui=Instance.new("ScreenGui"); _gradGui.Name="FOVGradient"; _gradGui.IgnoreGuiInset=true
-	_gradGui.ResetOnSpawn=false; _gradGui.DisplayOrder=0; _gradGui.Parent=(gethui and gethui()) or game:GetService("CoreGui")
-	_gradFill=Instance.new("Frame"); _gradFill.AnchorPoint=Vector2.new(.5,.5); _gradFill.BackgroundColor3=Color3.new(1,1,1)
-	_gradFill.BorderSizePixel=0; _gradFill.Visible=false; _gradFill.Active=false; _gradFill.Parent=_gradGui
-	local corner=Instance.new("UICorner"); corner.CornerRadius=UDim.new(1,0); corner.Parent=_gradFill
-	_gradGradient=Instance.new("UIGradient"); _gradGradient.Parent=_gradFill
-end)
-local function DrawGradientFOV(center,radius,colorA,colorB,filled,alpha,dt)
-	if GunFOVConfig.GradientSpin then _gradPhase=(_gradPhase+(dt or 0)*GunFOVConfig.GradientSpinSpeed*math.pi*2)%(math.pi*2) else _gradPhase=0 end
-	local n=#_gradSegments
-	for i,ln in ipairs(_gradSegments) do
-		local a0=(i-1)/n*math.pi*2; local a1=i/n*math.pi*2
-		ln.From=center+Vector2.new(math.cos(a0),math.sin(a0))*radius; ln.To=center+Vector2.new(math.cos(a1),math.sin(a1))*radius
-		ln.Color=colorA:Lerp(colorB,(math.sin((a0+a1)*.5-_gradPhase)+1)*.5); ln.Transparency=1; ln.Visible=true; ln.ZIndex=1
+	for i=1,48 do local ln=Drawing.new("Line"); ln.Thickness=2; ln.Transparency=1; ln.Visible=false; _gradSegments[i]=ln end
+	local _gradGui,_gradFill,_gradGradient
+	pcall(function()
+		_gradGui=Instance.new("ScreenGui"); _gradGui.Name="FOVGradient"; _gradGui.IgnoreGuiInset=true
+		_gradGui.ResetOnSpawn=false; _gradGui.DisplayOrder=0; _gradGui.Parent=(gethui and gethui()) or game:GetService("CoreGui")
+		_gradFill=Instance.new("Frame"); _gradFill.AnchorPoint=Vector2.new(.5,.5); _gradFill.BackgroundColor3=Color3.new(1,1,1)
+		_gradFill.BorderSizePixel=0; _gradFill.Visible=false; _gradFill.Active=false; _gradFill.Parent=_gradGui
+		local corner=Instance.new("UICorner"); corner.CornerRadius=UDim.new(1,0); corner.Parent=_gradFill
+		_gradGradient=Instance.new("UIGradient"); _gradGradient.Parent=_gradFill
+	end)
+	DrawGradientFOV = function(center,radius,colorA,colorB,filled,alpha,dt)
+		if GunFOVConfig.GradientSpin then
+			_gradPhase=(_gradPhase+(dt or 0)*GunFOVConfig.GradientSpinSpeed*math.pi*2)%(math.pi*2)
+		else _gradPhase=0 end
+		local n=#_gradSegments
+		for i,ln in ipairs(_gradSegments) do
+			local a0=(i-1)/n*math.pi*2; local a1=i/n*math.pi*2
+			ln.From=center+Vector2.new(math.cos(a0),math.sin(a0))*radius
+			ln.To=center+Vector2.new(math.cos(a1),math.sin(a1))*radius
+			ln.Color=colorA:Lerp(colorB,(math.sin((a0+a1)*.5-_gradPhase)+1)*.5)
+			ln.Transparency=1; ln.Visible=true; ln.ZIndex=1
+		end
+		if _gradFill then
+			_gradFill.Visible=filled and alpha>0; _gradFill.Position=UDim2.fromOffset(center.X,center.Y)
+			_gradFill.Size=UDim2.fromOffset(radius*2,radius*2); _gradFill.BackgroundTransparency=1-math.clamp(alpha,0,1)
+			if _gradGradient then _gradGradient.Color=ColorSequence.new(colorA,colorB); _gradGradient.Rotation=90+math.deg(_gradPhase) end
+		end
 	end
-	if _gradFill then
-		_gradFill.Visible=filled and alpha>0; _gradFill.Position=UDim2.fromOffset(center.X,center.Y); _gradFill.Size=UDim2.fromOffset(radius*2,radius*2)
-		_gradFill.BackgroundTransparency=1-math.clamp(alpha,0,1)
-		if _gradGradient then _gradGradient.Color=ColorSequence.new(colorA,colorB); _gradGradient.Rotation=90+math.deg(_gradPhase) end
+	HideGradientFOV = function()
+		for _,ln in ipairs(_gradSegments) do ln.Visible=false end
+		if _gradFill then _gradFill.Visible=false end
 	end
-end
-local function HideGradientFOV() for _,ln in ipairs(_gradSegments) do ln.Visible=false end; if _gradFill then _gradFill.Visible=false end end
+	print("[Gradient FOV] Loaded")
+end)
+if not DrawGradientFOV then DrawGradientFOV=function() end; HideGradientFOV=function() end end
+
 
 getgenv().VelocityCache={}
 getgenv().PredictionDot=Drawing.new("Circle")
@@ -1365,6 +1401,7 @@ local function InitializeServices()
 						local vel=BulletService:GetInfo(p49,p50)
 						if vel and vel>0 then muzzle_velocity=vel; lastUsedCaliber=p49; lastUsedVelocity=vel end
 					end
+					-- Dùng velocity sample từ actor.Position delta
 					local sv = _velSamples[targetActor]
 					local targetVelocity = (sv and sv.velocity) or getgenv()._lastPredVel or Vector3_new(0,0,0)
 					local gravity=32.2
@@ -1428,6 +1465,7 @@ local function UpdateCombat(frameId)
 				local chamberCount = (equippedController._item and equippedController._item.MetaData and equippedController._item.MetaData.Chamber) and 1 or 0
 				local totalAmmo = magCapacity + chamberCount
 				local isReloading = equippedController._reloading == true
+				-- Stuck detection: _reloading true > 4s → force reset
 				if isReloading then
 					local reloadStart = getgenv()._autoReloadStart or now_ar
 					getgenv()._autoReloadStart = reloadStart
@@ -1587,24 +1625,21 @@ local function UpdateCombat(frameId)
 			end
 		end
 	end
+	local mouse = UserInputService:GetMouseLocation()
 	if FOVCircle then
-		pcall(function() FOVCircle.Radius=Config.SilentAimFOV end)
-		local fovShow=Config.SilentAim and Config.ShowFOV
-		local sc=Camera.ViewportSize/2; local center=Vector2.new(sc.X,sc.Y)
+		local showFOV = Config.SilentAim and Config.ShowFOV
 		if SilentFOVFill then
-			pcall(function()
-				SilentFOVFill.Visible=fovShow and GunFOVConfig.FillFOV and not GunFOVConfig.GradientFOV
-				SilentFOVFill.Position=center; SilentFOVFill.Radius=Config.SilentAimFOV
-				SilentFOVFill.Color=GunFOVConfig.FOVFillColor; SilentFOVFill.Transparency=GunFOVConfig.FOVFillTransparency
-			end)
+			SilentFOVFill.Visible=showFOV and GunFOVConfig.FillFOV and not GunFOVConfig.GradientFOV
+			SilentFOVFill.Position=mouse; SilentFOVFill.Radius=Config.SilentAimFOV
+			SilentFOVFill.Color=GunFOVConfig.FOVFillColor; SilentFOVFill.Transparency=GunFOVConfig.FOVFillTransparency
 		end
-		if fovShow and GunFOVConfig.GradientFOV then
-			pcall(function() FOVCircle.Visible=false end)
-			pcall(DrawGradientFOV,center,Config.SilentAimFOV,GunFOVConfig.GradientColorA,GunFOVConfig.GradientColorB,GunFOVConfig.FillFOV,GunFOVConfig.FOVFillTransparency,_dt or 0)
+		if showFOV and GunFOVConfig.GradientFOV then
+			FOVCircle.Visible=false
+			DrawGradientFOV(mouse,Config.SilentAimFOV,GunFOVConfig.GradientColorA,GunFOVConfig.GradientColorB,GunFOVConfig.FillFOV,GunFOVConfig.FOVFillTransparency,_dt or 0)
 		else
-			pcall(HideGradientFOV)
-			pcall(function() FOVCircle.Visible=fovShow end)
-			if fovShow then pcall(function() FOVCircle.Position=center end) end
+			HideGradientFOV()
+			FOVCircle.Visible=showFOV
+			if showFOV then FOVCircle.Position=mouse; FOVCircle.Radius=Config.SilentAimFOV end
 		end
 	end
 	local targetPart=targetPart_SA; local targetActor=ActorManager.SelectedActor_SA
@@ -1748,24 +1783,14 @@ local function UpdateESPForActor(uid,espData,frameId,cachedCfg,localSquad)
 	if not actor or not actor.Alive then RemoveESP(uid); return end
 	if not ShouldShowEntity(actor,entityType,localSquad) then SetAllVisible(espData.Drawing,espData,false); return end
 	-- Tính distance thực nếu LOD_Distance không có
-	local distance = actor.LOD_Distance
-	if not distance or distance <= 0 then
-		local pos = actor.Position
-		if not pos and actor.Character and actor.Character.PrimaryPart then
-			pos = actor.Character.PrimaryPart.Position
-		end
-		if pos then
-			distance = (Camera.CFrame.Position - pos).Magnitude
-		else
-			distance = 0
-		end
-	end
+	local distance = actor.LOD_Distance or 9999
 	if distance > cachedCfg.MaxDistance then
 		SetAllVisible(espData.Drawing,espData,false)
 		if espData.SimpleESP and espData.SimpleESP.Box then pcall(function() espData.SimpleESP.Box.Visible=false end) end
 		return
 	end
-	if distance > 1500 and (frameId%2) ~= 0 then return end
+	if distance > 1500 and (frameId % 4) ~= 0 then return end
+	if distance > 500 and (frameId % 2) ~= 0 then return end
 	if cachedCfg.SimpleESP then
 		SetAllVisible(espData.Drawing,espData,false)
 		local sESP=espData.SimpleESP
@@ -1779,7 +1804,7 @@ local function UpdateESPForActor(uid,espData,frameId,cachedCfg,localSquad)
 		return
 	end
 	local drawings=espData.Drawing
-	local worldPos = actor.Position
+	local worldPos = actor.Position or (actor.RootPart and actor.RootPart.Position)
 	if not worldPos then
 		if actor.Character then
 			local pp = actor.Character.PrimaryPart or actor.Character:FindFirstChild("Head")
@@ -1788,8 +1813,15 @@ local function UpdateESPForActor(uid,espData,frameId,cachedCfg,localSquad)
 	end
 	if not worldPos then SetAllVisible(drawings,espData,false); return end
 	local screen_point,onScreen=Camera:WorldToViewportPoint(worldPos)
-	-- Chỉ dùng onScreen — reliable trên PC
-	if not onScreen then SetAllVisible(drawings,espData,false); return end
+	local engineVisible = actor.LOD_OnScreen or (distance < 128 and actor.ViewportOnScreen)
+	if not engineVisible then
+		SetAllVisible(drawings, espData, false)
+		return
+	end
+	if not onScreen then
+		SetAllVisible(drawings, espData, false)
+		return
+	end
 	local screenPos=Vector2_new(screen_point.X,screen_point.Y)
 	SetAllVisible(drawings,espData,true)
 	if espData.Highlight then espData.Highlight.FillColor=espData.Color;espData.Highlight.OutlineColor=espData.Color end
@@ -2080,11 +2112,13 @@ S_GunMods:AddToggle({ Name="No Spread", Flag="Combat_NoSpread", Default=false, C
 S_GunMods:AddToggle({ Name="Unlock Firemodes", Flag="Combat_Firemodes", Default=false, Callback=function(v) Config.UnlockFiremodes=v end })
 S_GunMods:AddToggle({ Name="Custom RPM", Flag="Combat_CustomRPM", Default=false, Callback=function(v) Config.CustomRPM=v end })
 S_GunMods:AddSlider({ Name="RPM Value", Min=100, Max=10000, Default=800, Flag="Combat_RPMValue", Callback=function(v) Config.RPMValue=v end })
+pcall(function()
 S_GunMods:AddToggle({ Name="Instant ADS", Flag="Gun_InstantADS", Default=false, Callback=function(v) GunHooksConfig.InstantADS=v; GunHooksConfig._viewmodelDone=false; ResolveGunHooks() end })
 S_GunMods:AddToggle({ Name="No Sway", Flag="Gun_NoSway", Default=false, Callback=function(v) GunHooksConfig.NoSway=v; GunHooksConfig._viewmodelDone=false; ResolveGunHooks() end })
 S_GunMods:AddSlider({ Name="Spread Reduction", Min=0, Max=100, Default=100, Flag="Gun_SpreadReduction", Callback=function(v) Config.SpreadReduction=v end })
 S_GunMods:AddToggle({ Name="Force Headshot", Flag="Gun_ForceHeadshot", Default=false, Callback=function(v) GunHooksConfig.ForceHeadshot=v; ResolveGunHooks() end })
-
+end)
+pcall(function()
 local S_GunAppearance=CombatTab:DrawSection({ Name="Gun Appearance", Position="right" })
 S_GunAppearance:AddToggle({ Name="Enabled", Flag="GunVis_Enabled", Default=false, Callback=function(v) GunVisualsConfig.Enabled=v; GunVisuals_Update() end })
 S_GunAppearance:AddDropdown({ Name="Material", Default="Original", Flag="GunVis_Material",
@@ -2092,7 +2126,8 @@ S_GunAppearance:AddDropdown({ Name="Material", Default="Original", Flag="GunVis_
 	Callback=function(v) GunVisualsConfig.Material=v; GunVisuals_Update() end })
 S_GunAppearance:AddSlider({ Name="Transparency", Min=0, Max=100, Default=0, Flag="GunVis_Transparency", Callback=function(v) GunVisualsConfig.Transparency=v; GunVisuals_Update() end })
 S_GunAppearance:AddColorPicker({ Name="Weapon Color", Flag="GunVis_Color", Default=GunVisualsConfig.WeaponColor, Callback=function(v) GunVisualsConfig.WeaponColor=v end })
-
+end)
+pcall(function()
 local S_FOVVisuals=CombatTab:DrawSection({ Name="FOV Visuals", Position="left" })
 S_FOVVisuals:AddToggle({ Name="Fill FOV", Flag="FOV_Fill", Default=false, Callback=function(v) GunFOVConfig.FillFOV=v end })
 S_FOVVisuals:AddColorPicker({ Name="Fill Color", Flag="FOV_FillColor", Default=GunFOVConfig.FOVFillColor, Callback=function(v,a) GunFOVConfig.FOVFillColor=v; if a then GunFOVConfig.FOVFillTransparency=1-a end end })
@@ -2101,6 +2136,7 @@ S_FOVVisuals:AddColorPicker({ Name="Gradient Color A", Flag="FOV_GradA", Default
 S_FOVVisuals:AddColorPicker({ Name="Gradient Color B", Flag="FOV_GradB", Default=GunFOVConfig.GradientColorB, Callback=function(v) GunFOVConfig.GradientColorB=v end })
 S_FOVVisuals:AddToggle({ Name="Gradient Spin", Flag="FOV_GradSpin", Default=false, Callback=function(v) GunFOVConfig.GradientSpin=v end })
 S_FOVVisuals:AddSlider({ Name="Spin Speed", Min=1, Max=30, Default=10, Flag="FOV_SpinSpeed", Callback=function(v) GunFOVConfig.GradientSpinSpeed=v/10 end })
+end)
 
 -- ESP Tab
 local VisualsTab=Window:DrawTab({ Name="ESP", Icon="eye", Type="Double" })
@@ -2333,8 +2369,8 @@ local AutoFarm = {
 	_lastShot = 0,
 	_phase = "seek",          -- seek | shoot | switch | return
 	_enemyIndex = 1,
-	_originCF = nil,
-	_returnTimer = 0,
+	_originCF = nil,          -- vị trí lưu trước khi teleport đến target
+	_returnTimer = 0,         -- timestamp khi bắt đầu phase return
 }
 
 -- Teleport LocalActor đến vị trí gần target
@@ -2407,6 +2443,7 @@ local function AutoFarm_Tick()
 		local target = AutoFarm_NextTarget()
 		if not target then return end
 
+		-- Lưu vị trí hiện tại trước khi teleport — dùng để return về sau
 		if not AutoFarm._originCF then
 			local myActor = ReplicatorService and ReplicatorService.LocalActor
 			if myActor then
@@ -2486,6 +2523,7 @@ local function AutoFarm_Tick()
 
 	-- PHASE: RETURN — teleport về vị trí ban đầu trước khi seek target kế
 	if AutoFarm._phase == "return" then
+		-- Teleport về ngay lập tức mỗi tick (giữ nguyên vị trí nếu bị server push)
 		if AutoFarm._originCF then
 			local myActor = ReplicatorService and ReplicatorService.LocalActor
 			if myActor then
@@ -2496,6 +2534,7 @@ local function AutoFarm_Tick()
 				end)
 			end
 		end
+		-- Chờ 0.5s ổn định rồi mới seek target kế
 		if (now - AutoFarm._returnTimer) >= 0.5 then
 			AutoFarm._originCF = nil
 			AutoFarm._phase = "seek"
@@ -2696,6 +2735,7 @@ S_BT:AddColorPicker({ Name="Tracer Color", Flag="BT_Color", Default=BulletTracer
 		end
 	end })
 
+pcall(function()
 local S_BeamTracer=MiscTab:DrawSection({ Name="Beam Tracer (Lean)", Position="left" })
 S_BeamTracer:AddToggle({ Name="Enabled", Flag="BT2_Enabled", Default=false, Callback=function(v)
 	BeamTracer.Enabled=v; if v then ResolveGunHooks() end
@@ -2709,6 +2749,7 @@ S_BeamTracer:AddSlider({ Name="Duration (s)", Min=1, Max=30, Default=6, Flag="BT
 	Callback=function(v) BeamTracer.Duration=v/10 end })
 S_BeamTracer:AddSlider({ Name="Width (x0.01)", Min=1, Max=30, Default=8, Flag="BT2_Width",
 	Callback=function(v) BeamTracer.Width=v/100 end })
+end)
 
 print("[VehicleMods + BulletTracer + FOV Screen-Center] Loaded")
 
@@ -3027,7 +3068,6 @@ print("[AntiFall] Loaded")
 
 
 
--- ==========================================
 -- AURA KILL — Verified từ Flux_client.lua source
 -- Cipher đúng 100%: netEncode verified = RSpy dump match
 -- net:FireServer() = RemoteEvent:FireServer(netEncode(JSONEncode({_code,...}), _key))
@@ -3261,7 +3301,8 @@ S_AK:AddButton({Name="Rescan Network",
 
 print("[AuraKill] Loaded — Cipher verified vs RSpy dump")
 
--- ==========================================
+
+
 pcall(function()
 -- AUTO FARM
 local AutoFarm = {Enabled=false, OffsetY=-2, _connection=nil, _running=false}
@@ -3347,6 +3388,10 @@ S_AF:AddSlider({Name="Y Offset", Flag="AF_OffsetY", Min=-10, Max=0, Default=-2, 
 	Callback=function(v) AutoFarm.OffsetY=v end})
 print("[AutoFarm] Loaded")
 end)
+
+
+
+
 
 -- AUTO LOCKPICK v4
 -- InputService._mounts["PickLock"] là callback thật
@@ -3479,14 +3524,18 @@ end)
 
 pcall(function()
 -- VEHICLE TELEPORTER
+-- ControllerService không được assign trong BulkScan → luôn nil
+-- Lấy vehicle qua VehicleService.Vehicles + LocalActor.Seat.UID
 local VehicleTeleport = { _savedCF = nil }
 
 local function VT_GetVehicle()
     local localActor = ReplicatorService and ReplicatorService.LocalActor
     if not localActor then return nil end
+
     local seat = localActor.Seat
     if not seat then return nil end
 
+    -- Method 1: VehicleService.Vehicles lookup theo UID
     local uid = seat.UID
     if uid and VehicleService and VehicleService.Vehicles then
         for _, veh in pairs(VehicleService.Vehicles) do
@@ -3494,6 +3543,7 @@ local function VT_GetVehicle()
         end
     end
 
+    -- Method 2: GC scan — tìm vehicle có Controlling = true + ComponentReplicates
     local ok, gc = pcall(function() return getgc(true) end)
     if not ok or not gc then return nil end
     for _, obj in pairs(gc) do
@@ -3509,6 +3559,7 @@ local function VT_GetVehicle()
 end
 
 local function VT_GetSolver(vehicle)
+    -- Tìm controller có _vehicle match để lấy solver
     local ok, gc = pcall(function() return getgc(true) end)
     if not ok or not gc then return nil end
     for _, obj in pairs(gc) do
@@ -3529,11 +3580,13 @@ local function TeleportVehicle(targetCF)
         return
     end
 
+    -- Step 1: set CFrame
     pcall(function()
         vehicle.CFrame = targetCF
         if vehicle.Hitbox then vehicle.Hitbox.CFrame = targetCF end
     end)
 
+    -- Step 2: reset solver velocity → không drift sau teleport
     pcall(function()
         local solver = VT_GetSolver(vehicle)
         if solver and solver.SetState then
@@ -3541,6 +3594,7 @@ local function TeleportVehicle(targetCF)
         end
     end)
 
+    -- Step 3: SimulatedPosition — cách VehicleFly replicate lên server
     pcall(function()
         if ReplicatorService and ReplicatorService.LocalActor then
             ReplicatorService.LocalActor.SimulatedPosition = targetCF.Position
@@ -3554,6 +3608,7 @@ getgenv().VehicleTeleport = VehicleTeleport
 
 local S_VT = VehicleTab:DrawSection({Name="Vehicle Teleporter", Position="left"})
 
+-- Button 1: Lấy toạ độ
 S_VT:AddButton({ Name="Lấy Toạ Độ", Callback=function()
     pcall(function()
         local vehicle = VT_GetVehicle()
@@ -3578,6 +3633,7 @@ S_VT:AddButton({ Name="Lấy Toạ Độ", Callback=function()
     end)
 end})
 
+-- Button 2: Teleport phương tiện
 S_VT:AddButton({ Name="Teleport Phương Tiện", Callback=function()
     pcall(function()
         if not VehicleTeleport._savedCF then
@@ -3588,6 +3644,7 @@ S_VT:AddButton({ Name="Teleport Phương Tiện", Callback=function()
     end)
 end})
 
+-- Button 3: Xóa toạ độ
 S_VT:AddButton({ Name="Xóa Toạ Độ", Callback=function()
     pcall(function()
         VehicleTeleport._savedCF = nil
