@@ -1106,40 +1106,6 @@ pcall(function() FOVCircle.NumSides=60 end)
 FOVCircle.Radius=Config.SilentAimFOV
 FOVCircle.Filled=false; FOVCircle.Visible=false; FOVCircle.Color=Color3.fromRGB(255,255,255)
 
-local GunFOVConfig={FillFOV=false,FOVFillColor=Color3.fromRGB(255,255,255),FOVFillTransparency=0.4,GradientFOV=false,GradientColorA=Color3.fromRGB(150,80,255),GradientColorB=Color3.fromRGB(255,110,60),GradientSpin=false,GradientSpinSpeed=1}
-local SilentFOVFill, DrawGradientFOV, HideGradientFOV
-local _gradPhase=0; local _gradSegments={}
-pcall(function()
-	SilentFOVFill=Drawing.new("Circle"); SilentFOVFill.NumSides=64; SilentFOVFill.Filled=true
-	SilentFOVFill.Color=GunFOVConfig.FOVFillColor; SilentFOVFill.Transparency=GunFOVConfig.FOVFillTransparency; SilentFOVFill.Visible=false
-	for i=1,48 do local ln=Drawing.new("Line"); ln.Thickness=2; ln.Transparency=1; ln.Visible=false; _gradSegments[i]=ln end
-	local _gradGui,_gradFill,_gradGradient
-	pcall(function()
-		_gradGui=Instance.new("ScreenGui"); _gradGui.Name="FOVGradient"; _gradGui.IgnoreGuiInset=true
-		_gradGui.ResetOnSpawn=false; _gradGui.DisplayOrder=0; _gradGui.Parent=(gethui and gethui()) or game:GetService("CoreGui")
-		_gradFill=Instance.new("Frame"); _gradFill.AnchorPoint=Vector2.new(.5,.5); _gradFill.BackgroundColor3=Color3.new(1,1,1)
-		_gradFill.BorderSizePixel=0; _gradFill.Visible=false; _gradFill.Active=false; _gradFill.Parent=_gradGui
-		local corner=Instance.new("UICorner"); corner.CornerRadius=UDim.new(1,0); corner.Parent=_gradFill
-		_gradGradient=Instance.new("UIGradient"); _gradGradient.Parent=_gradFill
-	end)
-	DrawGradientFOV=function(center,radius,colorA,colorB,filled,alpha,dt)
-		if GunFOVConfig.GradientSpin then _gradPhase=(_gradPhase+(dt or 0)*GunFOVConfig.GradientSpinSpeed*math.pi*2)%(math.pi*2) else _gradPhase=0 end
-		local n=#_gradSegments
-		for i,ln in ipairs(_gradSegments) do
-			local a0=(i-1)/n*math.pi*2; local a1=i/n*math.pi*2
-			ln.From=center+Vector2.new(math.cos(a0),math.sin(a0))*radius; ln.To=center+Vector2.new(math.cos(a1),math.sin(a1))*radius
-			ln.Color=colorA:Lerp(colorB,(math.sin((a0+a1)*.5-_gradPhase)+1)*.5); ln.Transparency=1; ln.Visible=true; ln.ZIndex=1
-		end
-		if _gradFill then
-			_gradFill.Visible=filled and alpha>0; _gradFill.Position=UDim2.fromOffset(center.X,center.Y); _gradFill.Size=UDim2.fromOffset(radius*2,radius*2)
-			_gradFill.BackgroundTransparency=1-math.clamp(alpha,0,1)
-			if _gradGradient then _gradGradient.Color=ColorSequence.new(colorA,colorB); _gradGradient.Rotation=90+math.deg(_gradPhase) end
-		end
-	end
-	HideGradientFOV=function() for _,ln in ipairs(_gradSegments) do ln.Visible=false end; if _gradFill then _gradFill.Visible=false end end
-	print("[Gradient FOV] Loaded")
-end)
-if not DrawGradientFOV then DrawGradientFOV=function() end; HideGradientFOV=function() end end
 getgenv().VelocityCache={}
 getgenv().PredictionDot=Drawing.new("Circle")
 getgenv().PredictionDot.Thickness=1; getgenv().PredictionDot.NumSides=10
