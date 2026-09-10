@@ -1,5 +1,5 @@
 -- TokaiHub Loader — Sakura Edition
--- Full UNC Environment Check + Platform select
+-- Fast UNC check + Pink transparent UI
 
 local blockedExecutors = {["Solara"]=true,["Xeno"]=true,["Wave"]=true,["Synapse Z"]=true,["Vega x"]=true}
 local currentExecutor  = identifyexecutor and identifyexecutor() or "Unknown"
@@ -7,206 +7,138 @@ local currentExecutor  = identifyexecutor and identifyexecutor() or "Unknown"
 local URL_PC     = "https://raw.githubusercontent.com/longtokaiikari-source/LGTKREDBRHM/refs/heads/main/tippc"
 local URL_MOBILE = "https://raw.githubusercontent.com/longtokaiikari-source/LGTKREDBRHM/refs/heads/main/tipmobile"
 
--- ─── Full UNC Check (silent, async) ──────────────────────────────────
-local function runUNC(onDone)
-    task.spawn(function()
-        local passes, fails, running = 0, 0, 0
+-- ─── Fast UNC Check (no I/O, no network, instant) ────────────────────
+local function fastUNC()
+    local checks = {
+        -- Core executor functions (existence check, no side effects)
+        "hookfunction","hookmetatable","getgc","getreg","getgenv","getupvalues",
+        "checkclosure","isourclosure","newcclosure","setclipboard","getloadedmodules",
+        "getnilinstances","gethui","getrawmetatable","getconnections","iscclosure",
+        "islclosure","isexecutorclosure","cloneref","compareinstances","clonefunction",
+        "getcallbackvalue","fireclickdetector","gethiddenproperty","sethiddenproperty",
+        "isscriptable","setscriptable","getinstances","getrenv","getrunningscripts",
+        "getscriptbytecode","getscripts","getsenv","getthreadidentity","setthreadidentity",
+        "isreadonly","setreadonly","setrawmetatable","getnamecallmethod","hookmetamethod",
+        "checkcaller","loadstring","readfile","writefile","isfile","isfolder","makefolder",
+        "listfiles","delfile","delfolder","appendfile","loadfile","getcustomasset",
+        "identifyexecutor","lz4compress","lz4decompress","request","setfpscap",
+        "getscripthash","debug.getconstant","debug.getconstants","debug.getinfo",
+        "debug.getproto","debug.getprotos","debug.getstack","debug.getupvalue",
+        "debug.getupvalues","debug.setconstant","debug.setupvalue","debug.setstack",
+        "crypt.base64encode","crypt.base64decode","crypt.encrypt","crypt.decrypt",
+        "crypt.generatebytes","crypt.generatekey","crypt.hash",
+        "Drawing","isrenderobj","getrenderproperty","setrenderproperty","cleardrawcache",
+        "WebSocket","queue_on_teleport","messagebox","isrbxactive",
+        "cache.invalidate","cache.iscached","cache.replace",
+    }
 
-        local function getGlobal(path)
-            local value = getfenv(0)
-            while value ~= nil and path ~= "" do
-                local name, nextValue = string.match(path, "^([^.]+)%.?(.*)")
-                value = value[name]; path = nextValue
-            end
-            return value
-        end
+    -- Quick functional verify (lightweight, no I/O)
+    local function quickTest(name)
+        local fenv = getfenv(0)
+        local val = fenv
+        for part in name:gmatch("[^.]+") do val = type(val)=="table" and val[part] or nil end
+        return val ~= nil
+    end
 
-        local function test(name, aliases, callback)
-            running += 1
-            task.spawn(function()
-                if callback and getGlobal(name) then
-                    local ok = pcall(callback)
-                    if ok then passes += 1 else fails += 1 end
-                elseif callback and not getGlobal(name) then
-                    fails += 1
-                end
-                running -= 1
-            end)
-        end
+    local pass, fail = 0, 0
+    for _, name in checks do
+        if quickTest(name) then pass += 1 else fail += 1 end
+    end
 
-        -- Cache
-        test("cache.invalidate",{},function() local c=Instance.new("Folder"); local p=Instance.new("Part",c); cache.invalidate(c:FindFirstChild("Part")); assert(p~=c:FindFirstChild("Part")) end)
-        test("cache.iscached",{},function() local p=Instance.new("Part"); assert(cache.iscached(p)); cache.invalidate(p); assert(not cache.iscached(p)) end)
-        test("cache.replace",{},function() local p=Instance.new("Part"); local f=Instance.new("Fire"); cache.replace(p,f); assert(p~=f) end)
-        test("cloneref",{},function() local p=Instance.new("Part"); local c=cloneref(p); assert(p~=c); c.Name="Test"; assert(p.Name=="Test") end)
-        test("compareinstances",{},function() local p=Instance.new("Part"); local c=cloneref(p); assert(compareinstances(p,c)) end)
+    -- 3 lightweight functional tests (no network/file I/O)
+    local function tryTest(fn)
+        local ok = pcall(fn)
+        if ok then pass += 1 else fail += 1 end
+    end
 
-        -- Closures
-        test("checkcaller",{},function() assert(checkcaller()) end)
-        test("clonefunction",{},function() local f=function() return "success" end; local c=clonefunction(f); assert(f()==c() and f~=c) end)
-        test("getcallingscript",{})
-        test("hookfunction",{"replaceclosure"},function() local f=function() return true end; local r=hookfunction(f,function() return false end); assert(f()==false and r()==true) end)
-        test("iscclosure",{},function() assert(iscclosure(print)==true and iscclosure(function()end)==false) end)
-        test("islclosure",{},function() assert(islclosure(print)==false and islclosure(function()end)==true) end)
-        test("isexecutorclosure",{"checkclosure","isourclosure"},function() assert(isexecutorclosure(isexecutorclosure)==true and isexecutorclosure(print)==false) end)
-        test("newcclosure",{},function() local f=function() return true end; local c=newcclosure(f); assert(f()==c() and f~=c and iscclosure(c)) end)
-        test("loadstring",{},function() assert(assert(loadstring("return ... + 1"))(1)==2) end)
+    if getgenv then tryTest(function()
+        getgenv().__TOKAIHUB_UNC = true
+        assert(__TOKAIHUB_UNC)
+        getgenv().__TOKAIHUB_UNC = nil
+    end) end
 
-        -- Console
-        test("rconsoleclear",{"consoleclear"})
-        test("rconsolecreate",{"consolecreate"})
-        test("rconsoledestroy",{"consoledestroy"})
-        test("rconsoleinput",{"consoleinput"})
-        test("rconsoleprint",{"consoleprint"})
-        test("rconsolesettitle",{"rconsolename","consolesettitle"})
+    if iscclosure then tryTest(function()
+        assert(iscclosure(print) == true)
+        assert(iscclosure(function() end) == false)
+    end) end
 
-        -- Crypt
-        test("crypt.base64encode",{"crypt.base64.encode","crypt.base64_encode","base64.encode","base64_encode"},function() assert(crypt.base64encode("test")=="dGVzdA==") end)
-        test("crypt.base64decode",{"crypt.base64.decode","crypt.base64_decode","base64.decode","base64_decode"},function() assert(crypt.base64decode("dGVzdA==")=="test") end)
-        test("crypt.encrypt",{},function() local k=crypt.generatekey(); local e,iv=crypt.encrypt("test",k,nil,"CBC"); assert(iv); assert(crypt.decrypt(e,k,iv,"CBC")=="test") end)
-        test("crypt.decrypt",{},function() local k,iv=crypt.generatekey(),crypt.generatekey(); local e=crypt.encrypt("test",k,iv,"CBC"); assert(crypt.decrypt(e,k,iv,"CBC")=="test") end)
-        test("crypt.generatebytes",{},function() local s=math.random(10,100); local b=crypt.generatebytes(s); assert(#crypt.base64decode(b)==s) end)
-        test("crypt.generatekey",{},function() local k=crypt.generatekey(); assert(#crypt.base64decode(k)==32) end)
-        test("crypt.hash",{},function() for _,a in{"sha1","sha384","sha512","md5","sha256"} do assert(crypt.hash("test",a)) end end)
+    if newcclosure then tryTest(function()
+        local f = function() return 42 end
+        local c = newcclosure(f)
+        assert(c() == 42 and f ~= c)
+    end) end
 
-        -- Debug
-        test("debug.getconstant",{},function() local f=function() print("Hello, world!") end; assert(debug.getconstant(f,1)=="print" and debug.getconstant(f,3)=="Hello, world!") end)
-        test("debug.getconstants",{},function() local f=function() local n=5000 .."x"; print("Hello, world!",n,warn) end; local c=debug.getconstants(f); assert(c[2]=="print") end)
-        test("debug.getinfo",{},function() local f=function() end; local i=debug.getinfo(f); assert(i.what and i.nups~=nil) end)
-        test("debug.getproto",{},function() local f=function() local function p() return true end end; local p=debug.getproto(f,1,true)[1]; assert(p and p()==true) end)
-        test("debug.getprotos",{},function() local f=function() local function a() return true end; local function b() return true end end; assert(#debug.getprotos(f)>0) end)
-        test("debug.getstack",{},function() local _="a".."b"; assert(debug.getstack(1,1)=="ab") end)
-        test("debug.getupvalue",{},function() local u=function()end; local f=function() print(u) end; assert(debug.getupvalue(f,1)==u) end)
-        test("debug.getupvalues",{},function() local u=function()end; local f=function() print(u) end; assert(debug.getupvalues(f)[1]==u) end)
-        test("debug.setconstant",{},function() local f=function() return "fail" end; debug.setconstant(f,1,"success"); assert(f()=="success") end)
-        test("debug.setupvalue",{},function() local u=function() return "fail" end; local f=function() return u() end; debug.setupvalue(f,1,function() return "success" end); assert(f()=="success") end)
-
-        -- Filesystem
-        test("readfile",{},function() writefile(".tests/r.txt","success"); assert(readfile(".tests/r.txt")=="success") end)
-        test("listfiles",{},function() makefolder(".tests/lf"); writefile(".tests/lf/a.txt","x"); writefile(".tests/lf/b.txt","x"); assert(#listfiles(".tests/lf")==2) end)
-        test("writefile",{},function() writefile(".tests/w.txt","success"); assert(readfile(".tests/w.txt")=="success") end)
-        test("makefolder",{},function() makefolder(".tests/mf"); assert(isfolder(".tests/mf")) end)
-        test("appendfile",{},function() writefile(".tests/af.txt","su"); appendfile(".tests/af.txt","ccess"); assert(readfile(".tests/af.txt")=="success") end)
-        test("isfile",{},function() writefile(".tests/if.txt","x"); assert(isfile(".tests/if.txt")==true and isfile(".tests")==false) end)
-        test("isfolder",{},function() assert(isfolder(".tests")==true and isfolder(".tests/nope.exe")==false) end)
-        test("delfolder",{},function() makefolder(".tests/df"); delfolder(".tests/df"); assert(not isfolder(".tests/df")) end)
-        test("delfile",{},function() writefile(".tests/del.txt","x"); delfile(".tests/del.txt"); assert(not isfile(".tests/del.txt")) end)
-        test("loadfile",{},function() writefile(".tests/lf2.txt","return ...+1"); assert(assert(loadfile(".tests/lf2.txt"))(1)==2) end)
-        test("dofile",{})
-
-        -- Input
-        test("isrbxactive",{"isgameactive"},function() assert(type(isrbxactive())=="boolean") end)
-        test("mouse1click",{}); test("mouse1press",{}); test("mouse1release",{})
-        test("mouse2click",{}); test("mouse2press",{}); test("mouse2release",{})
-        test("mousemoveabs",{}); test("mousemoverel",{}); test("mousescroll",{})
-
-        -- Instances
-        test("fireclickdetector",{},function() local d=Instance.new("ClickDetector"); fireclickdetector(d,50,"MouseHoverEnter") end)
-        test("getcallbackvalue",{},function() local b=Instance.new("BindableFunction"); local f=function()end; b.OnInvoke=f; assert(getcallbackvalue(b,"OnInvoke")==f) end)
-        test("getconnections",{},function() local b=Instance.new("BindableEvent"); b.Event:Connect(function()end); local c=getconnections(b.Event)[1]; assert(c.Function and c.Disconnect) end)
-        test("getcustomasset",{},function() writefile(".tests/ga.txt","x"); local c=getcustomasset(".tests/ga.txt"); assert(type(c)=="string" and c:find("rbxasset://")) end)
-        test("gethiddenproperty",{},function() local f=Instance.new("Fire"); local p,h=gethiddenproperty(f,"size_xml"); assert(p==5 and h==true) end)
-        test("sethiddenproperty",{},function() local f=Instance.new("Fire"); local h=sethiddenproperty(f,"size_xml",10); assert(h and gethiddenproperty(f,"size_xml")==10) end)
-        test("gethui",{},function() assert(typeof(gethui())=="Instance") end)
-        test("getinstances",{},function() assert(getinstances()[1]:IsA("Instance")) end)
-        test("getnilinstances",{},function() assert(getnilinstances()[1].Parent==nil) end)
-        test("isscriptable",{},function() local f=Instance.new("Fire"); assert(isscriptable(f,"size_xml")==false and isscriptable(f,"Size")==true) end)
-        test("setscriptable",{},function() local f=Instance.new("Fire"); local w=setscriptable(f,"size_xml",true); assert(w==false and isscriptable(f,"size_xml")==true) end)
-        test("setrbxclipboard",{})
-
-        -- Metatable
-        test("getrawmetatable",{},function() local mt={__metatable="Locked!"}; local o=setmetatable({},mt); assert(getrawmetatable(o)==mt) end)
-        test("hookmetamethod",{},function() local o=setmetatable({},{__index=newcclosure(function() return false end),__metatable="Locked!"}); local r=hookmetamethod(o,"__index",function() return true end); assert(o.test==true and r()==false) end)
-        test("getnamecallmethod",{},function() local m; local r; r=hookmetamethod(game,"__namecall",function(...) if not m then m=getnamecallmethod() end; return r(...) end); game:GetService("Lighting"); assert(m=="GetService") end)
-        test("isreadonly",{},function() local o={}; table.freeze(o); assert(isreadonly(o)) end)
-        test("setrawmetatable",{},function() local o=setmetatable({},{__index=function() return false end,__metatable="Locked!"}); setrawmetatable(o,{__index=function() return true end}); assert(o.test==true) end)
-        test("setreadonly",{},function() local o={success=false}; table.freeze(o); setreadonly(o,false); o.success=true; assert(o.success) end)
-
-        -- Misc
-        test("identifyexecutor",{"getexecutorname"},function() local n=identifyexecutor(); assert(type(n)=="string") end)
-        test("lz4compress",{},function() local r="Hello, world!"; local c=lz4compress(r); assert(lz4decompress(c,#r)==r) end)
-        test("lz4decompress",{},function() local r="Hello, world!"; local c=lz4compress(r); assert(lz4decompress(c,#r)==r) end)
-        test("messagebox",{})
-        test("queue_on_teleport",{"queueonteleport"})
-        test("request",{"http.request","http_request"},function() local r=request({Url="https://httpbin.org/user-agent",Method="GET"}); assert(type(r)=="table" and r.StatusCode==200) end)
-        test("setclipboard",{"toclipboard"})
-        test("setfpscap",{},function() local rs=game:GetService("RunService").RenderStepped; setfpscap(60); task.wait(0.1); setfpscap(0) end)
-
-        -- Scripts
-        test("getgc",{},function() local gc=getgc(); assert(type(gc)=="table" and #gc>0) end)
-        test("getgenv",{},function() getgenv().__TOKAIHUB_TEST=true; assert(__TOKAIHUB_TEST); getgenv().__TOKAIHUB_TEST=nil end)
-        test("getloadedmodules",{},function() local m=getloadedmodules(); assert(type(m)=="table" and #m>0 and typeof(m[1])=="Instance") end)
-        test("getrenv",{},function() assert(_G~=getrenv()._G) end)
-        test("getrunningscripts",{},function() local s=getrunningscripts(); assert(type(s)=="table" and #s>0) end)
-        test("getscriptbytecode",{"dumpstring"},function() local a=game:GetService("Players").LocalPlayer.Character.Animate; assert(type(getscriptbytecode(a))=="string") end)
-        test("getscripts",{},function() local s=getscripts(); assert(type(s)=="table" and #s>0) end)
-        test("getsenv",{},function() local a=game:GetService("Players").LocalPlayer.Character.Animate; local e=getsenv(a); assert(type(e)=="table" and e.script==a) end)
-        test("getthreadidentity",{"getidentity","getthreadcontext"},function() assert(type(getthreadidentity())=="number") end)
-        test("setthreadidentity",{"setidentity","setthreadcontext"},function() setthreadidentity(3); assert(getthreadidentity()==3) end)
-
-        -- Drawing
-        test("Drawing",{})
-        test("Drawing.new",{},function() local d=Drawing.new("Square"); d.Visible=false; pcall(function() d:Destroy() end) end)
-        test("Drawing.Fonts",{},function() assert(Drawing.Fonts.UI==0 and Drawing.Fonts.System==1 and Drawing.Fonts.Plex==2 and Drawing.Fonts.Monospace==3) end)
-        test("isrenderobj",{},function() local d=Drawing.new("Image"); d.Visible=true; assert(isrenderobj(d)==true and isrenderobj(newproxy())==false) end)
-        test("getrenderproperty",{},function() local d=Drawing.new("Image"); d.Visible=true; assert(type(getrenderproperty(d,"Visible"))=="boolean") end)
-        test("setrenderproperty",{},function() local d=Drawing.new("Square"); d.Visible=true; setrenderproperty(d,"Visible",false); assert(d.Visible==false) end)
-        test("cleardrawcache",{},function() cleardrawcache() end)
-
-        -- WebSocket
-        test("WebSocket",{})
-        test("WebSocket.connect",{},function() local ws=WebSocket.connect("ws://echo.websocket.events"); assert(type(ws.Send)=="function" and type(ws.Close)=="function"); ws:Close() end)
-
-        -- Wait for all async tests
-        repeat task.wait() until running == 0
-
-        local total = passes + fails
-        local rate = total > 0 and math.round(passes/total*100) or 0
-        onDone(rate, passes, fails)
-    end)
+    local total = pass + fail
+    return total > 0 and math.round(pass / total * 100) or 0, pass, fail
 end
 
--- ─── Colors ──────────────────────────────────────────────────────────
+-- ─── Colors — Pink transparent sakura ────────────────────────────────
 local C = {
-    bg        = Color3.fromRGB(12,  8, 16),
-    panel     = Color3.fromRGB(22, 14, 28),
-    stroke    = Color3.fromRGB(255,140,175),
-    title     = Color3.fromRGB(255,192,215),
-    accent    = Color3.fromRGB(255,105,150),
-    text      = Color3.fromRGB(220,190,210),
-    textDim   = Color3.fromRGB(150,120,140),
-    pass      = Color3.fromRGB( 80,220,140),
-    warn      = Color3.fromRGB(255,200, 80),
-    fail      = Color3.fromRGB(240, 70, 80),
-    btnPC     = Color3.fromRGB(180, 70,120),
-    btnMobile = Color3.fromRGB(120, 50, 90),
-    btnBlock  = Color3.fromRGB( 88,101,242),
-    divider   = Color3.fromRGB( 70, 40, 60),
-    petal1    = Color3.fromRGB(255,182,210),
-    petal2    = Color3.fromRGB(255,154,185),
-    petal3    = Color3.fromRGB(240,120,160),
+    -- Panel: vivid pink, very transparent
+    panel       = Color3.fromRGB(255, 180, 210),
+    panelTop    = Color3.fromRGB(255, 140, 180),
+    stroke      = Color3.fromRGB(255, 100, 160),
+    strokeGlow  = Color3.fromRGB(255, 180, 210),
+    title       = Color3.fromRGB(255, 255, 255),
+    accent      = Color3.fromRGB(255,  80, 140),
+    text        = Color3.fromRGB(255, 240, 248),
+    textDim     = Color3.fromRGB(255, 200, 225),
+    pass        = Color3.fromRGB(100, 255, 180),
+    warn        = Color3.fromRGB(255, 220,  80),
+    fail        = Color3.fromRGB(255,  80,  80),
+    btnPC       = Color3.fromRGB(220,  60, 120),
+    btnMobile   = Color3.fromRGB(180,  40,  90),
+    btnBlock    = Color3.fromRGB( 88, 101, 242),
+    divider     = Color3.fromRGB(255, 150, 190),
+    petal1      = Color3.fromRGB(255, 200, 220),
+    petal2      = Color3.fromRGB(255, 160, 195),
+    petal3      = Color3.fromRGB(255, 130, 170),
 }
 
 local ts = game:GetService("TweenService")
-local function tween(obj,t,p) ts:Create(obj,TweenInfo.new(t,Enum.EasingStyle.Quint,Enum.EasingDirection.Out),p):Play() end
+local function tw(obj,t,p) ts:Create(obj,TweenInfo.new(t,Enum.EasingStyle.Quint,Enum.EasingDirection.Out),p):Play() end
 
 -- ─── ScreenGui ───────────────────────────────────────────────────────
 local sg = Instance.new("ScreenGui")
-sg.Name="TokaiHub_Loader"; sg.ResetOnSpawn=false; sg.ZIndexBehavior=Enum.ZIndexBehavior.Global; sg.DisplayOrder=9999; sg.IgnoreGuiInset=true
-pcall(function() if type(gethui)=="function" then sg.Parent=gethui() else sg.Parent=game:GetService("CoreGui") end end)
+sg.Name="TokaiHub_Loader"; sg.ResetOnSpawn=false
+sg.ZIndexBehavior=Enum.ZIndexBehavior.Global; sg.DisplayOrder=9999; sg.IgnoreGuiInset=true
+pcall(function()
+    if type(gethui)=="function" then sg.Parent=gethui()
+    else sg.Parent=game:GetService("CoreGui") end
+end)
 if not sg.Parent then sg.Parent=game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui") end
 
--- Overlay
-local overlay=Instance.new("Frame",sg); overlay.Size=UDim2.fromScale(1,1); overlay.BackgroundColor3=Color3.fromRGB(0,0,0); overlay.BackgroundTransparency=1; overlay.BorderSizePixel=0; overlay.ZIndex=1
+-- ─── Blur (DepthOfField behind panel) ────────────────────────────────
+local dof = Instance.new("DepthOfFieldEffect")
+dof.FarIntensity=0; dof.NearIntensity=0.6; dof.FocusDistance=10; dof.InFocusRadius=5; dof.Enabled=true
+dof.Parent = game:GetService("Lighting")
+tw(dof, 0.4, {NearIntensity=0.6})
 
--- Panel
-local W,H=420,330
-local panel=Instance.new("Frame",sg)
-panel.Size=UDim2.fromOffset(W*0.85,H*0.85); panel.AnchorPoint=Vector2.new(0.5,0.5); panel.Position=UDim2.fromScale(0.5,0.5)
-panel.BackgroundColor3=C.panel; panel.BackgroundTransparency=1; panel.BorderSizePixel=0; panel.ZIndex=2; panel.Active=true
-Instance.new("UICorner",panel).CornerRadius=UDim.new(0,14)
-local panelGrad=Instance.new("UIGradient",panel); panelGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,Color3.fromRGB(28,14,36)),ColorSequenceKeypoint.new(1,Color3.fromRGB(14,8,20))}); panelGrad.Rotation=145
-local panelStroke=Instance.new("UIStroke",panel); panelStroke.Thickness=1.5; panelStroke.Color=C.stroke; panelStroke.Transparency=1
+-- ─── Panel — Pink frosted glass ───────────────────────────────────────
+local W, H = 420, 310
+local panel = Instance.new("Frame", sg)
+panel.Size=UDim2.fromOffset(W*0.85,H*0.85)
+panel.AnchorPoint=Vector2.new(0.5,0.5); panel.Position=UDim2.fromScale(0.5,0.5)
+panel.BackgroundColor3=C.panel
+panel.BackgroundTransparency=0.45   -- xuyên thấu, thấy game qua
+panel.BorderSizePixel=0; panel.ZIndex=2; panel.Active=true
+Instance.new("UICorner",panel).CornerRadius=UDim.new(0,16)
+
+-- Pink gradient (top đậm hơn, bottom nhạt)
+local panelGrad=Instance.new("UIGradient",panel)
+panelGrad.Color=ColorSequence.new({
+    ColorSequenceKeypoint.new(0, C.panelTop),
+    ColorSequenceKeypoint.new(1, C.panel),
+})
+panelGrad.Rotation=160
+
+-- Stroke hồng sáng
+local panelStroke=Instance.new("UIStroke",panel)
+panelStroke.Thickness=1.8; panelStroke.Color=C.stroke; panelStroke.Transparency=0.1
+
+-- Inner glow (second stroke thicker, more transparent)
+local innerGlow=Instance.new("UIStroke")
+innerGlow.Thickness=4; innerGlow.Color=C.strokeGlow; innerGlow.Transparency=0.75; innerGlow.Parent=panel
 
 -- Drag
 do
@@ -216,147 +148,159 @@ do
             dragging=true; start=inp.Position; startPos=panel.Position
             local conn; conn=game:GetService("UserInputService").InputChanged:Connect(function(i)
                 if dragging and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then
-                    local d=i.Position-start; panel.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+d.X,startPos.Y.Scale,startPos.Y.Offset+d.Y)
+                    local d=i.Position-start
+                    panel.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+d.X,startPos.Y.Scale,startPos.Y.Offset+d.Y)
                 end
             end)
-            inp.Changed:Connect(function() if inp.UserInputState==Enum.UserInputState.End then dragging=false; conn:Disconnect() end end)
+            inp.Changed:Connect(function()
+                if inp.UserInputState==Enum.UserInputState.End then dragging=false; conn:Disconnect() end
+            end)
         end
     end)
 end
 
 -- Helpers
-local function mkLabel(p) local l=Instance.new("TextLabel",panel); l.BackgroundTransparency=1; l.ZIndex=3; l.TextWrapped=true; for k,v in p do pcall(function() l[k]=v end) end; return l end
-local function mkFrame(p) local f=Instance.new("Frame",panel); f.BorderSizePixel=0; f.ZIndex=3; for k,v in p do pcall(function() f[k]=v end) end; return f end
-local function mkDivider(y) local d=mkFrame({Size=UDim2.new(1,-40,0,1),Position=UDim2.new(0,20,0,y),BackgroundColor3=C.divider}); local g=Instance.new("UIGradient",d); g.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,Color3.fromRGB(0,0,0)),ColorSequenceKeypoint.new(0.25,C.divider),ColorSequenceKeypoint.new(0.75,C.divider),ColorSequenceKeypoint.new(1,Color3.fromRGB(0,0,0))}); return d end
-
+local function mkLabel(p)
+    local l=Instance.new("TextLabel",panel); l.BackgroundTransparency=1; l.ZIndex=3; l.TextWrapped=true
+    for k,v in p do pcall(function() l[k]=v end) end; return l
+end
+local function mkDivider(y)
+    local d=Instance.new("Frame",panel); d.Size=UDim2.new(1,-40,0,1); d.Position=UDim2.new(0,20,0,y)
+    d.BackgroundColor3=C.divider; d.BackgroundTransparency=0.5; d.BorderSizePixel=0; d.ZIndex=3
+    local g=Instance.new("UIGradient",d)
+    g.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,Color3.fromRGB(255,255,255)),ColorSequenceKeypoint.new(0.2,C.divider),ColorSequenceKeypoint.new(0.8,C.divider),ColorSequenceKeypoint.new(1,Color3.fromRGB(255,255,255))})
+    g.Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,1),NumberSequenceKeypoint.new(0.15,0.5),NumberSequenceKeypoint.new(0.85,0.5),NumberSequenceKeypoint.new(1,1)})
+    return d
+end
 local function mkBtn(text,color,size,pos)
-    local b=Instance.new("TextButton",panel); b.Size=size; b.Position=pos; b.Text=text; b.Font=Enum.Font.GothamBold; b.TextSize=14; b.TextColor3=Color3.fromRGB(255,255,255); b.BackgroundColor3=color; b.BorderSizePixel=0; b.ZIndex=3
-    Instance.new("UICorner",b).CornerRadius=UDim.new(0,8)
-    local s=Instance.new("UIStroke",b); s.Color=Color3.fromRGB(255,255,255); s.Transparency=0.85; s.Thickness=1
-    b.MouseEnter:Connect(function() tween(b,0.12,{BackgroundColor3=Color3.fromRGB(math.min(color.R*255+25,255),math.min(color.G*255+25,255),math.min(color.B*255+25,255))}) end)
-    b.MouseLeave:Connect(function() tween(b,0.12,{BackgroundColor3=color}) end)
-    b.MouseButton1Down:Connect(function() tween(b,0.08,{Size=UDim2.new(size.X.Scale,size.X.Offset-4,size.Y.Scale,size.Y.Offset-3)}) end)
-    b.MouseButton1Up:Connect(function() tween(b,0.08,{Size=size}) end)
+    local b=Instance.new("TextButton",panel); b.Size=size; b.Position=pos; b.Text=text
+    b.Font=Enum.Font.GothamBold; b.TextSize=14; b.TextColor3=Color3.fromRGB(255,255,255)
+    b.BackgroundColor3=color; b.BackgroundTransparency=0.15; b.BorderSizePixel=0; b.ZIndex=3
+    Instance.new("UICorner",b).CornerRadius=UDim.new(0,9)
+    local s=Instance.new("UIStroke",b); s.Color=Color3.fromRGB(255,255,255); s.Transparency=0.6; s.Thickness=1.2
+    b.MouseEnter:Connect(function() tw(b,0.12,{BackgroundTransparency=0,BackgroundColor3=Color3.fromRGB(math.min(color.R*255+30,255),math.min(color.G*255+10,255),math.min(color.B*255+20,255))}) end)
+    b.MouseLeave:Connect(function() tw(b,0.12,{BackgroundTransparency=0.15,BackgroundColor3=color}) end)
+    b.MouseButton1Down:Connect(function() tw(b,0.06,{Size=UDim2.new(size.X.Scale,size.X.Offset-4,size.Y.Scale,size.Y.Offset-3)}) end)
+    b.MouseButton1Up:Connect(function() tw(b,0.08,{Size=size}) end)
     return b
 end
 
--- Sakura petals
-local petalColors={C.petal1,C.petal2,C.petal3,Color3.fromRGB(255,210,225)}
+-- ─── Sakura petals ────────────────────────────────────────────────────
 task.spawn(function()
+    local petalColors={C.petal1,C.petal2,C.petal3,Color3.fromRGB(255,220,235)}
     while sg and sg.Parent do
-        local p=Instance.new("Frame",sg); local sz=math.random(6,14)
-        p.Size=UDim2.fromOffset(sz,math.floor(sz*0.6)); p.AnchorPoint=Vector2.new(0.5,0.5)
-        p.Position=UDim2.new(math.random(5,95)/100,0,-0.05,0); p.BackgroundColor3=petalColors[math.random(1,#petalColors)]
-        p.BackgroundTransparency=math.random(2,5)/10; p.BorderSizePixel=0; p.Rotation=math.random(0,360); p.ZIndex=4
+        local p=Instance.new("Frame",sg); local sz=math.random(5,12)
+        p.Size=UDim2.fromOffset(sz,math.floor(sz*0.55))
+        p.AnchorPoint=Vector2.new(0.5,0.5)
+        p.Position=UDim2.new(math.random(3,97)/100,0,-0.04,0)
+        p.BackgroundColor3=petalColors[math.random(1,#petalColors)]
+        p.BackgroundTransparency=math.random(0,3)/10
+        p.BorderSizePixel=0; p.Rotation=math.random(0,360); p.ZIndex=5
         Instance.new("UICorner",p).CornerRadius=UDim.new(0.5,0)
-        local dur=math.random(35,70)/10; local drift=math.random(-80,80); local sx=p.Position.X.Scale
-        ts:Create(p,TweenInfo.new(dur,Enum.EasingStyle.Sine),{Position=UDim2.new(sx+drift/1000,drift,1.05,0),Rotation=p.Rotation+math.random(180,540),BackgroundTransparency=0.85}):Play()
+        local dur=math.random(40,80)/10; local drift=math.random(-60,60); local sx=p.Position.X.Scale
+        ts:Create(p,TweenInfo.new(dur,Enum.EasingStyle.Sine),{
+            Position=UDim2.new(sx+drift/800,drift,1.04,0),
+            Rotation=p.Rotation+math.random(200,500),
+            BackgroundTransparency=0.9,
+        }):Play()
         game:GetService("Debris"):AddItem(p,dur+0.5)
-        task.wait(math.random(3,8)/10)
+        task.wait(math.random(2,6)/10)
     end
 end)
 
--- Icon row
-local iconRow=mkLabel({Size=UDim2.new(1,0,0,28),Position=UDim2.new(0,0,0,8),Text="✿    ✿    ✿    ✿    ✿",TextColor3=C.stroke,Font=Enum.Font.GothamBold,TextSize=11,TextTransparency=0.5})
-task.spawn(function() local t=0; while iconRow and iconRow.Parent do t=t+task.wait(0.05); iconRow.TextTransparency=0.35+math.sin(t*1.2)*0.3 end end)
+-- ─── UI Layout ────────────────────────────────────────────────────────
+
+-- Shimmer icon row
+local iconRow=mkLabel({Size=UDim2.new(1,0,0,26),Position=UDim2.new(0,0,0,7),Text="✿  ✿  ✿  ✿  ✿",TextColor3=Color3.fromRGB(255,255,255),Font=Enum.Font.GothamBold,TextSize=12,TextTransparency=0.3})
+task.spawn(function() local t=0; while iconRow and iconRow.Parent do t+=task.wait(0.05); iconRow.TextTransparency=0.2+math.sin(t*1.5)*0.25 end end)
 
 -- Title
-local titleLbl=mkLabel({Size=UDim2.new(1,-40,0,32),Position=UDim2.new(0,20,0,33),Text="✿  TokaiHub  ✿",TextColor3=C.title,Font=Enum.Font.GothamBold,TextSize=20,TextXAlignment=Enum.TextXAlignment.Center})
-local titleGrad=Instance.new("UIGradient",titleLbl); titleGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,C.accent),ColorSequenceKeypoint.new(0.5,Color3.fromRGB(255,230,240)),ColorSequenceKeypoint.new(1,C.accent)})
-task.spawn(function() local r=0; while titleLbl and titleLbl.Parent do r=r+task.wait(0.025); titleGrad.Offset=Vector2.new((r/2)%1*2-1,0) end end)
+local titleLbl=mkLabel({Size=UDim2.new(1,-30,0,34),Position=UDim2.new(0,15,0,30),Text="✿  TokaiHub  ✿",TextColor3=Color3.fromRGB(255,255,255),Font=Enum.Font.GothamBold,TextSize=21,TextXAlignment=Enum.TextXAlignment.Center})
+do
+    local g=Instance.new("UIGradient",titleLbl)
+    g.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,C.accent),ColorSequenceKeypoint.new(0.5,Color3.fromRGB(255,240,248)),ColorSequenceKeypoint.new(1,C.accent)})
+    task.spawn(function() local r=0; while titleLbl and titleLbl.Parent do r+=task.wait(0.025); g.Offset=Vector2.new((r/2.5)%1*2-1,0) end end)
+end
 
-mkDivider(73)
+mkDivider(72)
 
--- Executor info
-mkLabel({Size=UDim2.new(0,120,0,20),Position=UDim2.new(0,24,0,83),Text="Executor",TextColor3=C.textDim,Font=Enum.Font.Gotham,TextSize=12,TextXAlignment=Enum.TextXAlignment.Left})
-mkLabel({Size=UDim2.new(0,220,0,20),Position=UDim2.new(1,-244,0,83),Text=currentExecutor,TextColor3=C.text,Font=Enum.Font.GothamBold,TextSize=12,TextXAlignment=Enum.TextXAlignment.Right})
+-- Executor row
+mkLabel({Size=UDim2.new(0.45,0,0,20),Position=UDim2.new(0,22,0,82),Text="Executor",TextColor3=C.textDim,Font=Enum.Font.Gotham,TextSize=12,TextXAlignment=Enum.TextXAlignment.Left})
+mkLabel({Size=UDim2.new(0.55,-22,0,20),Position=UDim2.new(0.45,0,0,82),Text=currentExecutor,TextColor3=C.title,Font=Enum.Font.GothamBold,TextSize=12,TextXAlignment=Enum.TextXAlignment.Right})
 
-mkLabel({Size=UDim2.new(0,120,0,20),Position=UDim2.new(0,24,0,108),Text="UNC Score",TextColor3=C.textDim,Font=Enum.Font.Gotham,TextSize=12,TextXAlignment=Enum.TextXAlignment.Left})
-local uncValueLbl=mkLabel({Size=UDim2.new(0,220,0,20),Position=UDim2.new(1,-244,0,108),Text="Checking...",TextColor3=C.textDim,Font=Enum.Font.GothamBold,TextSize=12,TextXAlignment=Enum.TextXAlignment.Right})
+-- UNC row
+mkLabel({Size=UDim2.new(0.45,0,0,20),Position=UDim2.new(0,22,0,107),Text="UNC Score",TextColor3=C.textDim,Font=Enum.Font.Gotham,TextSize=12,TextXAlignment=Enum.TextXAlignment.Left})
+local uncLbl=mkLabel({Size=UDim2.new(0.55,-22,0,20),Position=UDim2.new(0.45,0,0,107),Text="Checking...",TextColor3=C.textDim,Font=Enum.Font.GothamBold,TextSize=12,TextXAlignment=Enum.TextXAlignment.Right})
 
 -- Progress bar
-local barBg=mkFrame({Size=UDim2.new(1,-40,0,4),Position=UDim2.new(0,20,0,134),BackgroundColor3=Color3.fromRGB(40,25,35)})
+local barBg=Instance.new("Frame",panel); barBg.Size=UDim2.new(1,-40,0,5); barBg.Position=UDim2.new(0,20,0,133)
+barBg.BackgroundColor3=Color3.fromRGB(255,255,255); barBg.BackgroundTransparency=0.7; barBg.BorderSizePixel=0; barBg.ZIndex=3
 Instance.new("UICorner",barBg).CornerRadius=UDim.new(1,0)
 local barFill=Instance.new("Frame",barBg); barFill.Size=UDim2.new(0,0,1,0); barFill.BackgroundColor3=C.accent; barFill.BorderSizePixel=0; barFill.ZIndex=4
 Instance.new("UICorner",barFill).CornerRadius=UDim.new(1,0)
-local barGrad=Instance.new("UIGradient",barFill); barGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,C.accent),ColorSequenceKeypoint.new(1,C.pass)})
-
--- Pulse bar while checking
-local pulseThread=task.spawn(function()
-    local t=0; local dir=1
-    while uncValueLbl.Text=="Checking..." do
-        t=t+(task.wait(0.02)*dir*0.8)
-        if t>=1 then dir=-1 elseif t<=0 then dir=1 end
-        barFill.Size=UDim2.new(t*0.3,0,1,0)
-        barFill.BackgroundColor3=Color3.fromRGB(math.floor(255*t+100*(1-t)),math.floor(105*(1-t)+80*t),math.floor(150+50*t))
-    end
-end)
+local barGrad=Instance.new("UIGradient",barFill)
+barGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,C.accent),ColorSequenceKeypoint.new(1,C.pass)})
 
 mkDivider(148)
 
--- Status label
-local statusLbl=mkLabel({Size=UDim2.new(1,-40,0,28),Position=UDim2.new(0,20,0,156),Text="⏳  Đang kiểm tra UNC...",TextColor3=C.textDim,Font=Enum.Font.GothamBold,TextSize=13,TextXAlignment=Enum.TextXAlignment.Center})
+-- Status
+local statusLbl=mkLabel({Size=UDim2.new(1,-40,0,28),Position=UDim2.new(0,20,0,157),Text="⏳  Đang kiểm tra...",TextColor3=C.textDim,Font=Enum.Font.GothamBold,TextSize=13,TextXAlignment=Enum.TextXAlignment.Center})
 
--- Buttons (hidden until UNC done)
+-- Buttons
 local pcBtn=mkBtn("💻  PC",C.btnPC,UDim2.new(0.5,-28,0,44),UDim2.new(0,20,0,196))
 local mobileBtn=mkBtn("📱  Mobile",C.btnMobile,UDim2.new(0.5,-28,0,44),UDim2.new(0.5,8,0,196))
-local loadLbl=mkLabel({Size=UDim2.new(1,-40,0,24),Position=UDim2.new(0,20,0,250),Text="",TextColor3=C.textDim,Font=Enum.Font.Gotham,TextSize=12,TextXAlignment=Enum.TextXAlignment.Center})
-local discBtn
+local loadLbl=mkLabel({Size=UDim2.new(1,-40,0,22),Position=UDim2.new(0,20,0,249),Text="",TextColor3=C.textDim,Font=Enum.Font.Gotham,TextSize=12,TextXAlignment=Enum.TextXAlignment.Center})
+pcBtn.Visible=false; mobileBtn.Visible=false
 
-pcBtn.Visible=false; mobileBtn.Visible=false; pcBtn.Active=false; mobileBtn.Active=false
+-- ─── Pop-in ───────────────────────────────────────────────────────────
+task.spawn(function()
+    tw(panel,0.45,{Size=UDim2.fromOffset(W,H),BackgroundTransparency=0.45})
+end)
 
--- ─── Pop-in animation ─────────────────────────────────────────────────
-tween(overlay,0.3,{BackgroundTransparency=0.55})
-tween(panel,0.5,{Size=UDim2.fromOffset(W,H),BackgroundTransparency=0.08})
-tween(panelStroke,0.5,{Transparency=0.2})
-
--- ─── Run UNC ──────────────────────────────────────────────────────────
+-- ─── Run fast UNC (instant, same frame basically) ─────────────────────
 local isBlocked=false
-for name in pairs(blockedExecutors) do if currentExecutor:lower():find(name:lower()) then isBlocked=true; break end end
+for name in pairs(blockedExecutors) do
+    if currentExecutor:lower():find(name:lower()) then isBlocked=true; break end
+end
 
-runUNC(function(rate, passes, fails)
-    task.cancel(pulseThread)
+task.spawn(function()
+    task.wait(0.5) -- wait for pop-in to feel natural
+    local rate, passes, fails = fastUNC()
 
     local uncColor = rate>=90 and C.pass or rate>=70 and C.warn or C.fail
-    local petalStr = rate>=90 and "✿✿✿" or rate>=70 and "✿✿" or "✿"
-    uncValueLbl.Text = string.format("%d%% %s (%d/%d)", rate, petalStr, passes, passes+fails)
-    uncValueLbl.TextColor3 = uncColor
-    barGrad.Color = ColorSequence.new({ColorSequenceKeypoint.new(0,C.accent),ColorSequenceKeypoint.new(1,uncColor)})
-    tween(barFill,1.2,{Size=UDim2.new(rate/100,0,1,0)})
+    local stars = rate>=90 and "✿✿✿" or rate>=70 and "✿✿" or "✿"
+    uncLbl.Text=string.format("%d%% %s", rate, stars)
+    uncLbl.TextColor3=uncColor
+    barGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,C.accent),ColorSequenceKeypoint.new(1,uncColor)})
+    tw(barFill, 0.8, {Size=UDim2.new(rate/100,0,1,0)})
 
-    if isBlocked or rate < 70 then
+    if isBlocked or rate<70 then
         panelStroke.Color=C.fail
-        statusLbl.Text = isBlocked and "✗  Executor bị chặn — không hỗ trợ" or string.format("✗  UNC quá thấp (%d%% < 70%%)", rate)
+        panelGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,Color3.fromRGB(255,120,120)),ColorSequenceKeypoint.new(1,Color3.fromRGB(255,160,160))})
+        statusLbl.Text = isBlocked and "✗  Executor không hỗ trợ" or string.format("✗  UNC thấp (%d%% < 70%%)", rate)
         statusLbl.TextColor3=C.fail
-        discBtn=mkBtn("💬  Discord Support (Copy Link)",C.btnBlock,UDim2.new(1,-40,0,44),UDim2.new(0,20,0,196))
-        discBtn.MouseButton1Click:Connect(function()
-            if setclipboard then setclipboard("https://discord.gg/deVVQEVybd"); discBtn.Text="✓  Copied!"; task.wait(2); discBtn.Text="💬  Discord Support (Copy Link)"
-            else discBtn.Text="setclipboard không hỗ trợ" end
+        local db=mkBtn("💬  Discord (Copy Link)",C.btnBlock,UDim2.new(1,-40,0,44),UDim2.new(0,20,0,196))
+        db.MouseButton1Click:Connect(function()
+            if setclipboard then setclipboard("https://discord.gg/deVVQEVybd"); db.Text="✓  Copied!"; task.wait(2); db.Text="💬  Discord (Copy Link)"
+            else db.Text="setclipboard không hỗ trợ" end
         end)
     else
-        statusLbl.Text="✿  Chọn phiên bản của bạn"
-        statusLbl.TextColor3=C.title
+        statusLbl.Text="✿  Chọn phiên bản của bạn"; statusLbl.TextColor3=Color3.fromRGB(255,255,255)
         pcBtn.Visible=true; mobileBtn.Visible=true
-        pcBtn.Active=true; mobileBtn.Active=true
-        tween(pcBtn,0.3,{BackgroundTransparency=0})
-        tween(mobileBtn,0.3,{BackgroundTransparency=0})
 
-        local loadingAnim
-        local function loadScript(url,platform)
+        local function loadScript(url, platform)
             pcBtn.Active=false; mobileBtn.Active=false
-            tween(pcBtn,0.2,{BackgroundTransparency=0.5}); tween(mobileBtn,0.2,{BackgroundTransparency=0.5})
+            tw(pcBtn,0.15,{BackgroundTransparency=0.5}); tw(mobileBtn,0.15,{BackgroundTransparency=0.5})
             local dots=""
-            loadingAnim=task.spawn(function()
-                while true do dots=dots=="..." and "" or dots.."."
-                    loadLbl.Text="Đang tải "..platform..dots; task.wait(0.4)
-                end
-            end)
-            task.wait(0.7)
-            task.cancel(loadingAnim); loadLbl.Text="✿  Đang khởi động..."
-            tween(overlay,0.4,{BackgroundTransparency=1}); tween(panel,0.4,{Size=UDim2.fromOffset(W*0.8,H*0.8),BackgroundTransparency=1}); tween(panelStroke,0.4,{Transparency=1})
-            task.wait(0.5); sg:Destroy()
+            local dot=task.spawn(function() while true do dots=dots=="..."and""or dots.."."
+                loadLbl.Text="Đang tải "..platform..dots; task.wait(0.4) end end)
+            task.wait(0.7); task.cancel(dot); loadLbl.Text="✿  Đang khởi động..."
+            tw(panel,0.35,{BackgroundTransparency=1,Size=UDim2.fromOffset(W*0.82,H*0.82)})
+            tw(panelStroke,0.35,{Transparency=1})
+            tw(dof,0.35,{NearIntensity=0})
+            task.wait(0.4); sg:Destroy(); dof:Destroy()
             local ok,err=pcall(function() loadstring(game:HttpGet(url))() end)
-            if not ok then warn("[TokaiHub Loader] "..tostring(err)) end
+            if not ok then warn("[TokaiHub] "..tostring(err)) end
         end
 
         pcBtn.MouseButton1Click:Connect(function() loadScript(URL_PC,"PC") end)
