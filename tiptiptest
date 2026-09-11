@@ -37,7 +37,7 @@ end
 
 local function LoadRemote(Url)
 	local Source = GetLoadstringSource(Url)
-	if string.find(Url, "/source.lua", 1, true) then Source = PatchObsidianSource(Source) end
+	if string.find(Url, "Library.lua", 1, true) then Source = PatchObsidianSource(Source) end
 	local Chunk, LoadError = loadstring(Source)
 	if not Chunk then error("loadstring failed for " .. tostring(Url) .. ": " .. tostring(LoadError), 2) end
 	return Chunk()
@@ -3644,3 +3644,596 @@ end})
 
 print("[VehicleTeleport] Loaded")
 end)
+
+-- ================================================
+-- LEAN FEATURES — bọc pcall, dùng đúng WrapSection API
+-- ================================================
+
+-- ── TRIGGER BOT ──────────────────────────────────
+pcall(function()
+	local TB = {
+		Enabled=false, TeamCheck=false, VisibleCheck=true,
+		MaxDistance=1000, ReactionTime=50, ShootTime=100,
+		Targets={NPCs=true,Players=true,Zombies=true},
+		_lastShot=0, _targetSince=0, _actor=nil
+	}
+	getgenv().LeanTriggerBot = TB
+	local TB_Key = "MB2"
+	local function TB_fire()
+		if mouse1click then mouse1click()
+		elseif mouse1press and mouse1release then mouse1press(); task.delay(.02, mouse1release) end
+	end
+	local function TB_allowed(actor)
+		if not actor or actor.Alive==false then return false end
+		if type(actor.Health)=="number" and actor.Health<=0 then return false end
+		if not actor.Character or not actor.Character.Parent then return false end
+		local kind = actor.Zombie and "Zombies" or (actor.Owner and "Players" or "NPCs")
+		if not TB.Targets[kind] then return false end
+		if TB.TeamCheck and kind=="Players" and actor.Owner and LocalPlayer.Team and actor.Owner.Team==LocalPlayer.Team then return false end
+		return true
+	end
+	local TB_params = RaycastParams.new(); TB_params.FilterType = Enum.RaycastFilterType.Exclude
+	local function TB_find()
+		if not ReplicatorService or not ReplicatorService.Actors then return nil end
+		local mouse = Camera.ViewportSize/2
+		local ray = Camera:ViewportPointToRay(mouse.X, mouse.Y)
+		local exclude = {Camera}; if LocalPlayer.Character then exclude[2]=LocalPlayer.Character end
+		TB_params.FilterDescendantsInstances = exclude
+		local closest, nearDist = nil, TB.MaxDistance
+		for _, actor in pairs(ReplicatorService.Actors) do
+			if TB_allowed(actor) then
+				for _, part in ipairs(actor.Character:GetChildren()) do
+					if part:IsA("BasePart") then
+						local cf = (GetActorPartCFrame and GetActorPartCFrame(actor,part)) or part.CFrame
+						local p = cf:PointToObjectSpace(ray.Origin); local d = cf:VectorToObjectSpace(ray.Direction)
+						local h = part.Size*.5; local lo,hi,ok = 0,math.huge,true
+						for _,ax in ipairs({"X","Y","Z"}) do
+							if math.abs(d[ax])<1e-6 then if math.abs(p[ax])>h[ax] then ok=false;break end
+							else local a,b=(-h[ax]-p[ax])/d[ax],(h[ax]-p[ax])/d[ax]
+								if a>b then a,b=b,a end; lo=math.max(lo,a); hi=math.min(hi,b)
+								if hi<lo then ok=false;break end end
+						end
+						if ok and lo<nearDist then nearDist=lo; closest=actor end
+					end
+				end
+			end
+		end
+		if not closest then return nil end
+		if TB.VisibleCheck then
+			local hit = Workspace:Raycast(Camera.CFrame.Position, ray.Direction*nearDist, TB_params)
+			if hit and closest.Character and not hit.Instance:IsDescendantOf(closest.Character) then return nil end
+		end
+		return closest
+	end
+	local TB_conn = RunService.RenderStepped:Connect(function()
+		if not TB.Enabled or UserInputService:GetFocusedTextBox()~=nil then return end
+		local down = false
+		pcall(function()
+			if TB_Key=="MB2" then down=UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+			elseif TB_Key=="MB1" then down=UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+			else local ok,kc=pcall(function() return Enum.KeyCode[tostring(TB_Key):match("([^%.]+)$")] end)
+				if ok and kc then down=UserInputService:IsKeyDown(kc) end end
+		end)
+		if not down then TB._actor=nil; TB._targetSince=0; return end
+		local actor = TB_find(); local now = tick()
+		if actor~=TB._actor then TB._actor=actor; TB._targetSince=now end
+		if not actor then return end
+		if (now-TB._targetSince)*1000<TB.ReactionTime or (now-TB._lastShot)*1000<TB.ShootTime then return end
+		TB_fire(); TB._lastShot=now
+	end)
+	table.insert(getgenv().Moon_Connections, TB_conn)
+	local S_TB = CombatTab:DrawSection({Name="Trigger Bot", Position="right"})
+	S_TB:AddToggle({Name="Enabled", Flag="TB_Enabled", Default=false, Callback=function(v) TB.Enabled=v end})
+	S_TB:AddKeybind({Name="Trigger Key", Flag="TB_Key", Default="MB2", Mode="Hold", Callback=function(v) TB_Key=v end})
+	S_TB:AddSlider({Name="Reaction Time (ms)", Flag="TB_Reaction", Min=0, Max=500, Default=50, Callback=function(v) TB.ReactionTime=v end})
+	S_TB:AddSlider({Name="Shoot Time (ms)", Flag="TB_Shoot", Min=0, Max=1000, Default=100, Callback=function(v) TB.ShootTime=v end})
+	S_TB:AddSlider({Name="Max Distance", Flag="TB_Dist", Min=50, Max=5000, Default=1000, Callback=function(v) TB.MaxDistance=v end})
+	S_TB:AddToggle({Name="Visible Check", Flag="TB_VisCheck", Default=true, Callback=function(v) TB.VisibleCheck=v end})
+	S_TB:AddToggle({Name="Team Check", Flag="TB_TeamCheck", Default=false, Callback=function(v) TB.TeamCheck=v end})
+	print("[TriggerBot] Loaded")
+end)
+
+-- ── MOVEMENT EXTENSIONS ────────────────────────────
+pcall(function()
+	local MOV = {
+		OmniSprint=false, SprintCombat=false, SpeedMod=false, SpeedValue=24,
+		Modifier=false, Multiplier=2, Smoothing=false, Penalties=false,
+		_installed=false, _hooks={}, _active=true, _speedKey="G", _modKey="LeftShift"
+	}
+	getgenv().LeanMovement = MOV
+	local function MOV_wrap(class,key,handler)
+		local original=class[key]; if type(original)~="function" then return false end
+		local raw=rawget(class,key)
+		local wrapper=function(ctrl,...) return handler(original,ctrl,...) end
+		class[key]=wrapper; table.insert(MOV._hooks,{class=class,key=key,raw=raw,wrapper=wrapper})
+		return true
+	end
+	local function MOV_install(class)
+		local standing=nil
+		pcall(function()
+			local inspect=(debug and debug.getupvalues) or getupvalues
+			for _,fn in ipairs({class.new,class.Update}) do
+				local ok,vals=pcall(inspect,fn)
+				if ok then for _,v in pairs(vals) do
+					if type(v)=="table" and type(v.CharacterHeightState)=="table" then
+						standing=v.CharacterHeightState.Standing; break end end end
+				if standing~=nil then break end
+			end
+		end)
+		local svc=ReplicatorService
+		local function isLocal(ctrl) return MOV._active and svc and ctrl._localActor==svc.LocalActor end
+		local function canMove(ctrl)
+			local a=ctrl._localActor
+			return a and not(a.Downed or a.Frozen or a.Forced or a.Rappelling or a.Ladder or ctrl.Goal or ctrl._forceCFrame) end
+		MOV_wrap(class,"_processMovementInput",function(orig,ctrl,input,dt)
+			local actor=ctrl._localActor
+			if isLocal(ctrl) and standing~=nil and (MOV.OmniSprint or MOV.SprintCombat) and canMove(ctrl)
+				and ctrl.TrySprinting and ctrl.HeightState==standing and not ctrl.IsSliding and input.Magnitude>.01 then
+				local dirOK=MOV.OmniSprint or input.Y<-.5
+				local aimOK=MOV.SprintCombat or not (actor and actor.ADS)
+				if dirOK and aimOK then ctrl.IsSprinting=true end
+			end
+			return orig(ctrl,input,dt)
+		end)
+		MOV_wrap(class,"_accelerate",function(orig,ctrl,dt,magnitude)
+			if not isLocal(ctrl) then return orig(ctrl,dt,magnitude) end
+			local actor=ctrl._localActor; local saved={}
+			local function change(obj,k,val) table.insert(saved,{obj=obj,k=k,val=rawget(obj,k)}); obj[k]=val end
+			if MOV.Penalties and actor then
+				change(actor,"SpeedPenalty",nil); change(actor,"HitSlowness",nil)
+				change(actor,"CQB",nil); change(actor,"Weight",0); change(ctrl,"_weightMulti",1) end
+			local r=table.pack(pcall(orig,ctrl,MOV.Smoothing and 1000000 or dt,magnitude))
+			for i=#saved,1,-1 do local s=saved[i]; s.obj[s.k]=s.val end
+			if not r[1] then error(r[2],0) end
+			if MOV._speedActive and canMove(ctrl) then
+				ctrl.MoveSpeed=MOV.SpeedValue*(MOV._modActive and MOV.Multiplier or 1)*math.clamp(magnitude,0,1) end
+			return table.unpack(r,2,r.n)
+		end)
+		MOV_wrap(class,"_exhaust",function(orig,ctrl,...)
+			if isLocal(ctrl) and MOV.Stamina then ctrl._exhaustStart=tick()-2; ctrl._exhausted=tick()-1; return true end
+			return orig(ctrl,...) end)
+		MOV._installed=true
+	end
+	local MOV_hb=RunService.Heartbeat:Connect(function()
+		if not MOV._active then return end
+		local focused=UserInputService:GetFocusedTextBox()~=nil
+		if not focused then
+			pcall(function()
+				local ok,kc=pcall(function() return Enum.KeyCode[MOV._speedKey] end)
+				MOV._speedDown=ok and kc and UserInputService:IsKeyDown(kc) or false
+				local ok2,mc=pcall(function() return Enum.KeyCode[MOV._modKey] end)
+				MOV._modDown=ok2 and mc and UserInputService:IsKeyDown(mc) or false
+			end)
+		else MOV._speedDown=false; MOV._modDown=false end
+		MOV._speedActive=MOV.SpeedMod and MOV._speedDown
+		MOV._modActive=MOV._speedActive and MOV.Modifier and MOV._modDown
+		if not MOV._installed then
+			for _,m in ipairs(getloadedmodules()) do
+				if m.Name=="CharacterController" then
+					local ok,class=pcall(require,m)
+					if ok and type(class)=="table" then pcall(MOV_install,class) end
+					break end
+			end
+		end
+	end)
+	table.insert(getgenv().Moon_Connections, MOV_hb)
+	local S_MovExt=CharacterTab:DrawSection({Name="Movement Ext.", Position="right"})
+	S_MovExt:AddToggle({Name="OmniSprint", Flag="MOV_Omni", Default=false, Callback=function(v) MOV.OmniSprint=v end})
+	S_MovExt:AddToggle({Name="Aim While Sprinting", Flag="MOV_SprintCombat", Default=false, Callback=function(v) MOV.SprintCombat=v end})
+	S_MovExt:AddToggle({Name="Speed Mod", Flag="MOV_Speed", Default=false, Callback=function(v) MOV.SpeedMod=v end})
+	S_MovExt:AddSlider({Name="Speed Value", Flag="MOV_SpeedVal", Min=1, Max=150, Default=24, Callback=function(v) MOV.SpeedValue=v end})
+	S_MovExt:AddKeybind({Name="Speed Key", Flag="MOV_SpeedKey", Default="G", Mode="Toggle", Callback=function(v) MOV._speedKey=v end})
+	S_MovExt:AddToggle({Name="Speed Multiplier", Flag="MOV_Modifier", Default=false, Callback=function(v) MOV.Modifier=v end})
+	S_MovExt:AddSlider({Name="Multiplier", Flag="MOV_MultVal", Min=1, Max=5, Default=2, Rounding=1, Callback=function(v) MOV.Multiplier=v end})
+	S_MovExt:AddKeybind({Name="Modifier Key", Flag="MOV_ModKey", Default="LeftShift", Mode="Hold", Callback=function(v) MOV._modKey=v end})
+	S_MovExt:AddToggle({Name="No Move Smoothing", Flag="MOV_Smooth", Default=false, Callback=function(v) MOV.Smoothing=v end})
+	S_MovExt:AddToggle({Name="No Speed Penalties", Flag="MOV_Penalties", Default=false, Callback=function(v) MOV.Penalties=v end})
+	print("[MovementExtensions] Loaded")
+end)
+
+-- ── GUN EXTENSIONS ─────────────────────────────────
+pcall(function()
+	local GEX = {
+		InstantBullet=false, BulletMultiplier=1, NoEquipDelay=false,
+		NoCameraShake=false, SightZoom=false, Zoom=2, RPMMod=false, RPMVal=900,
+		DebugHUD=false, _hooks={}, _active=true, _shots=setmetatable({},{__mode="k"})
+	}
+	getgenv().LeanGunExt = GEX
+	local function GEX_hook(class,key,make)
+		local original=class[key]; if type(original)~="function" then return false end
+		local raw=rawget(class,key); local wrapper=make(original)
+		class[key]=wrapper; table.insert(GEX._hooks,{class=class,key=key,raw=raw,wrapper=wrapper})
+		return true end
+	local GEX_t=0
+	local function GEX_resolve()
+		if tick()<GEX_t then return end; GEX_t=tick()+2
+		local svc=ReplicatorService; local actor=svc and svc.LocalActor
+		for _,m in ipairs(getloadedmodules()) do
+			if m.Name=="BulletService" and not GEX._bsDone then
+				local ok,c=pcall(require,m)
+				if ok and type(c)=="table" then
+					GEX_hook(c,"GetInfo",function(orig) return function(self,...)
+						local r=table.pack(orig(self,...))
+						if GEX._active and GEX.InstantBullet and GEX._shots[coroutine.running()] and type(r[1])=="number" then
+							r[1]=r[1]*math.clamp(GEX.BulletMultiplier,1,10) end
+						return table.unpack(r,1,r.n)
+					end end); GEX._bsDone=true end
+			elseif m.Name=="CharacterCamera" and not GEX._camDone then
+				local ok,c=pcall(require,m)
+				if ok and type(c)=="table" then
+					GEX_hook(c,"Render",function(orig) return function(camera,...)
+						local suppress=GEX._active and GEX.NoCameraShake; local saved={}
+						if suppress then for _,shake in ipairs(camera._shakes or {}) do
+							saved[#saved+1]={shake,shake.PositionInfluence,shake.RotationInfluence}
+							shake.PositionInfluence=Vector3.zero; shake.RotationInfluence=Vector3.zero end end
+						local r=table.pack(pcall(orig,camera,...))
+						for _,v in ipairs(saved) do v[1].PositionInfluence=v[2]; v[1].RotationInfluence=v[3] end
+						if not r[1] then error(r[2],0) end
+						local me=actor; local cam=workspace.CurrentCamera
+						if GEX._active and GEX.SightZoom and me and me.ADS and cam then
+							cam.FieldOfView=math.clamp(math.deg(2*math.atan(math.tan(math.rad(cam.FieldOfView)/2)/GEX.Zoom)),5,100) end
+						return table.unpack(r,2,r.n)
+					end end)
+					GEX_hook(c,"Shake",function(orig) return function(camera,preset,...)
+						if GEX._active and GEX.NoCameraShake then return preset end
+						return orig(camera,preset,...) end end)
+					GEX._camDone=true end
+			elseif m.Name=="FirearmInventory" and not GEX._fiDone then
+				local ok,c=pcall(require,m)
+				if ok and type(c)=="table" then
+					GEX_hook(c,"Discharge",function(orig) return function(w,...)
+						local thread=coroutine.running(); local prev=GEX._shots[thread]; GEX._shots[thread]=true
+						local r=table.pack(pcall(orig,w,...)); GEX._shots[thread]=prev
+						if not r[1] then error(r[2],0) end
+						return table.unpack(r,2,r.n)
+					end end); GEX._fiDone=true end
+			end
+		end
+		local inv; for _,m in ipairs(getloadedmodules()) do
+			if m.Name=="InventoryService" then local ok,v=pcall(require,m); if ok then inv=v end; break end end
+		local entry=inv and inv.Equipped; local w=entry and entry.Handler
+		local tune=w and w._firearm and w._firearm.Tune
+		if type(tune)=="table" then
+			if GEX.NoEquipDelay then pcall(function() tune.Equip_Delay=0 end) end
+			if GEX.RPMMod then pcall(function() tune.RPM=math.clamp(GEX.RPMVal,60,3000) end) end
+		end
+	end
+	local GEX_conn=RunService.RenderStepped:Connect(function() if GEX._active then pcall(GEX_resolve) end end)
+	table.insert(getgenv().Moon_Connections, GEX_conn)
+	-- Debug HUD
+	local GEX_hud=nil
+	local GEX_hud_c=RunService.RenderStepped:Connect(function()
+		if not GEX.DebugHUD then if GEX_hud then GEX_hud.Enabled=false end; return end
+		if not GEX_hud then
+			local gui=Instance.new("ScreenGui"); gui.Name="LeanGunDebug"; gui.ResetOnSpawn=false
+			gui.Parent=LocalPlayer:WaitForChild("PlayerGui")
+			local lbl=Instance.new("TextLabel"); lbl.Size=UDim2.fromOffset(300,90)
+			lbl.Position=UDim2.new(0,16,1,-120); lbl.BackgroundColor3=Color3.fromRGB(12,12,12)
+			lbl.BackgroundTransparency=.2; lbl.TextColor3=Color3.new(1,1,1)
+			lbl.TextSize=13; lbl.Font=Enum.Font.Code; lbl.TextXAlignment=Enum.TextXAlignment.Left; lbl.Parent=gui
+			GEX_hud=gui; GEX_hud.lbl=lbl end
+		GEX_hud.Enabled=true
+		pcall(function()
+			local inv; for _,m in ipairs(getloadedmodules()) do
+				if m.Name=="InventoryService" then local ok,v=pcall(require,m); if ok then inv=v end; break end end
+			local w=(inv and inv.Equipped and inv.Equipped.Handler)
+			local tune=w and w._firearm and w._firearm.Tune
+			GEX_hud.lbl.Text=string.format(" Gun: %s\n RPM: %s | Spread: %s\n InstBullet: %s x%.1f",
+				tostring(w and w.Name or "none"),tostring(tune and tune.RPM or "-"),
+				tostring(tune and tune.Barrel_Spread or "-"),tostring(GEX.InstantBullet),GEX.BulletMultiplier)
+		end)
+	end)
+	table.insert(getgenv().Moon_Connections, GEX_hud_c)
+	local S_GEX=CombatTab:DrawSection({Name="Gun Extensions", Position="left"})
+	S_GEX:AddToggle({Name="Instant Bullet", Flag="GEX_Inst", Default=false, Callback=function(v) GEX.InstantBullet=v end})
+	S_GEX:AddSlider({Name="Bullet Multiplier", Flag="GEX_Mul", Min=1, Max=10, Default=1, Rounding=1, Callback=function(v) GEX.BulletMultiplier=v end})
+	S_GEX:AddToggle({Name="No Equip Delay", Flag="GEX_NoEquip", Default=false, Callback=function(v) GEX.NoEquipDelay=v end})
+	S_GEX:AddToggle({Name="No Camera Shake", Flag="GEX_NoCam", Default=false, Callback=function(v) GEX.NoCameraShake=v end})
+	S_GEX:AddToggle({Name="Sight Zoom", Flag="GEX_Zoom", Default=false, Callback=function(v) GEX.SightZoom=v end})
+	S_GEX:AddSlider({Name="Magnification", Flag="GEX_ZoomVal", Min=1, Max=10, Default=2, Rounding=1, Callback=function(v) GEX.Zoom=v end})
+	S_GEX:AddToggle({Name="RPM Modifier", Flag="GEX_RPM", Default=false, Callback=function(v) GEX.RPMMod=v end})
+	S_GEX:AddSlider({Name="RPM Value", Flag="GEX_RPMVal", Min=60, Max=3000, Default=900, Callback=function(v) GEX.RPMVal=v end})
+	S_GEX:AddToggle({Name="Gun Debug HUD", Flag="GEX_Debug", Default=false, Callback=function(v) GEX.DebugHUD=v end})
+	print("[GunExtensions] Loaded")
+end)
+
+-- ── MELEE AURA ─────────────────────────────────────
+pcall(function()
+	local MA = {Enabled=false, Headshot=false, Reach=false, Distance=8,
+		Targets={Zombies=true,NPCs=true}, _active=true, _nextSwing=0, _key="K", _class=nil}
+	getgenv().LeanMeleeAura = MA
+	local MA_params=RaycastParams.new(); MA_params.FilterType=Enum.RaycastFilterType.Exclude
+	local MA_conn=RunService.Heartbeat:Connect(function()
+		if not MA._active or not MA.Enabled or UserInputService:GetFocusedTextBox()~=nil then return end
+		local keyDown=false
+		pcall(function()
+			local ok,kc=pcall(function() return Enum.KeyCode[MA._key] end)
+			if ok and kc then keyDown=UserInputService:IsKeyDown(kc) end end)
+		if not keyDown then return end
+		for _,m in ipairs(getloadedmodules()) do
+			if m.Name=="MeleeInventory" and not MA._class then
+				local ok,c=pcall(require,m); if ok then MA._class=c end end end
+		local inv; for _,m in ipairs(getloadedmodules()) do
+			if m.Name=="InventoryService" then local ok,v=pcall(require,m); if ok then inv=v end; break end end
+		local entry=inv and inv.Equipped; local w=entry and entry.Handler
+		if not w or w._firearm then return end
+		local me=ReplicatorService and ReplicatorService.LocalActor; if not me then return end
+		local origin=me.CFrame:PointToWorldSpace(Vector3.new(0,2.5,0))
+		local range=MA.Reach and MA.Distance or (w._distance or 4)
+		if tick()<MA._nextSwing then return end
+		local best,bestDist=nil,range
+		if ReplicatorService and ReplicatorService.Actors then
+			for _,actor in pairs(ReplicatorService.Actors) do
+				local kind=actor.Zombie and "Zombies" or (actor.Owner and "Players" or "NPCs")
+				if MA.Targets[kind] and actor.Alive~=false and actor.Character and actor.Character.Parent then
+					local head=actor.Parts and actor.Parts.Head
+					if head and head.Parent then
+						local delta=head.Position-origin
+						if delta.Magnitude<bestDist then
+							MA_params.FilterDescendantsInstances={me.Character}
+							local hit=Workspace:Raycast(origin,delta,MA_params)
+							if not hit or hit.Instance:IsDescendantOf(actor.Character) then
+								bestDist=delta.Magnitude; best=head end end end end end end
+		if best and MA._class and MA._class._use then
+			MA._nextSwing=tick()+math.max(w._timer or .5,.1)
+			task.spawn(function() pcall(function() MA._class._use(w,true) end) end)
+		end
+	end)
+	table.insert(getgenv().Moon_Connections, MA_conn)
+	local S_MA=MiscTab:DrawSection({Name="Melee Aura", Position="left"})
+	S_MA:AddToggle({Name="Kill Aura", Flag="MA_Enabled", Default=false, Callback=function(v) MA.Enabled=v end})
+	S_MA:AddKeybind({Name="Aura Key", Flag="MA_Key", Default="K", Mode="Toggle", Callback=function(v) MA._key=v end})
+	S_MA:AddToggle({Name="Force Headshot", Flag="MA_Head", Default=false, Callback=function(v) MA.Headshot=v end})
+	S_MA:AddToggle({Name="Extended Reach", Flag="MA_Reach", Default=false, Callback=function(v) MA.Reach=v end})
+	S_MA:AddSlider({Name="Reach Distance", Flag="MA_Dist", Min=1, Max=20, Default=8, Rounding=1, Callback=function(v) MA.Distance=v end})
+	print("[MeleeAura] Loaded")
+end)
+
+-- ── VEHICLE EXTENSIONS ─────────────────────────────
+pcall(function()
+	local VEX={Speed=false,SpeedValue=80,Stability=false,FastStart=false,Noclip=false,
+		_active=true,_hooks={},_emptyCast=nil,_done=false}
+	getgenv().LeanVehicleExt=VEX
+	local function VEX_hook(class,key,make)
+		local original=class[key]; if type(original)~="function" then return false end
+		local raw=rawget(class,key); local wrapper=make(original)
+		class[key]=wrapper; table.insert(VEX._hooks,{class=class,key=key,raw=raw,wrapper=wrapper}); return true end
+	local VEX_t=0
+	local function dir()
+		local cam=workspace.CurrentCamera; if not cam or UserInputService:GetFocusedTextBox() then return Vector3.zero end
+		local function down(k) return UserInputService:IsKeyDown(k) and 1 or 0 end
+		local d=cam.CFrame.LookVector*(down(Enum.KeyCode.W)-down(Enum.KeyCode.S))
+			+cam.CFrame.RightVector*(down(Enum.KeyCode.D)-down(Enum.KeyCode.A))
+			+Vector3.yAxis*(down(Enum.KeyCode.Space)-down(Enum.KeyCode.LeftControl))
+		return d.Magnitude>1 and d.Unit or d
+	end
+	local function VEX_resolve()
+		if tick()<VEX_t then return end; VEX_t=tick()+3
+		if VEX._done then return end
+		for _,m in ipairs(getloadedmodules()) do
+			if m.Name=="VehicleSolver" then
+				local ok,c=pcall(require,m)
+				if ok and type(c)=="table" then
+					VEX_hook(c,"Update",function(orig) return function(solver,dt,inputs,...)
+						local vehicle=solver._vehicle
+						if not VEX._active or not vehicle or not vehicle.Controlling then return orig(solver,dt,inputs,...) end
+						local physics=solver._solver; local state=physics and physics.State
+						if not state then return orig(solver,dt,inputs,...) end
+						local heli=vehicle.Rotors~=nil
+						if heli and VEX.FastStart then
+							for _,engine in pairs(solver.Engines or {}) do
+								if engine:GetOn() and not engine:GetFullyOn() then pcall(engine.TimeSkip,engine,120) end end end
+						local cf=state.CFrame*(physics.CenterOfMass and physics.CenterOfMass:Inverse() or CFrame.identity)
+						local velocity=state.Velocity
+						if VEX.Speed and inputs and math.abs(inputs.Throttle or 0)>.01 then
+							local forward=cf.LookVector
+							if not heli then forward=Vector3.new(forward.X,0,forward.Z) end
+							if forward.Magnitude>.01 then
+								local desired=forward.Unit*VEX.SpeedValue*math.clamp(inputs.Throttle,-1,1)
+								if not heli then desired=desired+Vector3.yAxis*velocity.Y end
+								velocity=velocity:Lerp(desired,1-math.exp(-math.clamp(dt,0,.1)*4))
+								physics:SetState(nil,velocity,nil) end end
+						if VEX.Stability and not heli then
+							local angular=state.AngularVelocity; local localAV=cf:VectorToObjectSpace(angular)
+							local decay=math.exp(-math.clamp(dt,0,.1)*8)
+							local corr=cf.UpVector:Cross(Vector3.yAxis)*math.clamp(dt*4,0,.4)
+							physics:SetState(nil,velocity,cf:VectorToWorldSpace(Vector3.new(localAV.X*decay,localAV.Y,localAV.Z*decay))+corr) end
+						local oldCast=physics.CollisionCastParams
+						if VEX.Noclip then
+							if not VEX._emptyCast then VEX._emptyCast=RaycastParams.new()
+								VEX._emptyCast.FilterType=Enum.RaycastFilterType.Include
+								VEX._emptyCast.FilterDescendantsInstances={} end
+							physics.CollisionCastParams=VEX._emptyCast end
+						local r=table.pack(pcall(orig,solver,dt,inputs,...)); physics.CollisionCastParams=oldCast
+						if not r[1] then error(r[2],0) end
+						return table.unpack(r,2,r.n)
+					end end)
+					VEX._done=true end end end end
+	local VEX_conn=RunService.RenderStepped:Connect(function() if VEX._active then pcall(VEX_resolve) end end)
+	table.insert(getgenv().Moon_Connections,VEX_conn)
+	local S_VEX=VehicleTab:DrawSection({Name="Vehicle Extensions", Position="right"})
+	S_VEX:AddToggle({Name="Speed Mod", Flag="VEX_Speed", Default=false, Callback=function(v) VEX.Speed=v end})
+	S_VEX:AddSlider({Name="Speed (studs/s)", Flag="VEX_SpeedVal", Min=1, Max=250, Default=80, Callback=function(v) VEX.SpeedValue=v end})
+	S_VEX:AddToggle({Name="Stability Assist", Flag="VEX_Stab", Default=false, Callback=function(v) VEX.Stability=v end})
+	S_VEX:AddToggle({Name="Heli Fast Startup", Flag="VEX_Fast", Default=false, Callback=function(v) VEX.FastStart=v end})
+	S_VEX:AddToggle({Name="Vehicle Noclip", Flag="VEX_Noclip", Default=false, Callback=function(v) VEX.Noclip=v end})
+	print("[VehicleExtensions] Loaded")
+end)
+
+-- ── TURRET EXTENSIONS ──────────────────────────────
+pcall(function()
+	local TEX={RPM=false,RPMVal=900,NoSpread=false,NoRecoil=false,_saved={},_active=true,_done=false}
+	getgenv().LeanTurretExt=TEX
+	local function field(obj,key,on,value)
+		if type(obj)~="table" then return end
+		local saved=TEX._saved[obj]
+		if on then
+			if not saved then saved={}; TEX._saved[obj]=saved end
+			local old=saved[key]; if not old then old={value=rawget(obj,key)}; saved[key]=old
+			elseif rawget(obj,key)~=old.applied then old.value=rawget(obj,key) end
+			old.applied=value; obj[key]=value
+		elseif saved and saved[key] then
+			local old=saved[key]; if rawget(obj,key)==old.applied then obj[key]=old.value end
+			saved[key]=nil; if next(saved)==nil then TEX._saved[obj]=nil end end end
+	local TEX_t=0
+	local function TEX_apply(ctrl)
+		if not ctrl or type(ctrl._config)~="table" then return end
+		local c=ctrl._config
+		field(c,"RPM",TEX.RPM,TEX.RPMVal)
+		field(c,"Barrel_Spread",TEX.NoSpread,0)
+		field(c,"Recoil_Base",TEX.NoRecoil,Vector2.zero)
+		field(c,"Recoil_Range",TEX.NoRecoil,Vector2.zero) end
+	local function TEX_resolve()
+		if tick()<TEX_t then return end; TEX_t=tick()+3; if TEX._done then return end
+		for _,m in ipairs(getloadedmodules()) do
+			if m.Name=="TurretController" then
+				local ok,c=pcall(require,m)
+				if ok and type(c)=="table" then
+					local orig=c.Update; if type(orig)=="function" then
+						c.Update=function(ctrl,...) TEX_apply(ctrl); return orig(ctrl,...) end end
+					TEX._done=true end end end end
+	local TEX_conn=RunService.RenderStepped:Connect(function() if TEX._active then pcall(TEX_resolve) end end)
+	table.insert(getgenv().Moon_Connections,TEX_conn)
+	local S_TEX=VehicleTab:DrawSection({Name="Turret Extensions", Position="right"})
+	S_TEX:AddToggle({Name="RPM Modifier", Flag="TEX_RPM", Default=false, Callback=function(v) TEX.RPM=v end})
+	S_TEX:AddSlider({Name="Turret RPM", Flag="TEX_RPMVal", Min=60, Max=3000, Default=900, Callback=function(v) TEX.RPMVal=math.clamp(v,60,3000) end})
+	S_TEX:AddToggle({Name="No Spread", Flag="TEX_NoSpread", Default=false, Callback=function(v) TEX.NoSpread=v end})
+	S_TEX:AddToggle({Name="No Recoil", Flag="TEX_NoRecoil", Default=false, Callback=function(v) TEX.NoRecoil=v end})
+	print("[TurretExtensions] Loaded")
+end)
+
+-- ── WORLD MODULATION ───────────────────────────────
+pcall(function()
+	local L=game:GetService("Lighting")
+	local WMB={Ambient=L.Ambient,OutdoorAmbient=L.OutdoorAmbient,
+		ColorShift_Top=L.ColorShift_Top,ColorShift_Bottom=L.ColorShift_Bottom,
+		ClockTime=L.ClockTime,FogStart=L.FogStart,FogEnd=L.FogEnd,FogColor=L.FogColor,
+		Brightness=L.Brightness,ExposureCompensation=L.ExposureCompensation,
+		EnvironmentDiffuseScale=L.EnvironmentDiffuseScale,EnvironmentSpecularScale=L.EnvironmentSpecularScale}
+	local WM={
+		ambient={enabled=false,a=L.Ambient,b=L.OutdoorAmbient},
+		colorShift={enabled=false,top=L.ColorShift_Top,bottom=L.ColorShift_Bottom},
+		time={enabled=false,value=L.ClockTime},
+		fog={enabled=false,s=L.FogStart,e=L.FogEnd,color=L.FogColor},
+		light={enabled=false,brightness=L.Brightness,exposure=L.ExposureCompensation,
+			diffuse=L.EnvironmentDiffuseScale,specular=L.EnvironmentSpecularScale},
+	}
+	getgenv().LeanWorldMod=WM
+	local WM_conn=RunService.RenderStepped:Connect(function()
+		if WM.ambient.enabled then L.Ambient=WM.ambient.a; L.OutdoorAmbient=WM.ambient.b end
+		if WM.colorShift.enabled then L.ColorShift_Top=WM.colorShift.top; L.ColorShift_Bottom=WM.colorShift.bottom end
+		if WM.time.enabled then L.ClockTime=WM.time.value end
+		if WM.fog.enabled then L.FogStart=WM.fog.s; L.FogEnd=WM.fog.e; L.FogColor=WM.fog.color end
+		if WM.light.enabled then L.Brightness=WM.light.brightness; L.ExposureCompensation=WM.light.exposure
+			L.EnvironmentDiffuseScale=WM.light.diffuse; L.EnvironmentSpecularScale=WM.light.specular end
+	end)
+	table.insert(getgenv().Moon_Connections,WM_conn)
+	local WorldModTab=Window:DrawTab({Name="World Mod",Icon="sun",Type="Double"})
+	local S_WA=WorldModTab:DrawSection({Name="Ambient",Position="left"})
+	S_WA:AddToggle({Name="Custom Ambient",Flag="WM_Amb",Default=false,Callback=function(v)
+		WM.ambient.enabled=v; if not v then L.Ambient=WMB.Ambient; L.OutdoorAmbient=WMB.OutdoorAmbient end end})
+	S_WA:AddColorPicker({Name="Ambient",Flag="WM_AmbA",Default=WM.ambient.a,Callback=function(c) WM.ambient.a=c end})
+	S_WA:AddColorPicker({Name="Outdoor Ambient",Flag="WM_AmbB",Default=WM.ambient.b,Callback=function(c) WM.ambient.b=c end})
+	S_WA:AddToggle({Name="Custom Color Shift",Flag="WM_CS",Default=false,Callback=function(v)
+		WM.colorShift.enabled=v; if not v then L.ColorShift_Top=WMB.ColorShift_Top; L.ColorShift_Bottom=WMB.ColorShift_Bottom end end})
+	S_WA:AddColorPicker({Name="Shift Top",Flag="WM_CST",Default=WM.colorShift.top,Callback=function(c) WM.colorShift.top=c end})
+	S_WA:AddColorPicker({Name="Shift Bottom",Flag="WM_CSB",Default=WM.colorShift.bottom,Callback=function(c) WM.colorShift.bottom=c end})
+	local S_WTF=WorldModTab:DrawSection({Name="Time & Fog",Position="right"})
+	S_WTF:AddToggle({Name="Custom Time",Flag="WM_Time",Default=false,Callback=function(v)
+		WM.time.enabled=v; if not v then L.ClockTime=WMB.ClockTime end end})
+	S_WTF:AddSlider({Name="Clock Time",Flag="WM_Clock",Min=0,Max=24,Default=14,Rounding=1,Callback=function(v) WM.time.value=v end})
+	S_WTF:AddToggle({Name="Custom Fog",Flag="WM_Fog",Default=false,Callback=function(v)
+		WM.fog.enabled=v; if not v then L.FogStart=WMB.FogStart; L.FogEnd=WMB.FogEnd; L.FogColor=WMB.FogColor end end})
+	S_WTF:AddSlider({Name="Fog Start",Flag="WM_FS",Min=0,Max=2000,Default=math.floor(WMB.FogStart),Callback=function(v) WM.fog.s=v end})
+	S_WTF:AddSlider({Name="Fog End",Flag="WM_FE",Min=0,Max=10000,Default=math.min(9999,math.floor(WMB.FogEnd)),Callback=function(v) WM.fog.e=v end})
+	S_WTF:AddColorPicker({Name="Fog Color",Flag="WM_FC",Default=WM.fog.color,Callback=function(c) WM.fog.color=c end})
+	local S_WL=WorldModTab:DrawSection({Name="Lighting",Position="left"})
+	S_WL:AddToggle({Name="Custom Lighting",Flag="WM_Light",Default=false,Callback=function(v)
+		WM.light.enabled=v; if not v then L.Brightness=WMB.Brightness; L.ExposureCompensation=WMB.ExposureCompensation
+			L.EnvironmentDiffuseScale=WMB.EnvironmentDiffuseScale; L.EnvironmentSpecularScale=WMB.EnvironmentSpecularScale end end})
+	S_WL:AddSlider({Name="Brightness",Flag="WM_Bright",Min=0,Max=10,Default=math.floor(WMB.Brightness*10+.5)/10,Rounding=1,Callback=function(v) WM.light.brightness=v end})
+	S_WL:AddSlider({Name="Exposure",Flag="WM_Exp",Min=-5,Max=5,Default=0,Rounding=1,Callback=function(v) WM.light.exposure=v end})
+	S_WL:AddSlider({Name="Env Diffuse",Flag="WM_Diff",Min=0,Max=1,Default=1,Rounding=1,Callback=function(v) WM.light.diffuse=v end})
+	S_WL:AddSlider({Name="Env Specular",Flag="WM_Spec",Min=0,Max=1,Default=1,Rounding=1,Callback=function(v) WM.light.specular=v end})
+	print("[WorldModulation] Loaded")
+end)
+
+-- ── RADIO LOGGER ───────────────────────────────────
+pcall(function()
+	local R={Enabled=false,rows={},byId={},limit=150,_active=true,count=0}
+	getgenv().LeanRadioLogger=R
+	function R.Build()
+		if R.gui then return end
+		local gui=Instance.new("ScreenGui"); gui.Name="LeanRadioLogger"; gui.ResetOnSpawn=false
+		gui.DisplayOrder=30; gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+		gui.Parent=LocalPlayer:WaitForChild("PlayerGui")
+		local frame=Instance.new("Frame"); frame.AnchorPoint=Vector2.new(1,0)
+		frame.Position=UDim2.new(1,-18,0,88); frame.Size=UDim2.new(.34,0,.3,0)
+		frame.BackgroundColor3=Color3.fromRGB(15,17,21); frame.BackgroundTransparency=.08
+		frame.BorderSizePixel=0; frame.Parent=gui
+		Instance.new("UICorner",frame).CornerRadius=UDim.new(0,8)
+		local header=Instance.new("TextLabel"); header.Size=UDim2.new(1,-80,0,34)
+		header.Position=UDim2.fromOffset(12,0); header.BackgroundTransparency=1
+		header.Text="RADIO LOGGER"; header.TextColor3=Color3.fromRGB(225,230,238)
+		header.Font=Enum.Font.GothamBold; header.TextSize=13
+		header.TextXAlignment=Enum.TextXAlignment.Left; header.Active=true; header.Parent=frame
+		local status=Instance.new("TextLabel"); status.Size=UDim2.new(1,-24,0,20)
+		status.Position=UDim2.fromOffset(12,32); status.BackgroundTransparency=1
+		status.Text="0 / 150"; status.TextColor3=Color3.fromRGB(150,160,177)
+		status.Font=Enum.Font.Gotham; status.TextSize=11
+		status.TextXAlignment=Enum.TextXAlignment.Left; status.Parent=frame
+		local scroll=Instance.new("ScrollingFrame"); scroll.Position=UDim2.fromOffset(8,56)
+		scroll.Size=UDim2.new(1,-16,1,-62); scroll.BackgroundTransparency=1
+		scroll.BorderSizePixel=0; scroll.ScrollBarThickness=3
+		scroll.CanvasSize=UDim2.new(); scroll.AutomaticCanvasSize=Enum.AutomaticSize.Y; scroll.Parent=frame
+		Instance.new("UIListLayout",scroll).Padding=UDim.new(0,4)
+		R.gui=gui; R.frame=frame; R.scroll=scroll; R.status=status; gui.Enabled=R.Enabled
+	end
+	function R.Add(id,channel,name,message)
+		if not R._active or not R.Enabled then return end; R.Build()
+		local row=R.byId[id]
+		local follow=R.scroll.CanvasPosition.Y+R.scroll.AbsoluteSize.Y>=R.scroll.AbsoluteCanvasSize.Y-40
+		if not row then
+			R.count+=1
+			local lbl=Instance.new("TextLabel"); lbl.Size=UDim2.new(1,-6,0,0)
+			lbl.AutomaticSize=Enum.AutomaticSize.Y; lbl.BackgroundTransparency=1
+			lbl.TextColor3=Color3.fromRGB(210,220,234); lbl.Font=Enum.Font.Code; lbl.TextSize=12
+			lbl.TextWrapped=true; lbl.TextXAlignment=Enum.TextXAlignment.Left
+			lbl.LayoutOrder=R.count; lbl.Parent=R.scroll
+			row={id=id,label=lbl}; R.byId[id]=row; R.rows[#R.rows+1]=row
+			if #R.rows>R.limit then local old=table.remove(R.rows,1); R.byId[old.id]=nil; old.label:Destroy() end
+		end
+		row.label.Text="["..tostring(channel).."] "..tostring(name)..": "..tostring(message)
+		if R.status then R.status.Text=#R.rows.." / 150" end
+		if follow then task.defer(function()
+			if R._active and R.scroll and R.scroll.Parent then
+				R.scroll.CanvasPosition=Vector2.new(0,math.max(0,R.scroll.AbsoluteCanvasSize.Y-R.scroll.AbsoluteSize.Y)) end end) end
+	end
+	function R.Process(message)
+		if not R.Enabled or not R._active or not message.TextSource then return end
+		if message.Status and message.Status~=Enum.TextChatMessageStatus.Success then return end
+		local ok,meta=pcall(game:GetService("HttpService").JSONDecode,game:GetService("HttpService"),message.Metadata)
+		if not ok or type(meta)~="table" or not meta.Radio then return end
+		local src=game:GetService("Players"):GetPlayerByUserId(message.TextSource.UserId)
+		local name=src and (src.DisplayName.." (@"..src.Name..")") or tostring(message.TextSource.UserId)
+		local ch=type(meta.Channel)=="string" and meta.Channel or "000"
+		R.Add(message.MessageId,ch,name,message.Text)
+	end
+	local chat=game:GetService("TextChatService")
+	local function attachMain(channel)
+		if channel.Name~="Main" or not channel:IsA("TextChannel") or R.main==channel then return end
+		if R.messageConn then R.messageConn:Disconnect() end
+		R.main=channel; R.messageConn=channel.MessageReceived:Connect(function(msg) pcall(R.Process,msg) end)
+	end
+	local main=chat:FindFirstChild("Main"); if main then attachMain(main) end
+	local chatConn=chat.ChildAdded:Connect(attachMain); table.insert(getgenv().Moon_Connections,chatConn)
+	local S_RL=MiscTab:DrawSection({Name="Radio Logger", Position="right"})
+	S_RL:AddToggle({Name="Enabled", Flag="RL_Enabled", Default=false, Callback=function(v)
+		R.Enabled=v; if v then R.Build() end; if R.gui then R.gui.Enabled=v end end})
+	S_RL:AddButton({Name="Clear Messages", Callback=function()
+		for _,row in ipairs(R.rows) do if row.label then row.label:Destroy() end end
+		R.rows={}; R.byId={}; R.count=0; if R.status then R.status.Text="0 / 150" end end})
+	print("[RadioLogger] Loaded")
+end)
+
+print("[LEAN FEATURES] All blocks done")
