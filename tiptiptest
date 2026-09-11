@@ -1,4 +1,4 @@
-local Repository = "https://raw.githubusercontent.com/longhazem/lib-obsidian/main/"
+local Repository = "https://raw.githubusercontent.com/longhazem/libba/main/"
 
 local function GetLoadstringSource(Url)
 	local function tryRequest(fn, args)
@@ -37,13 +37,13 @@ end
 
 local function LoadRemote(Url)
 	local Source = GetLoadstringSource(Url)
-	if string.find(Url, "Library.lua", 1, true) then Source = PatchObsidianSource(Source) end
+	if string.find(Url, "/source.lua", 1, true) then Source = PatchObsidianSource(Source) end
 	local Chunk, LoadError = loadstring(Source)
 	if not Chunk then error("loadstring failed for " .. tostring(Url) .. ": " .. tostring(LoadError), 2) end
 	return Chunk()
 end
 
-local Library = LoadRemote(Repository .. "Library.lua")
+local Library = LoadRemote(Repository .. "source.lua")
 local ThemeManager = LoadRemote(Repository .. "addons/ThemeManager.lua")
 local SaveManager = LoadRemote(Repository .. "addons/SaveManager.lua")
 
@@ -56,14 +56,9 @@ function MoonUI:RefreshCurrentColor() end
 function MoonUI:ConfigManager(Data) return Data or {} end
 function MoonUI.newNotify()
 	return { new = function(Data)
-		pcall(function()
-			Library:Notify({
-				Title = (Data and Data.Title) or "Tokaihub",
-				Description = (Data and (Data.Content or Data.Description)) or "",
-				Icon = "circle-check",
-				Time = (Data and Data.Duration) or 5,
-			})
-		end)
+		local text = (Data and Data.Title) or "Tokaihub"
+		if Data and (Data.Content or Data.Description) then text = text .. " — " .. (Data.Content or Data.Description) end
+		pcall(function() Library:Notify(text, (Data and Data.Duration) or 5) end)
 	end }
 end
 
@@ -145,7 +140,7 @@ local function WrapTab(Tab)
 end
 
 function MoonUI.new(Data)
-	local Window = Library:CreateWindow({ Title = "Tokaihub", Footer = "tokaihub", NotifySide = "Right", ShowCustomCursor = true, AutoShow = true })
+	local Window = Library:CreateWindow({ Title = "Tokaihub", Center = true, AutoShow = true, TabPadding = 8, MenuFadeTime = 0.2 })
 	local SettingsTab
 	local Wrapped = {
 		Raw = Window,
@@ -161,10 +156,7 @@ function MoonUI.new(Data)
 			SaveManager:IgnoreThemeSettings(); SaveManager:SetIgnoreIndexes({"MenuKeybind"})
 			ThemeManager:SetFolder("Tokaihub"); SaveManager:SetFolder("Tokaihub/specific-game")
 			if SaveManager.SetSubFolder then SaveManager:SetSubFolder("specific-place") end
-			SaveManager:BuildConfigSection(SettingsTab)
-			if ThemeManager.AddThemeOptions then ThemeManager:AddThemeOptions(SettingsTab)
-			elseif ThemeManager.ApplyToTab then ThemeManager:ApplyToTab(SettingsTab) end
-			Library.ToggleKeybind = Options and Options.MenuKeybind
+			SaveManager:BuildConfigSection(SettingsTab); ThemeManager:ApplyToTab(SettingsTab)
 			SaveManager:LoadAutoloadConfig()
 			return { Init = function() end }
 		end,
@@ -201,6 +193,29 @@ local Lighting = game:GetService("Lighting")
 local CoreGui = game:GetService("CoreGui")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
+
+-- ══ Vehicle helpers — fix ragebot/silent không bắn vào xe ══
+local function IsVehicleActor(actor)
+	if not actor then return false end
+	if rawget(actor,"ComponentReplicates")~=nil then return true end
+	if rawget(actor,"_vehicleName")~=nil then return true end
+	if rawget(actor,"SetRPM")~=nil then return true end
+	if rawget(actor,"_updateLightModes")~=nil then return true end
+	-- check VehicleService
+	if rawget(actor,"Healths")~=nil and rawget(actor,"Model")~=nil then return true end
+	return false
+end
+
+local function IsVehiclePart(part)
+	if not part or not part.Parent then return false end
+	local model = part:FindFirstAncestorOfClass("Model")
+	if not model then return false end
+	if CollectionService:HasTag(model,"Vehicle") then return true end
+	-- kiểm tra model có PrimaryPart tên kiểu xe
+	local name = model.Name:lower()
+	if name:find("car") or name:find("truck") or name:find("heli") or name:find("plane") or name:find("boat") or name:find("tank") then return true end
+	return false
+end
 
 local Camera = Workspace.CurrentCamera
 local LocalPlayer = Players.LocalPlayer
@@ -420,278 +435,6 @@ function GetMuzzlePosition()
 	return Camera.CFrame.Position
 end
 
--- Vehicle-aware velocity resolver cho prediction
--- Ưu tiên: xe > _oldDirection > character PrimaryPart
-local function GetTargetVelocity(actor, targetPart)
-	if actor.Seat then
-		local seat = actor.Seat
-		if seat.Model and seat.Model.PrimaryPart then
-			local v = seat.Model.PrimaryPart.AssemblyLinearVelocity
-			if v and v.Magnitude > 0.5 then return v end
-		end
-		if VehicleService and VehicleService.Vehicles then
-			for _, veh in pairs(VehicleService.Vehicles) do
-				if veh.Model and (veh.UID == (seat.UID or "") or veh.Model == seat.Model) then
-					if veh.Model.PrimaryPart then
-						return veh.Model.PrimaryPart.AssemblyLinearVelocity or Vector3_new(0,0,0)
-					end
-				end
-			end
-		end
-	end
-	if actor._oldDirection and actor._oldDirection.Magnitude > 0.01 then
-		return actor._oldDirection * 60
-	end
-	if targetPart and targetPart.Parent and targetPart.Parent.PrimaryPart then
-		return targetPart.Parent.PrimaryPart.AssemblyLinearVelocity or Vector3_new(0,0,0)
-	end
-	return Vector3_new(0,0,0)
-end
-
--- === LEAN PORT + NEW FEATURES ===
-local _velSamples = {}
-local GetActorPartPosition = function(actor, part)
-	return (part and part.Position) or (actor and actor.Position) or Camera.CFrame.Position
-end
-local SampleActorVelocity = function(actor) return Vector3_new(0,0,0) end
-local GunVisuals_Update  = function() end
-local ResolveGunHooks    = function() end
-local DrawGradientFOV    = function() end
-local HideGradientFOV    = function() end
-local SilentFOVFill      = nil
-local GunFOVConfig = {
-	FillFOV=false, FOVFillColor=Color3.fromRGB(255,255,255), FOVFillTransparency=0.4,
-	GradientFOV=false, GradientColorA=Color3.fromRGB(150,80,255), GradientColorB=Color3.fromRGB(255,110,60),
-	GradientSpin=false, GradientSpinSpeed=1,
-}
-local GunVisualsConfig = {
-	Enabled=false, Material="Original", Transparency=0,
-	WeaponColor=Color3.fromRGB(150,80,255), visualParts={}, visualModel=nil, nextScan=0,
-}
-local BeamTracer = {
-	Enabled=false, Style="Lightning", Color=Color3.fromRGB(150,80,255),
-	Duration=0.6, Width=0.08, folder=nil, rng=Random.new(),
-}
-local GunHooksConfig = {
-	ForceHeadshot=false, InstantADS=false, NoSway=false,
-	_effectsDone=false, _impactDone=false, _viewmodelDone=false, nextResolve=0,
-}
-
-pcall(function()
-
-local function GetActorPartCFrame(actor, part)
-	if not part then return nil end
-	local root = actor.RootPart
-	local actorPos = actor and actor.Position
-	if not root or root:IsDescendantOf(Workspace) then return part.CFrame end
-	if not actorPos then return part.CFrame end
-	local pose = (typeof(actor.CFrame)=="CFrame") and actor.CFrame.Rotation or CFrame.identity
-	return (pose + actorPos) * root.CFrame:ToObjectSpace(part.CFrame)
-end
-GetActorPartPosition = function(actor, part)
-	local cf = GetActorPartCFrame(actor, part)
-	if cf then return cf.Position end
-	local ap = actor and actor.Position
-	if ap then return ap + Vector3_new(0,1.5,0) end
-	return part and part.Position or Camera.CFrame.Position
-end
-SampleActorVelocity = function(actor)
-	local now = tick()
-	local ap = actor and actor.Position
-	if not ap then return Vector3_new(0,0,0) end
-	local sample = _velSamples[actor]; local vel = Vector3_new(0,0,0)
-	if sample and sample.position and sample.model==actor.Character and (now-sample.time)>0.001 then
-		local measured = (ap - sample.position) / (now - sample.time)
-		if measured.Magnitude < 300 then vel = sample.velocity:Lerp(measured, 0.5) end
-	end
-	_velSamples[actor] = {position=ap, time=now, velocity=vel, model=actor.Character}
-	return vel
-end
-
-local function GunVisuals_Restore()
-	for part,saved in pairs(GunVisualsConfig.visualParts) do
-		if part.Parent then for k,v in pairs(saved.original) do if part[k]==saved.applied[k] then part[k]=v end end end
-	end
-	GunVisualsConfig.visualParts={}; GunVisualsConfig.visualModel=nil; GunVisualsConfig.nextScan=0
-end
-GunVisuals_Update = function()
-	if not ReplicatorService then return end
-	local actor=ReplicatorService.LocalActor
-	local weapon=actor and actor._inventory and actor._inventory[actor._equipped]
-	local model=weapon and weapon._firearm and actor.ViewModel and actor.ViewModel.CurrentModel
-	if not GunVisualsConfig.Enabled or model~=GunVisualsConfig.visualModel then GunVisuals_Restore() end
-	if not GunVisualsConfig.Enabled or not model or not model.Parent then return end
-	GunVisualsConfig.visualModel=model; local now=tick()
-	if now>=GunVisualsConfig.nextScan then
-		GunVisualsConfig.nextScan=now+0.2
-		for _,part in ipairs(model:GetDescendants()) do
-			if part:IsA("BasePart") and part.Transparency<1 and not GunVisualsConfig.visualParts[part] then
-				GunVisualsConfig.visualParts[part]={original={Material=part.Material,MaterialVariant=part.MaterialVariant,Transparency=part.Transparency,Color=part.Color},applied={}}
-			end
-		end
-	end
-	for part,saved in pairs(GunVisualsConfig.visualParts) do
-		if not part:IsDescendantOf(model) then
-			if part.Parent then for k,v in pairs(saved.original) do if part[k]==saved.applied[k] then part[k]=v end end end
-			GunVisualsConfig.visualParts[part]=nil
-		else
-			local mat=GunVisualsConfig.Material=="Original" and saved.original.Material or Enum.Material[GunVisualsConfig.Material]
-			local vals={Material=mat,MaterialVariant=GunVisualsConfig.Material=="Original" and saved.original.MaterialVariant or "",Transparency=GunVisualsConfig.Transparency/100,Color=GunVisualsConfig.Material~="Original" and GunVisualsConfig.WeaponColor or saved.original.Color}
-			for k,v in pairs(vals) do saved.applied[k]=v; if part[k]~=v then part[k]=v end end
-		end
-	end
-end
-
-local BeamTracer_Draw = function() end
-pcall(function()
-	local function BT_Points(from,to,style)
-		local len=(to-from).Magnitude; if len<.01 then return {} end
-		local cf=CFrame.lookAt(from,to); local turns=math.clamp(len/18,2,5)
-		local count=style=="Line" and 1 or (style=="DNA" and math.ceil(turns*12) or math.clamp(math.ceil(len/3),12,48))
-		local strands=style=="DNA" and 2 or 1; local paths={}
-		for strand=1,strands do
-			local pts={}
-			for i=0,count do
-				local t=i/count; local offset=Vector3_new(0,0,0)
-				if i>0 and i<count then
-					if style=="Lightning" then local r=math.min(len*.025,.65); offset=cf.RightVector*BeamTracer.rng:NextNumber(-r,r)+cf.UpVector*BeamTracer.rng:NextNumber(-r,r)
-					elseif style=="DNA" then
-						local ang=t*math.pi*2*turns+(strand-1)*math.pi*2/strands
-						local env=math.sin(math.min(1,math.min(t,1-t)*8)*math.pi*.5)
-						local r=math.min(len*.03,.45)*env; offset=(cf.RightVector*math.cos(ang)+cf.UpVector*math.sin(ang))*r
-					end
-				end
-				pts[#pts+1]=from:Lerp(to,t)+offset
-			end
-			paths[#paths+1]=pts
-		end
-		return paths
-	end
-	BeamTracer_Draw=function(from,to)
-		if not BeamTracer.Enabled or typeof(from)~="Vector3" or typeof(to)~="Vector3" then return end
-		local paths=BT_Points(from,to,BeamTracer.Style); if #paths==0 then return end
-		local cam=workspace.CurrentCamera; if not cam then return end
-		if not BeamTracer.folder then BeamTracer.folder=Instance.new("Folder"); BeamTracer.folder.Name="BeamTracers" end
-		BeamTracer.folder.Parent=cam; local ex=BeamTracer.folder:GetChildren(); if #ex>=24 then ex[1]:Destroy() end
-		local anc=Instance.new("Part"); anc.Name="BT"; anc.Anchored=true; anc.Transparency=1
-		anc.Size=Vector3_new(.01,.01,.01); anc.CanCollide=false; anc.CanQuery=false; anc.CanTouch=false; anc.CastShadow=false
-		anc.CFrame=CFrame_new(from); anc.Parent=BeamTracer.folder
-		local function connect(a,b,w)
-			local beam=Instance.new("Beam"); beam.Attachment0=a; beam.Attachment1=b; beam.FaceCamera=true
-			beam.Width0=w; beam.Width1=w; beam.Segments=1; beam.Color=ColorSequence.new(BeamTracer.Color)
-			beam.LightEmission=1; beam.LightInfluence=0; beam.Transparency=NumberSequence.new(0); beam.Parent=anc
-			game:GetService("TweenService"):Create(beam,TweenInfo.new(BeamTracer.Duration),{Width0=0,Width1=0}):Play()
-		end
-		local atts={}
-		for _,pts in ipairs(paths) do local lst={}; atts[#atts+1]=lst
-			for i,pt in ipairs(pts) do local a=Instance.new("Attachment"); a.Position=pt-from; a.Parent=anc; lst[i]=a; if i>1 then connect(lst[i-1],a,BeamTracer.Width) end end
-		end
-		if BeamTracer.Style=="DNA" and #atts==2 then for i=4,#atts[1]-3,3 do connect(atts[1][i],atts[2][i],BeamTracer.Width*.35) end end
-		game:GetService("Debris"):AddItem(anc,BeamTracer.Duration)
-	end
-end)
-
-ResolveGunHooks=function()
-	local now=tick(); if now<GunHooksConfig.nextResolve then return end; GunHooksConfig.nextResolve=now+2
-	local rep=ReplicatorService
-	if rep and not GunHooksConfig._effectsDone and type(rawget(rep,"_bulletEffects"))=="function" then
-		local orig=rep._bulletEffects
-		rep._bulletEffects=function(self,from,to,part,normal,material,caliber,isLocal,...)
-			local r=table.pack(pcall(orig,self,from,to,part,normal,material,caliber,isLocal,...))
-			if isLocal then pcall(BeamTracer_Draw,from,to) end
-			if not r[1] then return end; return table.unpack(r,2,r.n)
-		end; GunHooksConfig._effectsDone=true
-	end
-	if rep and not GunHooksConfig._impactDone and type(rawget(rep,"_bulletProcess"))=="function" then
-		local orig=rep._bulletProcess
-		rep._bulletProcess=function(self,uid,replicate,position,part,normal,material,elapsed,...)
-			if GunHooksConfig.ForceHeadshot and replicate and part then
-				local ok,auid=pcall(function() return self:GetFromBodyPart(part) end)
-				if ok and auid then local ac=rep.Actors and rep.Actors[auid]; local hd=ac and ac.Parts and ac.Parts.Head
-					if hd and hd.Parent and hd:IsDescendantOf(ac.Character) then part=hd end end
-			end
-			return orig(self,uid,replicate,position,part,normal,material,elapsed,...)
-		end; GunHooksConfig._impactDone=true
-	end
-	if not GunHooksConfig._viewmodelDone then
-		for _,m in ipairs(getloadedmodules()) do
-			if m.Name=="ViewmodelClass" then
-				local ok,class=pcall(require,m)
-				if ok and type(class)=="table" and type(class.Update)=="function" then
-					local orig=class.Update
-					class.Update=function(vm,...)
-						local actor=rep and rep.LocalActor; if not actor or vm.Actor~=actor then return orig(vm,...) end
-						if GunHooksConfig.InstantADS then vm.ADSLerp=(actor.ADS and not vm.Reloading and not actor.Sliding) and 1 or 0 end
-						local sway,kick=vm._swaySpring,vm.Kick
-						if GunHooksConfig.NoSway and sway then vm._swaySpring={Position={ToCFrame=function() return CFrame.identity end}} end
-						local r=table.pack(pcall(orig,vm,...)); vm._swaySpring=sway; vm.Kick=kick
-						if not r[1] then return end; return table.unpack(r,2,r.n)
-					end; GunHooksConfig._viewmodelDone=true
-				end; break
-			end
-		end
-	end
-end
-
-pcall(function()
-	local _gradPhase=0; local _gradSegments={}; local _gradFill,_gradGradient
-	SilentFOVFill=Drawing.new("Circle"); SilentFOVFill.NumSides=64; SilentFOVFill.Filled=true
-	SilentFOVFill.Color=GunFOVConfig.FOVFillColor; SilentFOVFill.Transparency=GunFOVConfig.FOVFillTransparency; SilentFOVFill.Visible=false
-	for i=1,48 do local ln=Drawing.new("Line"); ln.Thickness=2; ln.Transparency=1; ln.Visible=false; _gradSegments[i]=ln end
-	pcall(function()
-		local gui=Instance.new("ScreenGui"); gui.Name="FOVGradient"; gui.IgnoreGuiInset=true
-		gui.ResetOnSpawn=false; gui.DisplayOrder=0; gui.Parent=(gethui and gethui()) or CoreGui
-		_gradFill=Instance.new("Frame"); _gradFill.AnchorPoint=Vector2_new(.5,.5); _gradFill.BackgroundColor3=Color3.new(1,1,1)
-		_gradFill.BorderSizePixel=0; _gradFill.Visible=false; _gradFill.Active=false; _gradFill.Parent=gui
-		local corner=Instance.new("UICorner"); corner.CornerRadius=UDim.new(1,0); corner.Parent=_gradFill
-		_gradGradient=Instance.new("UIGradient"); _gradGradient.Parent=_gradFill
-	end)
-	DrawGradientFOV=function(center,radius,colorA,colorB,filled,alpha,dt)
-		if GunFOVConfig.GradientSpin then _gradPhase=(_gradPhase+(dt or 0)*GunFOVConfig.GradientSpinSpeed*math.pi*2)%(math.pi*2) else _gradPhase=0 end
-		local n=#_gradSegments
-		for i,ln in ipairs(_gradSegments) do
-			local a0=(i-1)/n*math.pi*2; local a1=i/n*math.pi*2
-			ln.From=center+Vector2_new(math.cos(a0),math.sin(a0))*radius; ln.To=center+Vector2_new(math.cos(a1),math.sin(a1))*radius
-			ln.Color=colorA:Lerp(colorB,(math.sin((a0+a1)*.5-_gradPhase)+1)*.5); ln.Transparency=1; ln.Visible=true; ln.ZIndex=1
-		end
-		if _gradFill then
-			_gradFill.Visible=filled and alpha>0; _gradFill.Position=UDim2.fromOffset(center.X,center.Y); _gradFill.Size=UDim2.fromOffset(radius*2,radius*2)
-			_gradFill.BackgroundTransparency=1-math.clamp(alpha,0,1)
-			if _gradGradient then _gradGradient.Color=ColorSequence.new(colorA,colorB); _gradGradient.Rotation=90+math.deg(_gradPhase) end
-		end
-	end
-	HideGradientFOV=function() for _,ln in ipairs(_gradSegments) do ln.Visible=false end; if _gradFill then _gradFill.Visible=false end end
-end)
-
-pcall(function()
-	S_GunMods:AddToggle({Name="Instant ADS",Flag="Gun_InstantADS",Default=false,Callback=function(v) GunHooksConfig.InstantADS=v; GunHooksConfig._viewmodelDone=false; ResolveGunHooks() end})
-	S_GunMods:AddToggle({Name="No Sway",Flag="Gun_NoSway",Default=false,Callback=function(v) GunHooksConfig.NoSway=v; GunHooksConfig._viewmodelDone=false; ResolveGunHooks() end})
-	S_GunMods:AddSlider({Name="Spread Reduction",Min=0,Max=100,Default=100,Flag="Gun_SpreadReduction",Callback=function(v) Config.SpreadReduction=v end})
-	S_GunMods:AddToggle({Name="Force Headshot",Flag="Gun_ForceHeadshot",Default=false,Callback=function(v) GunHooksConfig.ForceHeadshot=v; ResolveGunHooks() end})
-end)
-pcall(function()
-	local S_GunAppearance=CombatTab:DrawSection({Name="Gun Appearance",Position="right"})
-	S_GunAppearance:AddToggle({Name="Enabled",Flag="GunVis_Enabled",Default=false,Callback=function(v) GunVisualsConfig.Enabled=v; GunVisuals_Update() end})
-	S_GunAppearance:AddDropdown({Name="Material",Default="Original",Flag="GunVis_Material",Options={"Original","ForceField","Neon","SmoothPlastic","Glass","Metal","Ice"},Callback=function(v) GunVisualsConfig.Material=v; GunVisuals_Update() end})
-	S_GunAppearance:AddSlider({Name="Transparency",Min=0,Max=100,Default=0,Flag="GunVis_Transparency",Callback=function(v) GunVisualsConfig.Transparency=v; GunVisuals_Update() end})
-	S_GunAppearance:AddColorPicker({Name="Weapon Color",Flag="GunVis_Color",Default=GunVisualsConfig.WeaponColor,Callback=function(v) GunVisualsConfig.WeaponColor=v end})
-end)
-pcall(function()
-	local S_FOV=CombatTab:DrawSection({Name="FOV Visuals",Position="left"})
-	S_FOV:AddToggle({Name="Fill FOV",Flag="FOV_Fill",Default=false,Callback=function(v) GunFOVConfig.FillFOV=v end})
-	S_FOV:AddColorPicker({Name="Fill Color",Flag="FOV_FillColor",Default=GunFOVConfig.FOVFillColor,Callback=function(v,a) GunFOVConfig.FOVFillColor=v; if a then GunFOVConfig.FOVFillTransparency=1-a end end})
-	S_FOV:AddToggle({Name="Gradient",Flag="FOV_Gradient",Default=false,Callback=function(v) GunFOVConfig.GradientFOV=v end})
-	S_FOV:AddColorPicker({Name="Gradient Color A",Flag="FOV_GradA",Default=GunFOVConfig.GradientColorA,Callback=function(v) GunFOVConfig.GradientColorA=v end})
-	S_FOV:AddColorPicker({Name="Gradient Color B",Flag="FOV_GradB",Default=GunFOVConfig.GradientColorB,Callback=function(v) GunFOVConfig.GradientColorB=v end})
-	S_FOV:AddToggle({Name="Gradient Spin",Flag="FOV_GradSpin",Default=false,Callback=function(v) GunFOVConfig.GradientSpin=v end})
-	S_FOV:AddSlider({Name="Spin Speed",Min=1,Max=30,Default=10,Flag="FOV_SpinSpeed",Callback=function(v) GunFOVConfig.GradientSpinSpeed=v/10 end})
-end)
-
-getgenv().GunVisualsConfig=GunVisualsConfig; getgenv().BeamTracer=BeamTracer
-getgenv().GunHooksConfig=GunHooksConfig; getgenv().GunFOVConfig=GunFOVConfig
-print("[Lean Port + New Features] Loaded")
-end)
-
 function GetSecureContainer()
 	if SecureESPContainer and SecureESPContainer.Parent then return SecureESPContainer end
 	local function TryCreate(parent)
@@ -910,24 +653,6 @@ local function IsVisible(targetActor,targetPart,origin,isPriority)
 		local myActor=ReplicatorService.LocalActor
 		if myActor.Seat and myActor.Seat.Model then table.insert(VisFilterTable,myActor.Seat.Model) end
 	end
-	-- Filter phương tiện của target — raycast xuyên qua thân xe/máy bay để thấy NPC bên trong
-	if targetActor.Seat and targetActor.Seat.Model then
-		table.insert(VisFilterTable, targetActor.Seat.Model)
-	elseif targetActor.Turret then
-		local tVeh = targetActor.Turret._vehicle
-		if tVeh then
-			if tVeh.Model then table.insert(VisFilterTable, tVeh.Model)
-			elseif tVeh.Hitbox and tVeh.Hitbox.Parent then table.insert(VisFilterTable, tVeh.Hitbox.Parent) end
-		end
-	end
-	if targetActor.Seat and not targetActor.Seat.Model and VehicleService and VehicleService.Vehicles then
-		local seatUID = targetActor.Seat.UID
-		for _, veh in pairs(VehicleService.Vehicles) do
-			if veh.UID == seatUID and veh.Model then
-				table.insert(VisFilterTable, veh.Model); break
-			end
-		end
-	end
 	VisRayParams.FilterDescendantsInstances=VisFilterTable
 	local isVisible=false
 	local result=Workspace:Raycast(originPos,direction,VisRayParams)
@@ -975,8 +700,8 @@ GetCombatTarget = function(mode)
 	local candidates=getgenv()._targetCandidates or table.create(64)
 	table.clear(candidates); getgenv()._targetCandidates=candidates
 	local now=tick(); local ignoredTargets=ActorManager._ignoredTargets
-	local mouseX,mouseY
-	if useFOV then local sc=Camera.ViewportSize/2; mouseX,mouseY=sc.X,sc.Y end
+	local mouse,mouseX,mouseY
+	if useFOV then mouse=UserInputService:GetMouseLocation(); mouseX,mouseY=mouse.X,mouse.Y end
 	local enemyList
 	if mode=="Rage" and ActorManager._sectors and ActorManager._playerSector then
 		enemyList={}
@@ -989,6 +714,7 @@ GetCombatTarget = function(mode)
 	else enemyList=ActorManager.Enemies end
 	for _,actor in pairs(enemyList) do
 		if not actor.Alive then continue end
+		if IsVehicleActor(actor) then continue end  -- vehicle skip
 		if ignoredTargets then
 			local ignoreUntil=ignoredTargets[actor.UID]
 			if ignoreUntil then
@@ -1022,11 +748,9 @@ GetCombatTarget = function(mode)
 	table.sort(candidates,function(a,b) return a.score<b.score end)
 	for i=1,#candidates do
 		local candle=candidates[i]; local actor=candle.actor; local char=candle.char
-		local part=(actor.Parts and actor.Parts[targetPartName] and actor.Parts[targetPartName].Parent and actor.Parts[targetPartName])
-			or char:FindFirstChild(targetPartName,true)
-			or char:FindFirstChild("Head",true)
-			or char:FindFirstChild("UpperTorso",true)
-		if part and part.Parent then
+		local part=char:FindFirstChild(targetPartName)
+		if not part then part=char:FindFirstChild("Head") or char:FindFirstChild("UpperTorso") end
+		if part and part.Parent and not IsVehiclePart(part) then  -- vehicle part skip
 			if IsVisible(actor,part,checkOrigin) then return part,actor end
 			if getgenv().RaycastBudget<=0 then break end
 		end
@@ -1052,9 +776,10 @@ local function HookController(controller)
 			if not isYours and isVehicleWeapon then isYours=true end
 			local combatTarget=ActorManager.SelectedTarget_RB or ActorManager.SelectedTarget_SA
 			local targetActor=ActorManager.SelectedActor_RB or ActorManager.SelectedActor_SA
+			-- vehicle check: không redirect nếu target là part của xe
+			if combatTarget and IsVehiclePart(combatTarget) then return muzzleCF,v2,v3 end
 			if (Config.SilentAim or Config.RageMode) and combatTarget and targetActor then
-				local targetPos = GetActorPartPosition(targetActor, combatTarget)
-				local gravity=32.2; local muzzle_velocity=2000
+				local targetPos=combatTarget.Position; local gravity=32.2; local muzzle_velocity=2000
 				if self._firearm and self._firearm.Tune then
 					local caliberName=self._firearm.Tune.Caliber; local barrelLen=self._firearm.Tune.Barrel
 					if BulletService and BulletService.GetInfo then
@@ -1062,7 +787,11 @@ local function HookController(controller)
 						if success and vel then muzzle_velocity=vel end
 					end
 				end
-				local targetVelocity = SampleActorVelocity(targetActor)
+				local targetVelocity=Vector3_new(0,0,0)
+				if targetActor._oldDirection then targetVelocity=targetActor._oldDirection*60
+				elseif combatTarget.Parent and combatTarget.Parent.PrimaryPart then
+					targetVelocity=combatTarget.Parent.PrimaryPart.AssemblyLinearVelocity or Vector3_new(0,0,0)
+				end
 				local aimPos,travelTime=SolveLead(muzzleCF.Position,targetPos,targetVelocity,muzzle_velocity,gravity)
 				local zeroAngle=0; local actor=self._actor
 				if actor and actor.ADS and actor.ViewModel and actor.ViewModel.Zero then
@@ -1108,11 +837,13 @@ local function HookController(controller)
 	end
 end
 
-local FOVCircle=Drawing.new("Circle")
-FOVCircle.Thickness=1
-pcall(function() FOVCircle.NumSides=60 end)
-FOVCircle.Radius=Config.SilentAimFOV
-FOVCircle.Filled=false; FOVCircle.Visible=false; FOVCircle.Color=Color3.fromRGB(255,255,255)
+local FOVCircle = Drawing.new("Circle")
+FOVCircle.Thickness = 1
+FOVCircle.NumSides = 60
+FOVCircle.Radius = Config.SilentAimFOV
+FOVCircle.Filled = false
+FOVCircle.Visible = false
+FOVCircle.Color = Color3.fromRGB(255, 255, 255)
 
 getgenv().VelocityCache={}
 getgenv().PredictionDot=Drawing.new("Circle")
@@ -1219,6 +950,231 @@ local function ApplyGunMods(firearm,force)
 		end
 	end
 end
+
+-- ══════════════════════════════════════════════
+-- LEAN FEATURES
+-- Tất cả bọc pcall đúng chuẩn — lỗi bên trong
+-- không crash script, chỉ warn ra console
+-- ══════════════════════════════════════════════
+
+-- Lean Config (extend Config gốc)
+Config.GunVisuals         = false
+Config.GunTransparency    = 0
+Config.GunMaterial        = "Original"
+Config.GunWeaponColor     = Color3.fromRGB(150, 80, 255)
+Config.LeanTracers        = false
+Config.LeanTracerStyle    = "Lightning"
+Config.LeanTracerColor    = Color3.fromRGB(150, 80, 255)
+Config.LeanTracerDuration = 0.6
+Config.LeanTracerWidth    = 0.08
+Config.ForceHeadshot      = false
+Config.TriggerBot_Enabled     = false
+Config.TriggerBot_Magnetic    = false
+Config.TriggerBot_VisibleCheck = true
+Config.TriggerBot_MaxDistance = 1000
+Config.TriggerBot_ReactionTime = 50
+Config.TriggerBot_ShootTime    = 100
+
+-- ── Gun Visuals ──
+local LeanGun = { visualParts={}, visualModel=nil, nextVisualScan=0 }
+
+local _leanGunOk, _leanGunErr = pcall(function()
+	function LeanGun.RestoreVisuals()
+		for part, saved in pairs(LeanGun.visualParts) do
+			if part and part.Parent then
+				for key, value in pairs(saved.original) do
+					if part[key] == saved.applied[key] then
+						pcall(function() part[key] = value end)
+					end
+				end
+			end
+		end
+		LeanGun.visualParts = {}; LeanGun.visualModel = nil; LeanGun.nextVisualScan = 0
+	end
+
+	function LeanGun.UpdateVisuals()
+		local ok, err = pcall(function()
+			if not Config.GunVisuals then return end
+			local c = ReplicatorService; if not c then return end
+			local actor  = c.LocalActor; if not actor then return end
+			local weapon = actor._inventory and actor._inventory[actor._equipped]
+			local model  = weapon and weapon._firearm and actor.ViewModel and actor.ViewModel.CurrentModel
+			if model ~= LeanGun.visualModel then LeanGun.RestoreVisuals() end
+			if not model or not model.Parent then return end
+			LeanGun.visualModel = model
+			if os.clock() >= LeanGun.nextVisualScan then
+				LeanGun.nextVisualScan = os.clock() + 0.2
+				for _, part in ipairs(model:GetDescendants()) do
+					if part:IsA("BasePart") and part.Transparency < 1 and not LeanGun.visualParts[part] then
+						LeanGun.visualParts[part] = {
+							original = { Material=part.Material, MaterialVariant=part.MaterialVariant, Transparency=part.Transparency, Color=part.Color },
+							applied  = {}
+						}
+					end
+				end
+			end
+			for part, saved in pairs(LeanGun.visualParts) do
+				if not part:IsDescendantOf(model) then
+					if part and part.Parent then
+						for key, value in pairs(saved.original) do
+							if part[key] == saved.applied[key] then pcall(function() part[key] = value end) end
+						end
+					end
+					LeanGun.visualParts[part] = nil
+				else
+					local mat = Config.GunMaterial == "Original" and saved.original.Material or Enum.Material[Config.GunMaterial]
+					local values = {
+						Material        = mat,
+						MaterialVariant = Config.GunMaterial == "Original" and saved.original.MaterialVariant or "",
+						Transparency    = Config.GunTransparency / 100,
+						Color           = Config.GunMaterial ~= "Original" and Config.GunWeaponColor or saved.original.Color
+					}
+					for key, value in pairs(values) do
+						saved.applied[key] = value
+						if part[key] ~= value then pcall(function() part[key] = value end) end
+					end
+				end
+			end
+		end)
+		if not ok then warn("[GunVisuals]", err) end
+	end
+end)
+if not _leanGunOk then warn("[LeanGun init]", _leanGunErr) end
+
+-- ── Beam Tracers ──
+local LeanTracers = { _folder = nil }
+
+local _leanTracersOk, _leanTracersErr = pcall(function()
+	local function LT_Points(from, to, style, rng)
+		local len = (to - from).Magnitude; if len < 0.01 then return {} end
+		local cf = CFrame.lookAt(from, to)
+		local turns = math.clamp(len / 18, 2, 5)
+		local count = style == "Line" and 1 or (style == "DNA" and math.ceil(turns * 12) or math.clamp(math.ceil(len / 3), 12, 48))
+		local strands = style == "DNA" and 2 or 1
+		local paths = {}
+		for s = 1, strands do
+			local pts = {}
+			for i = 0, count do
+				local t = i / count; local offset = Vector3.new()
+				if i > 0 and i < count then
+					if style == "Lightning" then
+						local r = math.min(len * 0.025, 0.65)
+						offset = cf.RightVector * rng:NextNumber(-r, r) + cf.UpVector * rng:NextNumber(-r, r)
+					elseif style == "DNA" then
+						local angle = t * math.pi * 2 * turns + (s - 1) * math.pi * 2 / strands
+						local env   = math.sin(math.min(1, math.min(t, 1 - t) * 8) * math.pi * 0.5)
+						local r     = math.min(len * 0.03, 0.45) * env
+						offset = (cf.RightVector * math.cos(angle) + cf.UpVector * math.sin(angle)) * r
+					end
+				end
+				pts[#pts + 1] = from:Lerp(to, t) + offset
+			end
+			paths[#paths + 1] = pts
+		end
+		return paths
+	end
+
+	function LeanTracers.Draw(from, to)
+		if not Config.LeanTracers or typeof(from) ~= "Vector3" or typeof(to) ~= "Vector3" then return end
+		local ok, err = pcall(function()
+			local paths = LT_Points(from, to, Config.LeanTracerStyle, Random.new())
+			if #paths == 0 then return end
+			if not LeanTracers._folder or not LeanTracers._folder.Parent then
+				LeanTracers._folder = Instance.new("Folder")
+				LeanTracers._folder.Name = "LeanTracers"
+				LeanTracers._folder.Parent = workspace.CurrentCamera
+			end
+			local existing = LeanTracers._folder:GetChildren()
+			if #existing >= 24 then existing[1]:Destroy() end
+			local anchor = Instance.new("Part")
+			anchor.Anchored = true; anchor.Transparency = 1; anchor.Size = Vector3.new(0.01, 0.01, 0.01)
+			anchor.CanCollide = false; anchor.CanQuery = false; anchor.CanTouch = false; anchor.CastShadow = false
+			anchor.CFrame = CFrame.new(from); anchor.Name = "LT"; anchor.Parent = LeanTracers._folder
+			local function connect(a, b, w)
+				local beam = Instance.new("Beam")
+				beam.Attachment0 = a; beam.Attachment1 = b; beam.FaceCamera = true
+				beam.Width0 = w; beam.Width1 = w; beam.Segments = 1
+				beam.Color = ColorSequence.new(Config.LeanTracerColor)
+				beam.LightEmission = 1; beam.LightInfluence = 0
+				beam.Transparency = NumberSequence.new(0); beam.Parent = anchor
+				game:GetService("TweenService"):Create(beam, TweenInfo.new(Config.LeanTracerDuration), { Width0=0, Width1=0 }):Play()
+			end
+			local attachs = {}
+			for idx, pts in ipairs(paths) do
+				local list = {}; attachs[idx] = list
+				for i, pt in ipairs(pts) do
+					local a = Instance.new("Attachment"); a.Position = pt - from; a.Parent = anchor; list[i] = a
+					if i > 1 then connect(list[i - 1], a, Config.LeanTracerWidth) end
+				end
+			end
+			if Config.LeanTracerStyle == "DNA" and #attachs == 2 then
+				for i = 4, #attachs[1] - 3, 3 do
+					connect(attachs[1][i], attachs[2][i], Config.LeanTracerWidth * 0.35)
+				end
+			end
+			game:GetService("Debris"):AddItem(anchor, Config.LeanTracerDuration)
+		end)
+		if not ok then warn("[LeanTracers.Draw]", err) end
+	end
+
+	function LeanTracers.ClearAll()
+		if LeanTracers._folder then pcall(function() LeanTracers._folder:Destroy() end); LeanTracers._folder = nil end
+	end
+end)
+if not _leanTracersOk then warn("[LeanTracers init]", _leanTracersErr) end
+
+-- ── TriggerBot ──
+local TriggerBot = { _lastShot=0, _targetSince=0, _actor=nil }
+
+local _tbConn
+local _tbOk, _tbErr = pcall(function()
+	local function TB_FindTarget(cam, mouse)
+		if not ReplicatorService then return nil end
+		if Config.TriggerBot_Magnetic then
+			local sel = ActorManager.SelectedTarget_SA
+			if sel and not IsVehiclePart(sel) then return ActorManager.SelectedActor_SA end
+			return nil
+		end
+		local ray = cam:ViewportPointToRay(mouse.X, mouse.Y)
+		local rp  = RaycastParams.new(); rp.FilterType = Enum.RaycastFilterType.Exclude
+		local fl  = { cam }; if LocalPlayer.Character then fl[2] = LocalPlayer.Character end
+		rp.FilterDescendantsInstances = fl
+		local res = Workspace:Raycast(ray.Origin, ray.Direction * Config.TriggerBot_MaxDistance, rp)
+		if not res then return nil end
+		if IsVehiclePart(res.Instance) then return nil end  -- vehicle check
+		local hitModel = res.Instance:FindFirstAncestorOfClass("Model"); if not hitModel then return nil end
+		for _, actor in ipairs(ActorManager.Enemies) do
+			if actor.Alive and actor.Character == hitModel then
+				if Config.TriggerBot_VisibleCheck and not IsVisible(actor, res.Instance, cam.CFrame.Position) then return nil end
+				return actor
+			end
+		end
+		return nil
+	end
+	local function TB_Fire()
+		if mouse1click then mouse1click()
+		elseif mouse1press and mouse1release then mouse1press(); task.delay(0.02, function() mouse1release() end) end
+	end
+	_tbConn = RunService.Heartbeat:Connect(function()
+		if not Config.TriggerBot_Enabled then return end
+		local cam = workspace.CurrentCamera; if not cam then return end
+		if UserInputService:GetFocusedTextBox() then return end
+		local mouse  = UserInputService:GetMouseLocation()
+		local actor  = TB_FindTarget(cam, mouse)
+		local now    = tick()
+		if actor ~= TriggerBot._actor then TriggerBot._actor = actor; TriggerBot._targetSince = now end
+		if not actor then return end
+		if (now - TriggerBot._targetSince) * 1000 < Config.TriggerBot_ReactionTime then return end
+		if (now - TriggerBot._lastShot) * 1000    < Config.TriggerBot_ShootTime    then return end
+		TB_Fire(); TriggerBot._lastShot = now
+	end)
+	table.insert(getgenv().Moon_Connections, _tbConn)
+end)
+if not _tbOk then warn("[TriggerBot init]", _tbErr) end
+
+-- ── Force Headshot — hook sau InitializeServices ──
+-- (hooked trong InitializeServices, flag check ở đây)
+-- Config.ForceHeadshot đã khai báo ở trên
 
 local function SetupAggressiveHooks()
 	local fc=FirearmInventoryClass
@@ -1424,17 +1380,14 @@ local function InitializeServices()
 				p57=false
 				local targetHead=ActorManager.SelectedTarget_RB or ActorManager.SelectedTarget_SA
 				local targetActor=ActorManager.SelectedActor_RB or ActorManager.SelectedActor_SA
-				if targetHead then
-					local targetPos = GetActorPartPosition(targetActor, targetHead)
-					local muzzle_velocity=2000
+				if targetHead and not IsVehiclePart(targetHead) then  -- vehicle check
+					local targetPos=targetHead.Position; local muzzle_velocity=2000
 					if p49==lastUsedCaliber then muzzle_velocity=lastUsedVelocity
 					elseif p49 and BulletService.GetInfo then
 						local vel=BulletService:GetInfo(p49,p50)
 						if vel and vel>0 then muzzle_velocity=vel; lastUsedCaliber=p49; lastUsedVelocity=vel end
 					end
-					local sv = _velSamples[targetActor]
-					local targetVelocity = (sv and sv.velocity) or getgenv()._lastPredVel or Vector3_new(0,0,0)
-					local gravity=32.2
+					local targetVelocity=getgenv()._lastPredVel or Vector3_new(0,0,0); local gravity=32.2
 					if originCF then muzzlePos=originCF.Position end
 					if not muzzlePos and GetMuzzlePosition then muzzlePos=GetMuzzlePosition() end
 					if muzzlePos and targetPos then
@@ -1447,6 +1400,20 @@ local function InitializeServices()
 					end
 				end
 			end
+			-- Lean Beam Tracer hook
+			pcall(function()
+				if Config.LeanTracers and originCF then
+					local localMuzzle = GetMuzzlePosition and GetMuzzlePosition()
+					if localMuzzle and (originCF.Position - localMuzzle).Magnitude <= 5 then
+						local dir = originCF.LookVector
+						local rp  = RaycastParams.new(); rp.FilterType = Enum.RaycastFilterType.Exclude
+						local fl  = { Camera }; if LocalPlayer.Character then fl[2] = LocalPlayer.Character end
+						rp.FilterDescendantsInstances = fl
+						local ray = Workspace:Raycast(originCF.Position, dir * 2000, rp)
+						task.spawn(LeanTracers.Draw, originCF.Position, ray and ray.Position or originCF.Position + dir * 800)
+					end
+				end
+			end)
 			return BulletService._originalDischarge(self,originCF,p49,p50,p51,p52,p53,p54,p55,p56,p57)
 		end
 		getgenv()._BulletServiceHooked=true
@@ -1462,6 +1429,26 @@ local function InitializeServices()
 			rc.GetCameraAdjustment=function(self,...) if Config.NoRecoil or Config.TurretNoRecoil then return CFrame.new(),0 end; return rc._OriginalGetCameraAdjustment(self,...) end
 		end
 	end
+	-- Force Headshot hook
+	pcall(function()
+		if ReplicatorService and not ReplicatorService._fhHooked then
+			if type(ReplicatorService._bulletProcess) == "function" then
+				local orig = ReplicatorService._bulletProcess
+				ReplicatorService._bulletProcess = function(self, uid, replicate, position, part, normal, material, elapsed, ...)
+					if Config.ForceHeadshot and replicate and part and not IsVehiclePart(part) then
+						local ok2, _, actor = pcall(function() return self:GetFromBodyPart(part) end)
+						if ok2 and actor then
+							local head = actor.Parts and actor.Parts.Head
+							local friendly = actor.Owner and actor.Owner.Team and LocalPlayer.Team and actor.Owner.Team == LocalPlayer.Team
+							if head and head.Parent and not friendly then part = head end
+						end
+					end
+					return orig(self, uid, replicate, position, part, normal, material, elapsed, ...)
+				end
+				ReplicatorService._fhHooked = true
+			end
+		end
+	end)
 	return true
 end
 
@@ -1495,6 +1482,7 @@ local function UpdateCombat(frameId)
 				local chamberCount = (equippedController._item and equippedController._item.MetaData and equippedController._item.MetaData.Chamber) and 1 or 0
 				local totalAmmo = magCapacity + chamberCount
 				local isReloading = equippedController._reloading == true
+				-- Stuck detection: _reloading true > 4s → force reset
 				if isReloading then
 					local reloadStart = getgenv()._autoReloadStart or now_ar
 					getgenv()._autoReloadStart = reloadStart
@@ -1623,6 +1611,10 @@ local function UpdateCombat(frameId)
 			else WeaponInfoText.Visible=false end
 		else WeaponInfoText.Visible=false end
 	end
+	-- Lean: Gun Visuals update mỗi frame
+	if Config.GunVisuals then
+		pcall(LeanGun.UpdateVisuals)
+	end
 	if Config.SilentAim and FirearmInventory and type(FirearmInventory)=="table" then
 		for _,controller in pairs(FirearmInventory) do
 			if type(controller)=="table" and controller._firearm and not controller._isHookedESP then
@@ -1654,29 +1646,21 @@ local function UpdateCombat(frameId)
 			end
 		end
 	end
+	local mouse = UserInputService:GetMouseLocation()
 	if FOVCircle then
-		pcall(function() FOVCircle.Radius=Config.SilentAimFOV end)
-		local fovShow=Config.SilentAim and Config.ShowFOV
-		local sc=Camera.ViewportSize/2; local center=Vector2.new(sc.X,sc.Y)
-		if SilentFOVFill then
-			pcall(function()
-				SilentFOVFill.Visible=fovShow and GunFOVConfig.FillFOV and not GunFOVConfig.GradientFOV
-				SilentFOVFill.Position=center; SilentFOVFill.Radius=Config.SilentAimFOV
-				SilentFOVFill.Color=GunFOVConfig.FOVFillColor; SilentFOVFill.Transparency=GunFOVConfig.FOVFillTransparency
-			end)
-		end
-		if fovShow and GunFOVConfig.GradientFOV then
-			pcall(function() FOVCircle.Visible=false end)
-			pcall(DrawGradientFOV,center,Config.SilentAimFOV,GunFOVConfig.GradientColorA,GunFOVConfig.GradientColorB,GunFOVConfig.FillFOV,GunFOVConfig.FOVFillTransparency,_dt or 0)
-		else
-			pcall(HideGradientFOV)
-			pcall(function() FOVCircle.Visible=fovShow end)
-			if fovShow then pcall(function() FOVCircle.Position=center end) end
+		FOVCircle.Visible = Config.SilentAim and Config.ShowFOV
+		if FOVCircle.Visible then
+			FOVCircle.Position = mouse
+			FOVCircle.Radius = Config.SilentAimFOV
 		end
 	end
 	local targetPart=targetPart_SA; local targetActor=ActorManager.SelectedActor_SA
 	if targetPart then
-		local rawVel = SampleActorVelocity(targetActor)
+		local rawVel=Vector3_new(0,0,0)
+		if targetActor and targetActor._oldDirection then rawVel=targetActor._oldDirection*60
+		elseif targetPart.Parent and targetPart.Parent.PrimaryPart then
+			rawVel=targetPart.Parent.PrimaryPart.AssemblyLinearVelocity or Vector3_new(0,0,0)
+		end
 		if not getgenv()._lastPredVel then getgenv()._lastPredVel=rawVel
 		else getgenv()._lastPredVel=getgenv()._lastPredVel:Lerp(rawVel,0.15) end
 	end
@@ -1815,24 +1799,14 @@ local function UpdateESPForActor(uid,espData,frameId,cachedCfg,localSquad)
 	if not actor or not actor.Alive then RemoveESP(uid); return end
 	if not ShouldShowEntity(actor,entityType,localSquad) then SetAllVisible(espData.Drawing,espData,false); return end
 	-- Tính distance thực nếu LOD_Distance không có
-	local distance = actor.LOD_Distance
-	if not distance or distance <= 0 then
-		local pos = actor.Position
-		if not pos and actor.Character and actor.Character.PrimaryPart then
-			pos = actor.Character.PrimaryPart.Position
-		end
-		if pos then
-			distance = (Camera.CFrame.Position - pos).Magnitude
-		else
-			distance = 0
-		end
-	end
+	local distance = actor.LOD_Distance or 9999
 	if distance > cachedCfg.MaxDistance then
 		SetAllVisible(espData.Drawing,espData,false)
 		if espData.SimpleESP and espData.SimpleESP.Box then pcall(function() espData.SimpleESP.Box.Visible=false end) end
 		return
 	end
-	if distance > 1500 and (frameId%2) ~= 0 then return end
+	if distance > 1500 and (frameId % 4) ~= 0 then return end
+	if distance > 500 and (frameId % 2) ~= 0 then return end
 	if cachedCfg.SimpleESP then
 		SetAllVisible(espData.Drawing,espData,false)
 		local sESP=espData.SimpleESP
@@ -1846,7 +1820,7 @@ local function UpdateESPForActor(uid,espData,frameId,cachedCfg,localSquad)
 		return
 	end
 	local drawings=espData.Drawing
-	local worldPos = actor.Position
+	local worldPos = actor.Position or (actor.RootPart and actor.RootPart.Position)
 	if not worldPos then
 		if actor.Character then
 			local pp = actor.Character.PrimaryPart or actor.Character:FindFirstChild("Head")
@@ -1855,8 +1829,15 @@ local function UpdateESPForActor(uid,espData,frameId,cachedCfg,localSquad)
 	end
 	if not worldPos then SetAllVisible(drawings,espData,false); return end
 	local screen_point,onScreen=Camera:WorldToViewportPoint(worldPos)
-	-- Chỉ dùng onScreen — reliable trên PC
-	if not onScreen then SetAllVisible(drawings,espData,false); return end
+	local engineVisible = actor.LOD_OnScreen or (distance < 128 and actor.ViewportOnScreen)
+	if not engineVisible then
+		SetAllVisible(drawings, espData, false)
+		return
+	end
+	if not onScreen then
+		SetAllVisible(drawings, espData, false)
+		return
+	end
 	local screenPos=Vector2_new(screen_point.X,screen_point.Y)
 	SetAllVisible(drawings,espData,true)
 	if espData.Highlight then espData.Highlight.FillColor=espData.Color;espData.Highlight.OutlineColor=espData.Color end
@@ -2147,6 +2128,50 @@ S_GunMods:AddToggle({ Name="No Spread", Flag="Combat_NoSpread", Default=false, C
 S_GunMods:AddToggle({ Name="Unlock Firemodes", Flag="Combat_Firemodes", Default=false, Callback=function(v) Config.UnlockFiremodes=v end })
 S_GunMods:AddToggle({ Name="Custom RPM", Flag="Combat_CustomRPM", Default=false, Callback=function(v) Config.CustomRPM=v end })
 S_GunMods:AddSlider({ Name="RPM Value", Min=100, Max=10000, Default=800, Flag="Combat_RPMValue", Callback=function(v) Config.RPMValue=v end })
+S_GunMods:AddToggle({ Name="Force Headshot", Flag="Combat_ForceHeadshot", Default=false,
+	Callback=function(v) Config.ForceHeadshot=v end })
+
+-- Gun Visuals Section (Lean)
+local S_GunVis = CombatTab:DrawSection({ Name="Gun Visuals", Position="right" })
+S_GunVis:AddToggle({ Name="Enable", Flag="GunVis_Enabled", Default=false,
+	Callback=function(v) Config.GunVisuals=v; if not v then pcall(LeanGun.RestoreVisuals) end end })
+S_GunVis:AddDropdown({ Name="Material", Flag="GunVis_Material", Default="Original",
+	Values={"Original","ForceField","Neon","SmoothPlastic","Glass","Metal","Ice"},
+	Callback=function(v) Config.GunMaterial=v end })
+S_GunVis:AddSlider({ Name="Transparency", Flag="GunVis_Transparency", Min=0, Max=100, Default=0,
+	Callback=function(v) Config.GunTransparency=v end })
+S_GunVis:AddColorPicker({ Name="Weapon Color", Flag="GunVis_Color", Default=Config.GunWeaponColor,
+	Callback=function(v) Config.GunWeaponColor=v end })
+
+-- Beam Tracers Section (Lean)
+local S_Tracer = CombatTab:DrawSection({ Name="Beam Tracers", Position="left" })
+S_Tracer:AddToggle({ Name="Enable", Flag="Tracer_Enabled", Default=false,
+	Callback=function(v) Config.LeanTracers=v; if not v then pcall(LeanTracers.ClearAll) end end })
+S_Tracer:AddDropdown({ Name="Style", Flag="Tracer_Style", Default="Lightning",
+	Values={"Line","Lightning","DNA"},
+	Callback=function(v) Config.LeanTracerStyle=v end })
+S_Tracer:AddColorPicker({ Name="Tracer Color", Flag="Tracer_Color", Default=Config.LeanTracerColor,
+	Callback=function(v) Config.LeanTracerColor=v end })
+S_Tracer:AddSlider({ Name="Duration (x0.1s)", Flag="Tracer_Duration", Min=1, Max=30, Default=6,
+	Callback=function(v) Config.LeanTracerDuration=v/10 end })
+S_Tracer:AddSlider({ Name="Width (x0.01)", Flag="Tracer_Width", Min=2, Max=30, Default=8,
+	Callback=function(v) Config.LeanTracerWidth=v/100 end })
+
+-- Trigger Bot Section (Lean)
+local S_Trigger = CombatTab:DrawSection({ Name="Trigger Bot", Position="right" })
+S_Trigger:AddToggle({ Name="Enable", Flag="Trigger_Enabled", Default=false,
+	Callback=function(v) Config.TriggerBot_Enabled=v end })
+S_Trigger:AddToggle({ Name="Magnetic (dùng SA target)", Flag="Trigger_Magnetic", Default=false,
+	Callback=function(v) Config.TriggerBot_Magnetic=v end })
+S_Trigger:AddToggle({ Name="Visible Check", Flag="Trigger_VisCheck", Default=true,
+	Callback=function(v) Config.TriggerBot_VisibleCheck=v end })
+S_Trigger:AddSlider({ Name="Reaction (ms)", Flag="Trigger_Reaction", Min=0, Max=500, Default=50,
+	Callback=function(v) Config.TriggerBot_ReactionTime=v end })
+S_Trigger:AddSlider({ Name="Shoot Interval (ms)", Flag="Trigger_Interval", Min=0, Max=1000, Default=100,
+	Callback=function(v) Config.TriggerBot_ShootTime=v end })
+S_Trigger:AddSlider({ Name="Max Distance", Flag="Trigger_MaxDist", Min=50, Max=5000, Default=1000,
+	Callback=function(v) Config.TriggerBot_MaxDistance=v end })
+
 -- ESP Tab
 local VisualsTab=Window:DrawTab({ Name="ESP", Icon="eye", Type="Double" })
 local S_ESP=VisualsTab:DrawSection({ Name="ESP Settings", Position="left" })
@@ -2320,9 +2345,8 @@ local ConfigUI=Window:DrawConfig({ Name="Configs", Icon="folder", Config=_Config
 ConfigUI:Init()
 
 -- Main Loop
-local frameCount=0; local _dt=0
-local espLoop=RunService.RenderStepped:Connect(function(dt)
-	_dt=dt
+local frameCount=0
+local espLoop=RunService.RenderStepped:Connect(function()
 	frameCount=(frameCount+1)%60
 	if ActorManager then
 		ActorManager:Update()
@@ -2336,8 +2360,6 @@ local espLoop=RunService.RenderStepped:Connect(function(dt)
 	UpdateESP()
 	if frameCount%2==0 then UpdateVehicles(frameCount,Config) end
 	UpdateCombat(frameCount)
-	if frameCount%12==0 then pcall(GunVisuals_Update) end
-	if frameCount%60==0 then pcall(ResolveGunHooks) end
 end)
 table.insert(getgenv().Moon_Connections,espLoop)
 
@@ -2378,8 +2400,8 @@ local AutoFarm = {
 	_lastShot = 0,
 	_phase = "seek",          -- seek | shoot | switch | return
 	_enemyIndex = 1,
-	_originCF = nil,
-	_returnTimer = 0,
+	_originCF = nil,          -- vị trí lưu trước khi teleport đến target
+	_returnTimer = 0,         -- timestamp khi bắt đầu phase return
 }
 
 -- Teleport LocalActor đến vị trí gần target
@@ -2452,6 +2474,7 @@ local function AutoFarm_Tick()
 		local target = AutoFarm_NextTarget()
 		if not target then return end
 
+		-- Lưu vị trí hiện tại trước khi teleport — dùng để return về sau
 		if not AutoFarm._originCF then
 			local myActor = ReplicatorService and ReplicatorService.LocalActor
 			if myActor then
@@ -2531,6 +2554,7 @@ local function AutoFarm_Tick()
 
 	-- PHASE: RETURN — teleport về vị trí ban đầu trước khi seek target kế
 	if AutoFarm._phase == "return" then
+		-- Teleport về ngay lập tức mỗi tick (giữ nguyên vị trí nếu bị server push)
 		if AutoFarm._originCF then
 			local myActor = ReplicatorService and ReplicatorService.LocalActor
 			if myActor then
@@ -2541,6 +2565,7 @@ local function AutoFarm_Tick()
 				end)
 			end
 		end
+		-- Chờ 0.5s ổn định rồi mới seek target kế
 		if (now - AutoFarm._returnTimer) >= 0.5 then
 			AutoFarm._originCF = nil
 			AutoFarm._phase = "seek"
@@ -2740,22 +2765,6 @@ S_BT:AddColorPicker({ Name="Tracer Color", Flag="BT_Color", Default=BulletTracer
 			pcall(function() if t.part and t.part.Parent then t.part.Color=v end end)
 		end
 	end })
-
-pcall(function()
-local S_BeamTracer=MiscTab:DrawSection({ Name="Beam Tracer (Lean)", Position="left" })
-S_BeamTracer:AddToggle({ Name="Enabled", Flag="BT2_Enabled", Default=false, Callback=function(v)
-	BeamTracer.Enabled=v; if v then ResolveGunHooks() end
-	if not v and BeamTracer.folder then BeamTracer.folder:Destroy(); BeamTracer.folder=nil end
-end })
-S_BeamTracer:AddDropdown({ Name="Style", Default="Lightning", Flag="BT2_Style",
-	Options={"Line","Lightning","DNA"}, Callback=function(v) BeamTracer.Style=v end })
-S_BeamTracer:AddColorPicker({ Name="Tracer Color", Flag="BT2_Color", Default=BeamTracer.Color,
-	Callback=function(v) BeamTracer.Color=v end })
-S_BeamTracer:AddSlider({ Name="Duration (s)", Min=1, Max=30, Default=6, Flag="BT2_Duration",
-	Callback=function(v) BeamTracer.Duration=v/10 end })
-S_BeamTracer:AddSlider({ Name="Width (x0.01)", Min=1, Max=30, Default=8, Flag="BT2_Width",
-	Callback=function(v) BeamTracer.Width=v/100 end })
-end)
 
 print("[VehicleMods + BulletTracer + FOV Screen-Center] Loaded")
 
@@ -3074,7 +3083,6 @@ print("[AntiFall] Loaded")
 
 
 
--- ==========================================
 -- AURA KILL — Verified từ Flux_client.lua source
 -- Cipher đúng 100%: netEncode verified = RSpy dump match
 -- net:FireServer() = RemoteEvent:FireServer(netEncode(JSONEncode({_code,...}), _key))
@@ -3308,7 +3316,8 @@ S_AK:AddButton({Name="Rescan Network",
 
 print("[AuraKill] Loaded — Cipher verified vs RSpy dump")
 
--- ==========================================
+
+
 pcall(function()
 -- AUTO FARM
 local AutoFarm = {Enabled=false, OffsetY=-2, _connection=nil, _running=false}
@@ -3394,6 +3403,10 @@ S_AF:AddSlider({Name="Y Offset", Flag="AF_OffsetY", Min=-10, Max=0, Default=-2, 
 	Callback=function(v) AutoFarm.OffsetY=v end})
 print("[AutoFarm] Loaded")
 end)
+
+
+
+
 
 -- AUTO LOCKPICK v4
 -- InputService._mounts["PickLock"] là callback thật
@@ -3526,14 +3539,18 @@ end)
 
 pcall(function()
 -- VEHICLE TELEPORTER
+-- ControllerService không được assign trong BulkScan → luôn nil
+-- Lấy vehicle qua VehicleService.Vehicles + LocalActor.Seat.UID
 local VehicleTeleport = { _savedCF = nil }
 
 local function VT_GetVehicle()
     local localActor = ReplicatorService and ReplicatorService.LocalActor
     if not localActor then return nil end
+
     local seat = localActor.Seat
     if not seat then return nil end
 
+    -- Method 1: VehicleService.Vehicles lookup theo UID
     local uid = seat.UID
     if uid and VehicleService and VehicleService.Vehicles then
         for _, veh in pairs(VehicleService.Vehicles) do
@@ -3541,6 +3558,7 @@ local function VT_GetVehicle()
         end
     end
 
+    -- Method 2: GC scan — tìm vehicle có Controlling = true + ComponentReplicates
     local ok, gc = pcall(function() return getgc(true) end)
     if not ok or not gc then return nil end
     for _, obj in pairs(gc) do
@@ -3556,6 +3574,7 @@ local function VT_GetVehicle()
 end
 
 local function VT_GetSolver(vehicle)
+    -- Tìm controller có _vehicle match để lấy solver
     local ok, gc = pcall(function() return getgc(true) end)
     if not ok or not gc then return nil end
     for _, obj in pairs(gc) do
@@ -3576,11 +3595,13 @@ local function TeleportVehicle(targetCF)
         return
     end
 
+    -- Step 1: set CFrame
     pcall(function()
         vehicle.CFrame = targetCF
         if vehicle.Hitbox then vehicle.Hitbox.CFrame = targetCF end
     end)
 
+    -- Step 2: reset solver velocity → không drift sau teleport
     pcall(function()
         local solver = VT_GetSolver(vehicle)
         if solver and solver.SetState then
@@ -3588,6 +3609,7 @@ local function TeleportVehicle(targetCF)
         end
     end)
 
+    -- Step 3: SimulatedPosition — cách VehicleFly replicate lên server
     pcall(function()
         if ReplicatorService and ReplicatorService.LocalActor then
             ReplicatorService.LocalActor.SimulatedPosition = targetCF.Position
@@ -3601,6 +3623,7 @@ getgenv().VehicleTeleport = VehicleTeleport
 
 local S_VT = VehicleTab:DrawSection({Name="Vehicle Teleporter", Position="left"})
 
+-- Button 1: Lấy toạ độ
 S_VT:AddButton({ Name="Lấy Toạ Độ", Callback=function()
     pcall(function()
         local vehicle = VT_GetVehicle()
@@ -3625,6 +3648,7 @@ S_VT:AddButton({ Name="Lấy Toạ Độ", Callback=function()
     end)
 end})
 
+-- Button 2: Teleport phương tiện
 S_VT:AddButton({ Name="Teleport Phương Tiện", Callback=function()
     pcall(function()
         if not VehicleTeleport._savedCF then
@@ -3635,6 +3659,7 @@ S_VT:AddButton({ Name="Teleport Phương Tiện", Callback=function()
     end)
 end})
 
+-- Button 3: Xóa toạ độ
 S_VT:AddButton({ Name="Xóa Toạ Độ", Callback=function()
     pcall(function()
         VehicleTeleport._savedCF = nil
@@ -3644,596 +3669,3 @@ end})
 
 print("[VehicleTeleport] Loaded")
 end)
-
--- ================================================
--- LEAN FEATURES — bọc pcall, dùng đúng WrapSection API
--- ================================================
-
--- ── TRIGGER BOT ──────────────────────────────────
-pcall(function()
-	local TB = {
-		Enabled=false, TeamCheck=false, VisibleCheck=true,
-		MaxDistance=1000, ReactionTime=50, ShootTime=100,
-		Targets={NPCs=true,Players=true,Zombies=true},
-		_lastShot=0, _targetSince=0, _actor=nil
-	}
-	getgenv().LeanTriggerBot = TB
-	local TB_Key = "MB2"
-	local function TB_fire()
-		if mouse1click then mouse1click()
-		elseif mouse1press and mouse1release then mouse1press(); task.delay(.02, mouse1release) end
-	end
-	local function TB_allowed(actor)
-		if not actor or actor.Alive==false then return false end
-		if type(actor.Health)=="number" and actor.Health<=0 then return false end
-		if not actor.Character or not actor.Character.Parent then return false end
-		local kind = actor.Zombie and "Zombies" or (actor.Owner and "Players" or "NPCs")
-		if not TB.Targets[kind] then return false end
-		if TB.TeamCheck and kind=="Players" and actor.Owner and LocalPlayer.Team and actor.Owner.Team==LocalPlayer.Team then return false end
-		return true
-	end
-	local TB_params = RaycastParams.new(); TB_params.FilterType = Enum.RaycastFilterType.Exclude
-	local function TB_find()
-		if not ReplicatorService or not ReplicatorService.Actors then return nil end
-		local mouse = Camera.ViewportSize/2
-		local ray = Camera:ViewportPointToRay(mouse.X, mouse.Y)
-		local exclude = {Camera}; if LocalPlayer.Character then exclude[2]=LocalPlayer.Character end
-		TB_params.FilterDescendantsInstances = exclude
-		local closest, nearDist = nil, TB.MaxDistance
-		for _, actor in pairs(ReplicatorService.Actors) do
-			if TB_allowed(actor) then
-				for _, part in ipairs(actor.Character:GetChildren()) do
-					if part:IsA("BasePart") then
-						local cf = (GetActorPartCFrame and GetActorPartCFrame(actor,part)) or part.CFrame
-						local p = cf:PointToObjectSpace(ray.Origin); local d = cf:VectorToObjectSpace(ray.Direction)
-						local h = part.Size*.5; local lo,hi,ok = 0,math.huge,true
-						for _,ax in ipairs({"X","Y","Z"}) do
-							if math.abs(d[ax])<1e-6 then if math.abs(p[ax])>h[ax] then ok=false;break end
-							else local a,b=(-h[ax]-p[ax])/d[ax],(h[ax]-p[ax])/d[ax]
-								if a>b then a,b=b,a end; lo=math.max(lo,a); hi=math.min(hi,b)
-								if hi<lo then ok=false;break end end
-						end
-						if ok and lo<nearDist then nearDist=lo; closest=actor end
-					end
-				end
-			end
-		end
-		if not closest then return nil end
-		if TB.VisibleCheck then
-			local hit = Workspace:Raycast(Camera.CFrame.Position, ray.Direction*nearDist, TB_params)
-			if hit and closest.Character and not hit.Instance:IsDescendantOf(closest.Character) then return nil end
-		end
-		return closest
-	end
-	local TB_conn = RunService.RenderStepped:Connect(function()
-		if not TB.Enabled or UserInputService:GetFocusedTextBox()~=nil then return end
-		local down = false
-		pcall(function()
-			if TB_Key=="MB2" then down=UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
-			elseif TB_Key=="MB1" then down=UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
-			else local ok,kc=pcall(function() return Enum.KeyCode[tostring(TB_Key):match("([^%.]+)$")] end)
-				if ok and kc then down=UserInputService:IsKeyDown(kc) end end
-		end)
-		if not down then TB._actor=nil; TB._targetSince=0; return end
-		local actor = TB_find(); local now = tick()
-		if actor~=TB._actor then TB._actor=actor; TB._targetSince=now end
-		if not actor then return end
-		if (now-TB._targetSince)*1000<TB.ReactionTime or (now-TB._lastShot)*1000<TB.ShootTime then return end
-		TB_fire(); TB._lastShot=now
-	end)
-	table.insert(getgenv().Moon_Connections, TB_conn)
-	local S_TB = CombatTab:DrawSection({Name="Trigger Bot", Position="right"})
-	S_TB:AddToggle({Name="Enabled", Flag="TB_Enabled", Default=false, Callback=function(v) TB.Enabled=v end})
-	S_TB:AddKeybind({Name="Trigger Key", Flag="TB_Key", Default="MB2", Mode="Hold", Callback=function(v) TB_Key=v end})
-	S_TB:AddSlider({Name="Reaction Time (ms)", Flag="TB_Reaction", Min=0, Max=500, Default=50, Callback=function(v) TB.ReactionTime=v end})
-	S_TB:AddSlider({Name="Shoot Time (ms)", Flag="TB_Shoot", Min=0, Max=1000, Default=100, Callback=function(v) TB.ShootTime=v end})
-	S_TB:AddSlider({Name="Max Distance", Flag="TB_Dist", Min=50, Max=5000, Default=1000, Callback=function(v) TB.MaxDistance=v end})
-	S_TB:AddToggle({Name="Visible Check", Flag="TB_VisCheck", Default=true, Callback=function(v) TB.VisibleCheck=v end})
-	S_TB:AddToggle({Name="Team Check", Flag="TB_TeamCheck", Default=false, Callback=function(v) TB.TeamCheck=v end})
-	print("[TriggerBot] Loaded")
-end)
-
--- ── MOVEMENT EXTENSIONS ────────────────────────────
-pcall(function()
-	local MOV = {
-		OmniSprint=false, SprintCombat=false, SpeedMod=false, SpeedValue=24,
-		Modifier=false, Multiplier=2, Smoothing=false, Penalties=false,
-		_installed=false, _hooks={}, _active=true, _speedKey="G", _modKey="LeftShift"
-	}
-	getgenv().LeanMovement = MOV
-	local function MOV_wrap(class,key,handler)
-		local original=class[key]; if type(original)~="function" then return false end
-		local raw=rawget(class,key)
-		local wrapper=function(ctrl,...) return handler(original,ctrl,...) end
-		class[key]=wrapper; table.insert(MOV._hooks,{class=class,key=key,raw=raw,wrapper=wrapper})
-		return true
-	end
-	local function MOV_install(class)
-		local standing=nil
-		pcall(function()
-			local inspect=(debug and debug.getupvalues) or getupvalues
-			for _,fn in ipairs({class.new,class.Update}) do
-				local ok,vals=pcall(inspect,fn)
-				if ok then for _,v in pairs(vals) do
-					if type(v)=="table" and type(v.CharacterHeightState)=="table" then
-						standing=v.CharacterHeightState.Standing; break end end end
-				if standing~=nil then break end
-			end
-		end)
-		local svc=ReplicatorService
-		local function isLocal(ctrl) return MOV._active and svc and ctrl._localActor==svc.LocalActor end
-		local function canMove(ctrl)
-			local a=ctrl._localActor
-			return a and not(a.Downed or a.Frozen or a.Forced or a.Rappelling or a.Ladder or ctrl.Goal or ctrl._forceCFrame) end
-		MOV_wrap(class,"_processMovementInput",function(orig,ctrl,input,dt)
-			local actor=ctrl._localActor
-			if isLocal(ctrl) and standing~=nil and (MOV.OmniSprint or MOV.SprintCombat) and canMove(ctrl)
-				and ctrl.TrySprinting and ctrl.HeightState==standing and not ctrl.IsSliding and input.Magnitude>.01 then
-				local dirOK=MOV.OmniSprint or input.Y<-.5
-				local aimOK=MOV.SprintCombat or not (actor and actor.ADS)
-				if dirOK and aimOK then ctrl.IsSprinting=true end
-			end
-			return orig(ctrl,input,dt)
-		end)
-		MOV_wrap(class,"_accelerate",function(orig,ctrl,dt,magnitude)
-			if not isLocal(ctrl) then return orig(ctrl,dt,magnitude) end
-			local actor=ctrl._localActor; local saved={}
-			local function change(obj,k,val) table.insert(saved,{obj=obj,k=k,val=rawget(obj,k)}); obj[k]=val end
-			if MOV.Penalties and actor then
-				change(actor,"SpeedPenalty",nil); change(actor,"HitSlowness",nil)
-				change(actor,"CQB",nil); change(actor,"Weight",0); change(ctrl,"_weightMulti",1) end
-			local r=table.pack(pcall(orig,ctrl,MOV.Smoothing and 1000000 or dt,magnitude))
-			for i=#saved,1,-1 do local s=saved[i]; s.obj[s.k]=s.val end
-			if not r[1] then error(r[2],0) end
-			if MOV._speedActive and canMove(ctrl) then
-				ctrl.MoveSpeed=MOV.SpeedValue*(MOV._modActive and MOV.Multiplier or 1)*math.clamp(magnitude,0,1) end
-			return table.unpack(r,2,r.n)
-		end)
-		MOV_wrap(class,"_exhaust",function(orig,ctrl,...)
-			if isLocal(ctrl) and MOV.Stamina then ctrl._exhaustStart=tick()-2; ctrl._exhausted=tick()-1; return true end
-			return orig(ctrl,...) end)
-		MOV._installed=true
-	end
-	local MOV_hb=RunService.Heartbeat:Connect(function()
-		if not MOV._active then return end
-		local focused=UserInputService:GetFocusedTextBox()~=nil
-		if not focused then
-			pcall(function()
-				local ok,kc=pcall(function() return Enum.KeyCode[MOV._speedKey] end)
-				MOV._speedDown=ok and kc and UserInputService:IsKeyDown(kc) or false
-				local ok2,mc=pcall(function() return Enum.KeyCode[MOV._modKey] end)
-				MOV._modDown=ok2 and mc and UserInputService:IsKeyDown(mc) or false
-			end)
-		else MOV._speedDown=false; MOV._modDown=false end
-		MOV._speedActive=MOV.SpeedMod and MOV._speedDown
-		MOV._modActive=MOV._speedActive and MOV.Modifier and MOV._modDown
-		if not MOV._installed then
-			for _,m in ipairs(getloadedmodules()) do
-				if m.Name=="CharacterController" then
-					local ok,class=pcall(require,m)
-					if ok and type(class)=="table" then pcall(MOV_install,class) end
-					break end
-			end
-		end
-	end)
-	table.insert(getgenv().Moon_Connections, MOV_hb)
-	local S_MovExt=CharacterTab:DrawSection({Name="Movement Ext.", Position="right"})
-	S_MovExt:AddToggle({Name="OmniSprint", Flag="MOV_Omni", Default=false, Callback=function(v) MOV.OmniSprint=v end})
-	S_MovExt:AddToggle({Name="Aim While Sprinting", Flag="MOV_SprintCombat", Default=false, Callback=function(v) MOV.SprintCombat=v end})
-	S_MovExt:AddToggle({Name="Speed Mod", Flag="MOV_Speed", Default=false, Callback=function(v) MOV.SpeedMod=v end})
-	S_MovExt:AddSlider({Name="Speed Value", Flag="MOV_SpeedVal", Min=1, Max=150, Default=24, Callback=function(v) MOV.SpeedValue=v end})
-	S_MovExt:AddKeybind({Name="Speed Key", Flag="MOV_SpeedKey", Default="G", Mode="Toggle", Callback=function(v) MOV._speedKey=v end})
-	S_MovExt:AddToggle({Name="Speed Multiplier", Flag="MOV_Modifier", Default=false, Callback=function(v) MOV.Modifier=v end})
-	S_MovExt:AddSlider({Name="Multiplier", Flag="MOV_MultVal", Min=1, Max=5, Default=2, Rounding=1, Callback=function(v) MOV.Multiplier=v end})
-	S_MovExt:AddKeybind({Name="Modifier Key", Flag="MOV_ModKey", Default="LeftShift", Mode="Hold", Callback=function(v) MOV._modKey=v end})
-	S_MovExt:AddToggle({Name="No Move Smoothing", Flag="MOV_Smooth", Default=false, Callback=function(v) MOV.Smoothing=v end})
-	S_MovExt:AddToggle({Name="No Speed Penalties", Flag="MOV_Penalties", Default=false, Callback=function(v) MOV.Penalties=v end})
-	print("[MovementExtensions] Loaded")
-end)
-
--- ── GUN EXTENSIONS ─────────────────────────────────
-pcall(function()
-	local GEX = {
-		InstantBullet=false, BulletMultiplier=1, NoEquipDelay=false,
-		NoCameraShake=false, SightZoom=false, Zoom=2, RPMMod=false, RPMVal=900,
-		DebugHUD=false, _hooks={}, _active=true, _shots=setmetatable({},{__mode="k"})
-	}
-	getgenv().LeanGunExt = GEX
-	local function GEX_hook(class,key,make)
-		local original=class[key]; if type(original)~="function" then return false end
-		local raw=rawget(class,key); local wrapper=make(original)
-		class[key]=wrapper; table.insert(GEX._hooks,{class=class,key=key,raw=raw,wrapper=wrapper})
-		return true end
-	local GEX_t=0
-	local function GEX_resolve()
-		if tick()<GEX_t then return end; GEX_t=tick()+2
-		local svc=ReplicatorService; local actor=svc and svc.LocalActor
-		for _,m in ipairs(getloadedmodules()) do
-			if m.Name=="BulletService" and not GEX._bsDone then
-				local ok,c=pcall(require,m)
-				if ok and type(c)=="table" then
-					GEX_hook(c,"GetInfo",function(orig) return function(self,...)
-						local r=table.pack(orig(self,...))
-						if GEX._active and GEX.InstantBullet and GEX._shots[coroutine.running()] and type(r[1])=="number" then
-							r[1]=r[1]*math.clamp(GEX.BulletMultiplier,1,10) end
-						return table.unpack(r,1,r.n)
-					end end); GEX._bsDone=true end
-			elseif m.Name=="CharacterCamera" and not GEX._camDone then
-				local ok,c=pcall(require,m)
-				if ok and type(c)=="table" then
-					GEX_hook(c,"Render",function(orig) return function(camera,...)
-						local suppress=GEX._active and GEX.NoCameraShake; local saved={}
-						if suppress then for _,shake in ipairs(camera._shakes or {}) do
-							saved[#saved+1]={shake,shake.PositionInfluence,shake.RotationInfluence}
-							shake.PositionInfluence=Vector3.zero; shake.RotationInfluence=Vector3.zero end end
-						local r=table.pack(pcall(orig,camera,...))
-						for _,v in ipairs(saved) do v[1].PositionInfluence=v[2]; v[1].RotationInfluence=v[3] end
-						if not r[1] then error(r[2],0) end
-						local me=actor; local cam=workspace.CurrentCamera
-						if GEX._active and GEX.SightZoom and me and me.ADS and cam then
-							cam.FieldOfView=math.clamp(math.deg(2*math.atan(math.tan(math.rad(cam.FieldOfView)/2)/GEX.Zoom)),5,100) end
-						return table.unpack(r,2,r.n)
-					end end)
-					GEX_hook(c,"Shake",function(orig) return function(camera,preset,...)
-						if GEX._active and GEX.NoCameraShake then return preset end
-						return orig(camera,preset,...) end end)
-					GEX._camDone=true end
-			elseif m.Name=="FirearmInventory" and not GEX._fiDone then
-				local ok,c=pcall(require,m)
-				if ok and type(c)=="table" then
-					GEX_hook(c,"Discharge",function(orig) return function(w,...)
-						local thread=coroutine.running(); local prev=GEX._shots[thread]; GEX._shots[thread]=true
-						local r=table.pack(pcall(orig,w,...)); GEX._shots[thread]=prev
-						if not r[1] then error(r[2],0) end
-						return table.unpack(r,2,r.n)
-					end end); GEX._fiDone=true end
-			end
-		end
-		local inv; for _,m in ipairs(getloadedmodules()) do
-			if m.Name=="InventoryService" then local ok,v=pcall(require,m); if ok then inv=v end; break end end
-		local entry=inv and inv.Equipped; local w=entry and entry.Handler
-		local tune=w and w._firearm and w._firearm.Tune
-		if type(tune)=="table" then
-			if GEX.NoEquipDelay then pcall(function() tune.Equip_Delay=0 end) end
-			if GEX.RPMMod then pcall(function() tune.RPM=math.clamp(GEX.RPMVal,60,3000) end) end
-		end
-	end
-	local GEX_conn=RunService.RenderStepped:Connect(function() if GEX._active then pcall(GEX_resolve) end end)
-	table.insert(getgenv().Moon_Connections, GEX_conn)
-	-- Debug HUD
-	local GEX_hud=nil
-	local GEX_hud_c=RunService.RenderStepped:Connect(function()
-		if not GEX.DebugHUD then if GEX_hud then GEX_hud.Enabled=false end; return end
-		if not GEX_hud then
-			local gui=Instance.new("ScreenGui"); gui.Name="LeanGunDebug"; gui.ResetOnSpawn=false
-			gui.Parent=LocalPlayer:WaitForChild("PlayerGui")
-			local lbl=Instance.new("TextLabel"); lbl.Size=UDim2.fromOffset(300,90)
-			lbl.Position=UDim2.new(0,16,1,-120); lbl.BackgroundColor3=Color3.fromRGB(12,12,12)
-			lbl.BackgroundTransparency=.2; lbl.TextColor3=Color3.new(1,1,1)
-			lbl.TextSize=13; lbl.Font=Enum.Font.Code; lbl.TextXAlignment=Enum.TextXAlignment.Left; lbl.Parent=gui
-			GEX_hud=gui; GEX_hud.lbl=lbl end
-		GEX_hud.Enabled=true
-		pcall(function()
-			local inv; for _,m in ipairs(getloadedmodules()) do
-				if m.Name=="InventoryService" then local ok,v=pcall(require,m); if ok then inv=v end; break end end
-			local w=(inv and inv.Equipped and inv.Equipped.Handler)
-			local tune=w and w._firearm and w._firearm.Tune
-			GEX_hud.lbl.Text=string.format(" Gun: %s\n RPM: %s | Spread: %s\n InstBullet: %s x%.1f",
-				tostring(w and w.Name or "none"),tostring(tune and tune.RPM or "-"),
-				tostring(tune and tune.Barrel_Spread or "-"),tostring(GEX.InstantBullet),GEX.BulletMultiplier)
-		end)
-	end)
-	table.insert(getgenv().Moon_Connections, GEX_hud_c)
-	local S_GEX=CombatTab:DrawSection({Name="Gun Extensions", Position="left"})
-	S_GEX:AddToggle({Name="Instant Bullet", Flag="GEX_Inst", Default=false, Callback=function(v) GEX.InstantBullet=v end})
-	S_GEX:AddSlider({Name="Bullet Multiplier", Flag="GEX_Mul", Min=1, Max=10, Default=1, Rounding=1, Callback=function(v) GEX.BulletMultiplier=v end})
-	S_GEX:AddToggle({Name="No Equip Delay", Flag="GEX_NoEquip", Default=false, Callback=function(v) GEX.NoEquipDelay=v end})
-	S_GEX:AddToggle({Name="No Camera Shake", Flag="GEX_NoCam", Default=false, Callback=function(v) GEX.NoCameraShake=v end})
-	S_GEX:AddToggle({Name="Sight Zoom", Flag="GEX_Zoom", Default=false, Callback=function(v) GEX.SightZoom=v end})
-	S_GEX:AddSlider({Name="Magnification", Flag="GEX_ZoomVal", Min=1, Max=10, Default=2, Rounding=1, Callback=function(v) GEX.Zoom=v end})
-	S_GEX:AddToggle({Name="RPM Modifier", Flag="GEX_RPM", Default=false, Callback=function(v) GEX.RPMMod=v end})
-	S_GEX:AddSlider({Name="RPM Value", Flag="GEX_RPMVal", Min=60, Max=3000, Default=900, Callback=function(v) GEX.RPMVal=v end})
-	S_GEX:AddToggle({Name="Gun Debug HUD", Flag="GEX_Debug", Default=false, Callback=function(v) GEX.DebugHUD=v end})
-	print("[GunExtensions] Loaded")
-end)
-
--- ── MELEE AURA ─────────────────────────────────────
-pcall(function()
-	local MA = {Enabled=false, Headshot=false, Reach=false, Distance=8,
-		Targets={Zombies=true,NPCs=true}, _active=true, _nextSwing=0, _key="K", _class=nil}
-	getgenv().LeanMeleeAura = MA
-	local MA_params=RaycastParams.new(); MA_params.FilterType=Enum.RaycastFilterType.Exclude
-	local MA_conn=RunService.Heartbeat:Connect(function()
-		if not MA._active or not MA.Enabled or UserInputService:GetFocusedTextBox()~=nil then return end
-		local keyDown=false
-		pcall(function()
-			local ok,kc=pcall(function() return Enum.KeyCode[MA._key] end)
-			if ok and kc then keyDown=UserInputService:IsKeyDown(kc) end end)
-		if not keyDown then return end
-		for _,m in ipairs(getloadedmodules()) do
-			if m.Name=="MeleeInventory" and not MA._class then
-				local ok,c=pcall(require,m); if ok then MA._class=c end end end
-		local inv; for _,m in ipairs(getloadedmodules()) do
-			if m.Name=="InventoryService" then local ok,v=pcall(require,m); if ok then inv=v end; break end end
-		local entry=inv and inv.Equipped; local w=entry and entry.Handler
-		if not w or w._firearm then return end
-		local me=ReplicatorService and ReplicatorService.LocalActor; if not me then return end
-		local origin=me.CFrame:PointToWorldSpace(Vector3.new(0,2.5,0))
-		local range=MA.Reach and MA.Distance or (w._distance or 4)
-		if tick()<MA._nextSwing then return end
-		local best,bestDist=nil,range
-		if ReplicatorService and ReplicatorService.Actors then
-			for _,actor in pairs(ReplicatorService.Actors) do
-				local kind=actor.Zombie and "Zombies" or (actor.Owner and "Players" or "NPCs")
-				if MA.Targets[kind] and actor.Alive~=false and actor.Character and actor.Character.Parent then
-					local head=actor.Parts and actor.Parts.Head
-					if head and head.Parent then
-						local delta=head.Position-origin
-						if delta.Magnitude<bestDist then
-							MA_params.FilterDescendantsInstances={me.Character}
-							local hit=Workspace:Raycast(origin,delta,MA_params)
-							if not hit or hit.Instance:IsDescendantOf(actor.Character) then
-								bestDist=delta.Magnitude; best=head end end end end end end
-		if best and MA._class and MA._class._use then
-			MA._nextSwing=tick()+math.max(w._timer or .5,.1)
-			task.spawn(function() pcall(function() MA._class._use(w,true) end) end)
-		end
-	end)
-	table.insert(getgenv().Moon_Connections, MA_conn)
-	local S_MA=MiscTab:DrawSection({Name="Melee Aura", Position="left"})
-	S_MA:AddToggle({Name="Kill Aura", Flag="MA_Enabled", Default=false, Callback=function(v) MA.Enabled=v end})
-	S_MA:AddKeybind({Name="Aura Key", Flag="MA_Key", Default="K", Mode="Toggle", Callback=function(v) MA._key=v end})
-	S_MA:AddToggle({Name="Force Headshot", Flag="MA_Head", Default=false, Callback=function(v) MA.Headshot=v end})
-	S_MA:AddToggle({Name="Extended Reach", Flag="MA_Reach", Default=false, Callback=function(v) MA.Reach=v end})
-	S_MA:AddSlider({Name="Reach Distance", Flag="MA_Dist", Min=1, Max=20, Default=8, Rounding=1, Callback=function(v) MA.Distance=v end})
-	print("[MeleeAura] Loaded")
-end)
-
--- ── VEHICLE EXTENSIONS ─────────────────────────────
-pcall(function()
-	local VEX={Speed=false,SpeedValue=80,Stability=false,FastStart=false,Noclip=false,
-		_active=true,_hooks={},_emptyCast=nil,_done=false}
-	getgenv().LeanVehicleExt=VEX
-	local function VEX_hook(class,key,make)
-		local original=class[key]; if type(original)~="function" then return false end
-		local raw=rawget(class,key); local wrapper=make(original)
-		class[key]=wrapper; table.insert(VEX._hooks,{class=class,key=key,raw=raw,wrapper=wrapper}); return true end
-	local VEX_t=0
-	local function dir()
-		local cam=workspace.CurrentCamera; if not cam or UserInputService:GetFocusedTextBox() then return Vector3.zero end
-		local function down(k) return UserInputService:IsKeyDown(k) and 1 or 0 end
-		local d=cam.CFrame.LookVector*(down(Enum.KeyCode.W)-down(Enum.KeyCode.S))
-			+cam.CFrame.RightVector*(down(Enum.KeyCode.D)-down(Enum.KeyCode.A))
-			+Vector3.yAxis*(down(Enum.KeyCode.Space)-down(Enum.KeyCode.LeftControl))
-		return d.Magnitude>1 and d.Unit or d
-	end
-	local function VEX_resolve()
-		if tick()<VEX_t then return end; VEX_t=tick()+3
-		if VEX._done then return end
-		for _,m in ipairs(getloadedmodules()) do
-			if m.Name=="VehicleSolver" then
-				local ok,c=pcall(require,m)
-				if ok and type(c)=="table" then
-					VEX_hook(c,"Update",function(orig) return function(solver,dt,inputs,...)
-						local vehicle=solver._vehicle
-						if not VEX._active or not vehicle or not vehicle.Controlling then return orig(solver,dt,inputs,...) end
-						local physics=solver._solver; local state=physics and physics.State
-						if not state then return orig(solver,dt,inputs,...) end
-						local heli=vehicle.Rotors~=nil
-						if heli and VEX.FastStart then
-							for _,engine in pairs(solver.Engines or {}) do
-								if engine:GetOn() and not engine:GetFullyOn() then pcall(engine.TimeSkip,engine,120) end end end
-						local cf=state.CFrame*(physics.CenterOfMass and physics.CenterOfMass:Inverse() or CFrame.identity)
-						local velocity=state.Velocity
-						if VEX.Speed and inputs and math.abs(inputs.Throttle or 0)>.01 then
-							local forward=cf.LookVector
-							if not heli then forward=Vector3.new(forward.X,0,forward.Z) end
-							if forward.Magnitude>.01 then
-								local desired=forward.Unit*VEX.SpeedValue*math.clamp(inputs.Throttle,-1,1)
-								if not heli then desired=desired+Vector3.yAxis*velocity.Y end
-								velocity=velocity:Lerp(desired,1-math.exp(-math.clamp(dt,0,.1)*4))
-								physics:SetState(nil,velocity,nil) end end
-						if VEX.Stability and not heli then
-							local angular=state.AngularVelocity; local localAV=cf:VectorToObjectSpace(angular)
-							local decay=math.exp(-math.clamp(dt,0,.1)*8)
-							local corr=cf.UpVector:Cross(Vector3.yAxis)*math.clamp(dt*4,0,.4)
-							physics:SetState(nil,velocity,cf:VectorToWorldSpace(Vector3.new(localAV.X*decay,localAV.Y,localAV.Z*decay))+corr) end
-						local oldCast=physics.CollisionCastParams
-						if VEX.Noclip then
-							if not VEX._emptyCast then VEX._emptyCast=RaycastParams.new()
-								VEX._emptyCast.FilterType=Enum.RaycastFilterType.Include
-								VEX._emptyCast.FilterDescendantsInstances={} end
-							physics.CollisionCastParams=VEX._emptyCast end
-						local r=table.pack(pcall(orig,solver,dt,inputs,...)); physics.CollisionCastParams=oldCast
-						if not r[1] then error(r[2],0) end
-						return table.unpack(r,2,r.n)
-					end end)
-					VEX._done=true end end end end
-	local VEX_conn=RunService.RenderStepped:Connect(function() if VEX._active then pcall(VEX_resolve) end end)
-	table.insert(getgenv().Moon_Connections,VEX_conn)
-	local S_VEX=VehicleTab:DrawSection({Name="Vehicle Extensions", Position="right"})
-	S_VEX:AddToggle({Name="Speed Mod", Flag="VEX_Speed", Default=false, Callback=function(v) VEX.Speed=v end})
-	S_VEX:AddSlider({Name="Speed (studs/s)", Flag="VEX_SpeedVal", Min=1, Max=250, Default=80, Callback=function(v) VEX.SpeedValue=v end})
-	S_VEX:AddToggle({Name="Stability Assist", Flag="VEX_Stab", Default=false, Callback=function(v) VEX.Stability=v end})
-	S_VEX:AddToggle({Name="Heli Fast Startup", Flag="VEX_Fast", Default=false, Callback=function(v) VEX.FastStart=v end})
-	S_VEX:AddToggle({Name="Vehicle Noclip", Flag="VEX_Noclip", Default=false, Callback=function(v) VEX.Noclip=v end})
-	print("[VehicleExtensions] Loaded")
-end)
-
--- ── TURRET EXTENSIONS ──────────────────────────────
-pcall(function()
-	local TEX={RPM=false,RPMVal=900,NoSpread=false,NoRecoil=false,_saved={},_active=true,_done=false}
-	getgenv().LeanTurretExt=TEX
-	local function field(obj,key,on,value)
-		if type(obj)~="table" then return end
-		local saved=TEX._saved[obj]
-		if on then
-			if not saved then saved={}; TEX._saved[obj]=saved end
-			local old=saved[key]; if not old then old={value=rawget(obj,key)}; saved[key]=old
-			elseif rawget(obj,key)~=old.applied then old.value=rawget(obj,key) end
-			old.applied=value; obj[key]=value
-		elseif saved and saved[key] then
-			local old=saved[key]; if rawget(obj,key)==old.applied then obj[key]=old.value end
-			saved[key]=nil; if next(saved)==nil then TEX._saved[obj]=nil end end end
-	local TEX_t=0
-	local function TEX_apply(ctrl)
-		if not ctrl or type(ctrl._config)~="table" then return end
-		local c=ctrl._config
-		field(c,"RPM",TEX.RPM,TEX.RPMVal)
-		field(c,"Barrel_Spread",TEX.NoSpread,0)
-		field(c,"Recoil_Base",TEX.NoRecoil,Vector2.zero)
-		field(c,"Recoil_Range",TEX.NoRecoil,Vector2.zero) end
-	local function TEX_resolve()
-		if tick()<TEX_t then return end; TEX_t=tick()+3; if TEX._done then return end
-		for _,m in ipairs(getloadedmodules()) do
-			if m.Name=="TurretController" then
-				local ok,c=pcall(require,m)
-				if ok and type(c)=="table" then
-					local orig=c.Update; if type(orig)=="function" then
-						c.Update=function(ctrl,...) TEX_apply(ctrl); return orig(ctrl,...) end end
-					TEX._done=true end end end end
-	local TEX_conn=RunService.RenderStepped:Connect(function() if TEX._active then pcall(TEX_resolve) end end)
-	table.insert(getgenv().Moon_Connections,TEX_conn)
-	local S_TEX=VehicleTab:DrawSection({Name="Turret Extensions", Position="right"})
-	S_TEX:AddToggle({Name="RPM Modifier", Flag="TEX_RPM", Default=false, Callback=function(v) TEX.RPM=v end})
-	S_TEX:AddSlider({Name="Turret RPM", Flag="TEX_RPMVal", Min=60, Max=3000, Default=900, Callback=function(v) TEX.RPMVal=math.clamp(v,60,3000) end})
-	S_TEX:AddToggle({Name="No Spread", Flag="TEX_NoSpread", Default=false, Callback=function(v) TEX.NoSpread=v end})
-	S_TEX:AddToggle({Name="No Recoil", Flag="TEX_NoRecoil", Default=false, Callback=function(v) TEX.NoRecoil=v end})
-	print("[TurretExtensions] Loaded")
-end)
-
--- ── WORLD MODULATION ───────────────────────────────
-pcall(function()
-	local L=game:GetService("Lighting")
-	local WMB={Ambient=L.Ambient,OutdoorAmbient=L.OutdoorAmbient,
-		ColorShift_Top=L.ColorShift_Top,ColorShift_Bottom=L.ColorShift_Bottom,
-		ClockTime=L.ClockTime,FogStart=L.FogStart,FogEnd=L.FogEnd,FogColor=L.FogColor,
-		Brightness=L.Brightness,ExposureCompensation=L.ExposureCompensation,
-		EnvironmentDiffuseScale=L.EnvironmentDiffuseScale,EnvironmentSpecularScale=L.EnvironmentSpecularScale}
-	local WM={
-		ambient={enabled=false,a=L.Ambient,b=L.OutdoorAmbient},
-		colorShift={enabled=false,top=L.ColorShift_Top,bottom=L.ColorShift_Bottom},
-		time={enabled=false,value=L.ClockTime},
-		fog={enabled=false,s=L.FogStart,e=L.FogEnd,color=L.FogColor},
-		light={enabled=false,brightness=L.Brightness,exposure=L.ExposureCompensation,
-			diffuse=L.EnvironmentDiffuseScale,specular=L.EnvironmentSpecularScale},
-	}
-	getgenv().LeanWorldMod=WM
-	local WM_conn=RunService.RenderStepped:Connect(function()
-		if WM.ambient.enabled then L.Ambient=WM.ambient.a; L.OutdoorAmbient=WM.ambient.b end
-		if WM.colorShift.enabled then L.ColorShift_Top=WM.colorShift.top; L.ColorShift_Bottom=WM.colorShift.bottom end
-		if WM.time.enabled then L.ClockTime=WM.time.value end
-		if WM.fog.enabled then L.FogStart=WM.fog.s; L.FogEnd=WM.fog.e; L.FogColor=WM.fog.color end
-		if WM.light.enabled then L.Brightness=WM.light.brightness; L.ExposureCompensation=WM.light.exposure
-			L.EnvironmentDiffuseScale=WM.light.diffuse; L.EnvironmentSpecularScale=WM.light.specular end
-	end)
-	table.insert(getgenv().Moon_Connections,WM_conn)
-	local WorldModTab=Window:DrawTab({Name="World Mod",Icon="sun",Type="Double"})
-	local S_WA=WorldModTab:DrawSection({Name="Ambient",Position="left"})
-	S_WA:AddToggle({Name="Custom Ambient",Flag="WM_Amb",Default=false,Callback=function(v)
-		WM.ambient.enabled=v; if not v then L.Ambient=WMB.Ambient; L.OutdoorAmbient=WMB.OutdoorAmbient end end})
-	S_WA:AddColorPicker({Name="Ambient",Flag="WM_AmbA",Default=WM.ambient.a,Callback=function(c) WM.ambient.a=c end})
-	S_WA:AddColorPicker({Name="Outdoor Ambient",Flag="WM_AmbB",Default=WM.ambient.b,Callback=function(c) WM.ambient.b=c end})
-	S_WA:AddToggle({Name="Custom Color Shift",Flag="WM_CS",Default=false,Callback=function(v)
-		WM.colorShift.enabled=v; if not v then L.ColorShift_Top=WMB.ColorShift_Top; L.ColorShift_Bottom=WMB.ColorShift_Bottom end end})
-	S_WA:AddColorPicker({Name="Shift Top",Flag="WM_CST",Default=WM.colorShift.top,Callback=function(c) WM.colorShift.top=c end})
-	S_WA:AddColorPicker({Name="Shift Bottom",Flag="WM_CSB",Default=WM.colorShift.bottom,Callback=function(c) WM.colorShift.bottom=c end})
-	local S_WTF=WorldModTab:DrawSection({Name="Time & Fog",Position="right"})
-	S_WTF:AddToggle({Name="Custom Time",Flag="WM_Time",Default=false,Callback=function(v)
-		WM.time.enabled=v; if not v then L.ClockTime=WMB.ClockTime end end})
-	S_WTF:AddSlider({Name="Clock Time",Flag="WM_Clock",Min=0,Max=24,Default=14,Rounding=1,Callback=function(v) WM.time.value=v end})
-	S_WTF:AddToggle({Name="Custom Fog",Flag="WM_Fog",Default=false,Callback=function(v)
-		WM.fog.enabled=v; if not v then L.FogStart=WMB.FogStart; L.FogEnd=WMB.FogEnd; L.FogColor=WMB.FogColor end end})
-	S_WTF:AddSlider({Name="Fog Start",Flag="WM_FS",Min=0,Max=2000,Default=math.floor(WMB.FogStart),Callback=function(v) WM.fog.s=v end})
-	S_WTF:AddSlider({Name="Fog End",Flag="WM_FE",Min=0,Max=10000,Default=math.min(9999,math.floor(WMB.FogEnd)),Callback=function(v) WM.fog.e=v end})
-	S_WTF:AddColorPicker({Name="Fog Color",Flag="WM_FC",Default=WM.fog.color,Callback=function(c) WM.fog.color=c end})
-	local S_WL=WorldModTab:DrawSection({Name="Lighting",Position="left"})
-	S_WL:AddToggle({Name="Custom Lighting",Flag="WM_Light",Default=false,Callback=function(v)
-		WM.light.enabled=v; if not v then L.Brightness=WMB.Brightness; L.ExposureCompensation=WMB.ExposureCompensation
-			L.EnvironmentDiffuseScale=WMB.EnvironmentDiffuseScale; L.EnvironmentSpecularScale=WMB.EnvironmentSpecularScale end end})
-	S_WL:AddSlider({Name="Brightness",Flag="WM_Bright",Min=0,Max=10,Default=math.floor(WMB.Brightness*10+.5)/10,Rounding=1,Callback=function(v) WM.light.brightness=v end})
-	S_WL:AddSlider({Name="Exposure",Flag="WM_Exp",Min=-5,Max=5,Default=0,Rounding=1,Callback=function(v) WM.light.exposure=v end})
-	S_WL:AddSlider({Name="Env Diffuse",Flag="WM_Diff",Min=0,Max=1,Default=1,Rounding=1,Callback=function(v) WM.light.diffuse=v end})
-	S_WL:AddSlider({Name="Env Specular",Flag="WM_Spec",Min=0,Max=1,Default=1,Rounding=1,Callback=function(v) WM.light.specular=v end})
-	print("[WorldModulation] Loaded")
-end)
-
--- ── RADIO LOGGER ───────────────────────────────────
-pcall(function()
-	local R={Enabled=false,rows={},byId={},limit=150,_active=true,count=0}
-	getgenv().LeanRadioLogger=R
-	function R.Build()
-		if R.gui then return end
-		local gui=Instance.new("ScreenGui"); gui.Name="LeanRadioLogger"; gui.ResetOnSpawn=false
-		gui.DisplayOrder=30; gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
-		gui.Parent=LocalPlayer:WaitForChild("PlayerGui")
-		local frame=Instance.new("Frame"); frame.AnchorPoint=Vector2.new(1,0)
-		frame.Position=UDim2.new(1,-18,0,88); frame.Size=UDim2.new(.34,0,.3,0)
-		frame.BackgroundColor3=Color3.fromRGB(15,17,21); frame.BackgroundTransparency=.08
-		frame.BorderSizePixel=0; frame.Parent=gui
-		Instance.new("UICorner",frame).CornerRadius=UDim.new(0,8)
-		local header=Instance.new("TextLabel"); header.Size=UDim2.new(1,-80,0,34)
-		header.Position=UDim2.fromOffset(12,0); header.BackgroundTransparency=1
-		header.Text="RADIO LOGGER"; header.TextColor3=Color3.fromRGB(225,230,238)
-		header.Font=Enum.Font.GothamBold; header.TextSize=13
-		header.TextXAlignment=Enum.TextXAlignment.Left; header.Active=true; header.Parent=frame
-		local status=Instance.new("TextLabel"); status.Size=UDim2.new(1,-24,0,20)
-		status.Position=UDim2.fromOffset(12,32); status.BackgroundTransparency=1
-		status.Text="0 / 150"; status.TextColor3=Color3.fromRGB(150,160,177)
-		status.Font=Enum.Font.Gotham; status.TextSize=11
-		status.TextXAlignment=Enum.TextXAlignment.Left; status.Parent=frame
-		local scroll=Instance.new("ScrollingFrame"); scroll.Position=UDim2.fromOffset(8,56)
-		scroll.Size=UDim2.new(1,-16,1,-62); scroll.BackgroundTransparency=1
-		scroll.BorderSizePixel=0; scroll.ScrollBarThickness=3
-		scroll.CanvasSize=UDim2.new(); scroll.AutomaticCanvasSize=Enum.AutomaticSize.Y; scroll.Parent=frame
-		Instance.new("UIListLayout",scroll).Padding=UDim.new(0,4)
-		R.gui=gui; R.frame=frame; R.scroll=scroll; R.status=status; gui.Enabled=R.Enabled
-	end
-	function R.Add(id,channel,name,message)
-		if not R._active or not R.Enabled then return end; R.Build()
-		local row=R.byId[id]
-		local follow=R.scroll.CanvasPosition.Y+R.scroll.AbsoluteSize.Y>=R.scroll.AbsoluteCanvasSize.Y-40
-		if not row then
-			R.count+=1
-			local lbl=Instance.new("TextLabel"); lbl.Size=UDim2.new(1,-6,0,0)
-			lbl.AutomaticSize=Enum.AutomaticSize.Y; lbl.BackgroundTransparency=1
-			lbl.TextColor3=Color3.fromRGB(210,220,234); lbl.Font=Enum.Font.Code; lbl.TextSize=12
-			lbl.TextWrapped=true; lbl.TextXAlignment=Enum.TextXAlignment.Left
-			lbl.LayoutOrder=R.count; lbl.Parent=R.scroll
-			row={id=id,label=lbl}; R.byId[id]=row; R.rows[#R.rows+1]=row
-			if #R.rows>R.limit then local old=table.remove(R.rows,1); R.byId[old.id]=nil; old.label:Destroy() end
-		end
-		row.label.Text="["..tostring(channel).."] "..tostring(name)..": "..tostring(message)
-		if R.status then R.status.Text=#R.rows.." / 150" end
-		if follow then task.defer(function()
-			if R._active and R.scroll and R.scroll.Parent then
-				R.scroll.CanvasPosition=Vector2.new(0,math.max(0,R.scroll.AbsoluteCanvasSize.Y-R.scroll.AbsoluteSize.Y)) end end) end
-	end
-	function R.Process(message)
-		if not R.Enabled or not R._active or not message.TextSource then return end
-		if message.Status and message.Status~=Enum.TextChatMessageStatus.Success then return end
-		local ok,meta=pcall(game:GetService("HttpService").JSONDecode,game:GetService("HttpService"),message.Metadata)
-		if not ok or type(meta)~="table" or not meta.Radio then return end
-		local src=game:GetService("Players"):GetPlayerByUserId(message.TextSource.UserId)
-		local name=src and (src.DisplayName.." (@"..src.Name..")") or tostring(message.TextSource.UserId)
-		local ch=type(meta.Channel)=="string" and meta.Channel or "000"
-		R.Add(message.MessageId,ch,name,message.Text)
-	end
-	local chat=game:GetService("TextChatService")
-	local function attachMain(channel)
-		if channel.Name~="Main" or not channel:IsA("TextChannel") or R.main==channel then return end
-		if R.messageConn then R.messageConn:Disconnect() end
-		R.main=channel; R.messageConn=channel.MessageReceived:Connect(function(msg) pcall(R.Process,msg) end)
-	end
-	local main=chat:FindFirstChild("Main"); if main then attachMain(main) end
-	local chatConn=chat.ChildAdded:Connect(attachMain); table.insert(getgenv().Moon_Connections,chatConn)
-	local S_RL=MiscTab:DrawSection({Name="Radio Logger", Position="right"})
-	S_RL:AddToggle({Name="Enabled", Flag="RL_Enabled", Default=false, Callback=function(v)
-		R.Enabled=v; if v then R.Build() end; if R.gui then R.gui.Enabled=v end end})
-	S_RL:AddButton({Name="Clear Messages", Callback=function()
-		for _,row in ipairs(R.rows) do if row.label then row.label:Destroy() end end
-		R.rows={}; R.byId={}; R.count=0; if R.status then R.status.Text="0 / 150" end end})
-	print("[RadioLogger] Loaded")
-end)
-
-print("[LEAN FEATURES] All blocks done")
