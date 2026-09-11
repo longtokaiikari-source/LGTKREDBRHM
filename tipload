@@ -1,202 +1,309 @@
+-- TokaiHub Loader — Sakura Edition
+-- Fast UNC check + Pink transparent UI
+
 local blockedExecutors = {["Solara"]=true,["Xeno"]=true,["Wave"]=true,["Synapse Z"]=true,["Vega x"]=true}
-local currentExecutor = identifyexecutor and identifyexecutor() or "Unknown"
+local currentExecutor  = identifyexecutor and identifyexecutor() or "Unknown"
 
-local function calculateUNC()
-	local coreFunctions = {hookfunction,hookmetatable,getgc,getreg,getgenv,getupvalues,checkclosure,isourclosure,newcclosure,setclipboard,getloadedmodules,getnilinstances}
-	local passed = 0
-	for _, func in pairs(coreFunctions) do if func then passed = passed + 1 end end
-	return math.floor((passed / #coreFunctions) * 100)
-end
-
-local userUNC = calculateUNC()
-local isBlocked = false
-
-for blockedName in pairs(blockedExecutors) do
-	if currentExecutor:lower():find(blockedName:lower()) then
-		isBlocked = true; break
-	end
-end
-
--- URLs
 local URL_PC     = "https://raw.githubusercontent.com/longtokaiikari-source/LGTKREDBRHM/refs/heads/main/tippc"
 local URL_MOBILE = "https://raw.githubusercontent.com/longtokaiikari-source/LGTKREDBRHM/refs/heads/main/tipmobile"
 
--- ScreenGui
+-- ─── Fast UNC Check (no I/O, no network, instant) ────────────────────
+local function fastUNC()
+    local checks = {
+        -- Core executor functions (existence check, no side effects)
+        "hookfunction","hookmetatable","getgc","getreg","getgenv","getupvalues",
+        "checkclosure","isourclosure","newcclosure","setclipboard","getloadedmodules",
+        "getnilinstances","gethui","getrawmetatable","getconnections","iscclosure",
+        "islclosure","isexecutorclosure","cloneref","compareinstances","clonefunction",
+        "getcallbackvalue","fireclickdetector","gethiddenproperty","sethiddenproperty",
+        "isscriptable","setscriptable","getinstances","getrenv","getrunningscripts",
+        "getscriptbytecode","getscripts","getsenv","getthreadidentity","setthreadidentity",
+        "isreadonly","setreadonly","setrawmetatable","getnamecallmethod","hookmetamethod",
+        "checkcaller","loadstring","readfile","writefile","isfile","isfolder","makefolder",
+        "listfiles","delfile","delfolder","appendfile","loadfile","getcustomasset",
+        "identifyexecutor","lz4compress","lz4decompress","request","setfpscap",
+        "getscripthash","debug.getconstant","debug.getconstants","debug.getinfo",
+        "debug.getproto","debug.getprotos","debug.getstack","debug.getupvalue",
+        "debug.getupvalues","debug.setconstant","debug.setupvalue","debug.setstack",
+        "crypt.base64encode","crypt.base64decode","crypt.encrypt","crypt.decrypt",
+        "crypt.generatebytes","crypt.generatekey","crypt.hash",
+        "Drawing","isrenderobj","getrenderproperty","setrenderproperty","cleardrawcache",
+        "WebSocket","queue_on_teleport","messagebox","isrbxactive",
+        "cache.invalidate","cache.iscached","cache.replace",
+    }
+
+    -- Quick functional verify (lightweight, no I/O)
+    local function quickTest(name)
+        local fenv = getfenv(0)
+        local val = fenv
+        for part in name:gmatch("[^.]+") do val = type(val)=="table" and val[part] or nil end
+        return val ~= nil
+    end
+
+    local pass, fail = 0, 0
+    for _, name in checks do
+        if quickTest(name) then pass += 1 else fail += 1 end
+    end
+
+    -- 3 lightweight functional tests (no network/file I/O)
+    local function tryTest(fn)
+        local ok = pcall(fn)
+        if ok then pass += 1 else fail += 1 end
+    end
+
+    if getgenv then tryTest(function()
+        getgenv().__TOKAIHUB_UNC = true
+        assert(__TOKAIHUB_UNC)
+        getgenv().__TOKAIHUB_UNC = nil
+    end) end
+
+    if iscclosure then tryTest(function()
+        assert(iscclosure(print) == true)
+        assert(iscclosure(function() end) == false)
+    end) end
+
+    if newcclosure then tryTest(function()
+        local f = function() return 42 end
+        local c = newcclosure(f)
+        assert(c() == 42 and f ~= c)
+    end) end
+
+    local total = pass + fail
+    return total > 0 and math.round(pass / total * 100) or 0, pass, fail
+end
+
+-- ─── Colors — Pink transparent sakura ────────────────────────────────
+local C = {
+    -- Panel: vivid pink, very transparent
+    panel       = Color3.fromRGB(255, 180, 210),
+    panelTop    = Color3.fromRGB(255, 140, 180),
+    stroke      = Color3.fromRGB(255, 100, 160),
+    strokeGlow  = Color3.fromRGB(255, 180, 210),
+    title       = Color3.fromRGB(255, 255, 255),
+    accent      = Color3.fromRGB(255,  80, 140),
+    text        = Color3.fromRGB(255, 240, 248),
+    textDim     = Color3.fromRGB(255, 200, 225),
+    pass        = Color3.fromRGB(100, 255, 180),
+    warn        = Color3.fromRGB(255, 220,  80),
+    fail        = Color3.fromRGB(255,  80,  80),
+    btnPC       = Color3.fromRGB(220,  60, 120),
+    btnMobile   = Color3.fromRGB(180,  40,  90),
+    btnBlock    = Color3.fromRGB( 88, 101, 242),
+    divider     = Color3.fromRGB(255, 150, 190),
+    petal1      = Color3.fromRGB(255, 200, 220),
+    petal2      = Color3.fromRGB(255, 160, 195),
+    petal3      = Color3.fromRGB(255, 130, 170),
+}
+
+local ts = game:GetService("TweenService")
+local function tw(obj,t,p) ts:Create(obj,TweenInfo.new(t,Enum.EasingStyle.Quint,Enum.EasingDirection.Out),p):Play() end
+
+-- ─── ScreenGui ───────────────────────────────────────────────────────
 local sg = Instance.new("ScreenGui")
-sg.Name = "Tokaihub_Loader"
-sg.ResetOnSpawn = false
-pcall(function() sg.Parent = game:GetService("CoreGui") end)
-if not sg.Parent then sg.Parent = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui") end
+sg.Name="TokaiHub_Loader"; sg.ResetOnSpawn=false
+sg.ZIndexBehavior=Enum.ZIndexBehavior.Global; sg.DisplayOrder=9999; sg.IgnoreGuiInset=true
+pcall(function()
+    if type(gethui)=="function" then sg.Parent=gethui()
+    else sg.Parent=game:GetService("CoreGui") end
+end)
+if not sg.Parent then sg.Parent=game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui") end
 
--- Main Frame
-local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 380, 0, 280)
-frame.Position = UDim2.new(0.5, -190, 0.5, -140)
-frame.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
-frame.BorderSizePixel = 0
-frame.Active = true
-frame.Draggable = true
-frame.Parent = sg
+-- ─── Blur (DepthOfField behind panel) ────────────────────────────────
+local dof = Instance.new("DepthOfFieldEffect")
+dof.FarIntensity=0; dof.NearIntensity=0.6; dof.FocusDistance=10; dof.InFocusRadius=5; dof.Enabled=true
+dof.Parent = game:GetService("Lighting")
+tw(dof, 0.4, {NearIntensity=0.6})
 
-Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
+-- ─── Panel — Pink frosted glass ───────────────────────────────────────
+local W, H = 420, 310
+local panel = Instance.new("Frame", sg)
+panel.Size=UDim2.fromOffset(W*0.85,H*0.85)
+panel.AnchorPoint=Vector2.new(0.5,0.5); panel.Position=UDim2.fromScale(0.5,0.5)
+panel.BackgroundColor3=C.panel
+panel.BackgroundTransparency=0.45   -- xuyên thấu, thấy game qua
+panel.BorderSizePixel=0; panel.ZIndex=2; panel.Active=true
+Instance.new("UICorner",panel).CornerRadius=UDim.new(0,16)
 
-local stroke = Instance.new("UIStroke")
-stroke.Thickness = 1.5
-stroke.Color = isBlocked and Color3.fromRGB(220,50,50) or Color3.fromRGB(88,101,242)
-stroke.Parent = frame
+-- Pink gradient (top đậm hơn, bottom nhạt)
+local panelGrad=Instance.new("UIGradient",panel)
+panelGrad.Color=ColorSequence.new({
+    ColorSequenceKeypoint.new(0, C.panelTop),
+    ColorSequenceKeypoint.new(1, C.panel),
+})
+panelGrad.Rotation=160
 
--- Title
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, 0, 0, 45)
-title.Position = UDim2.new(0, 0, 0, 0)
-title.Text = "Tokaihub"
-title.TextColor3 = Color3.fromRGB(255, 255, 255)
-title.Font = Enum.Font.GothamBold
-title.TextSize = 16
-title.BackgroundTransparency = 1
-title.Parent = frame
+-- Stroke hồng sáng
+local panelStroke=Instance.new("UIStroke",panel)
+panelStroke.Thickness=1.8; panelStroke.Color=C.stroke; panelStroke.Transparency=0.1
 
--- Divider
-local div = Instance.new("Frame")
-div.Size = UDim2.new(1, -40, 0, 1)
-div.Position = UDim2.new(0, 20, 0, 45)
-div.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
-div.BorderSizePixel = 0
-div.Parent = frame
+-- Inner glow (second stroke thicker, more transparent)
+local innerGlow=Instance.new("UIStroke")
+innerGlow.Thickness=4; innerGlow.Color=C.strokeGlow; innerGlow.Transparency=0.75; innerGlow.Parent=panel
 
--- Info
-local infoText = Instance.new("TextLabel")
-infoText.Size = UDim2.new(1, -40, 0, 50)
-infoText.Position = UDim2.new(0, 20, 0, 54)
-infoText.Text = string.format("Executor: %s\nUNC Score: %d%%", currentExecutor, userUNC)
-infoText.TextColor3 = Color3.fromRGB(180, 180, 190)
-infoText.Font = Enum.Font.Gotham
-infoText.TextSize = 13
-infoText.TextXAlignment = Enum.TextXAlignment.Left
-infoText.BackgroundTransparency = 1
-infoText.Parent = frame
-
--- Status
-local statusText = Instance.new("TextLabel")
-statusText.Size = UDim2.new(1, -40, 0, 35)
-statusText.Position = UDim2.new(0, 20, 0, 110)
-statusText.Font = Enum.Font.GothamBold
-statusText.TextSize = 13
-statusText.TextXAlignment = Enum.TextXAlignment.Left
-statusText.BackgroundTransparency = 1
-statusText.Parent = frame
-
--- Helper: tạo button
-local function makeBtn(text, color, posY, parent)
-	local b = Instance.new("TextButton")
-	b.Size = UDim2.new(0.5, -25, 0, 44)
-	b.Position = posY
-	b.Text = text
-	b.Font = Enum.Font.GothamBold
-	b.TextSize = 14
-	b.TextColor3 = Color3.fromRGB(255, 255, 255)
-	b.BackgroundColor3 = color
-	b.BorderSizePixel = 0
-	b.Parent = parent
-	Instance.new("UICorner", b).CornerRadius = UDim.new(0, 7)
-
-	-- Hover effect
-	b.MouseEnter:Connect(function()
-		b.BackgroundColor3 = Color3.fromRGB(
-			math.min(color.R*255+20, 255),
-			math.min(color.G*255+20, 255),
-			math.min(color.B*255+20, 255)
-		)
-	end)
-	b.MouseLeave:Connect(function()
-		b.BackgroundColor3 = color
-	end)
-	return b
+-- Drag
+do
+    local dragging,start,startPos=false
+    panel.InputBegan:Connect(function(inp)
+        if inp.UserInputType==Enum.UserInputType.MouseButton1 or inp.UserInputType==Enum.UserInputType.Touch then
+            dragging=true; start=inp.Position; startPos=panel.Position
+            local conn; conn=game:GetService("UserInputService").InputChanged:Connect(function(i)
+                if dragging and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then
+                    local d=i.Position-start
+                    panel.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+d.X,startPos.Y.Scale,startPos.Y.Offset+d.Y)
+                end
+            end)
+            inp.Changed:Connect(function()
+                if inp.UserInputState==Enum.UserInputState.End then dragging=false; conn:Disconnect() end
+            end)
+        end
+    end)
 end
 
--- BLOCKED / LOW UNC
-if isBlocked or userUNC < 70 then
-	statusText.Text = "✗  Executor không được hỗ trợ"
-	statusText.TextColor3 = Color3.fromRGB(240, 70, 70)
-
-	local discordBtn = Instance.new("TextButton")
-	discordBtn.Size = UDim2.new(1, -40, 0, 44)
-	discordBtn.Position = UDim2.new(0, 20, 0, 210)
-	discordBtn.Text = "Support Discord (Copy Link)"
-	discordBtn.Font = Enum.Font.GothamBold
-	discordBtn.TextSize = 14
-	discordBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-	discordBtn.BackgroundColor3 = Color3.fromRGB(88, 101, 242)
-	discordBtn.BorderSizePixel = 0
-	discordBtn.Parent = frame
-	Instance.new("UICorner", discordBtn).CornerRadius = UDim.new(0, 7)
-
-	discordBtn.MouseButton1Click:Connect(function()
-		if setclipboard then
-			setclipboard("https://discord.gg/deVVQEVybd")
-			discordBtn.Text = "✓ Copied!"
-			task.wait(2)
-			discordBtn.Text = "Support Discord (Copy Link)"
-		else
-			discordBtn.Text = "setclipboard không được hỗ trợ"
-		end
-	end)
-	return
+-- Helpers
+local function mkLabel(p)
+    local l=Instance.new("TextLabel",panel); l.BackgroundTransparency=1; l.ZIndex=3; l.TextWrapped=true
+    for k,v in p do pcall(function() l[k]=v end) end; return l
+end
+local function mkDivider(y)
+    local d=Instance.new("Frame",panel); d.Size=UDim2.new(1,-40,0,1); d.Position=UDim2.new(0,20,0,y)
+    d.BackgroundColor3=C.divider; d.BackgroundTransparency=0.5; d.BorderSizePixel=0; d.ZIndex=3
+    local g=Instance.new("UIGradient",d)
+    g.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,Color3.fromRGB(255,255,255)),ColorSequenceKeypoint.new(0.2,C.divider),ColorSequenceKeypoint.new(0.8,C.divider),ColorSequenceKeypoint.new(1,Color3.fromRGB(255,255,255))})
+    g.Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,1),NumberSequenceKeypoint.new(0.15,0.5),NumberSequenceKeypoint.new(0.85,0.5),NumberSequenceKeypoint.new(1,1)})
+    return d
+end
+local function mkBtn(text,color,size,pos)
+    local b=Instance.new("TextButton",panel); b.Size=size; b.Position=pos; b.Text=text
+    b.Font=Enum.Font.GothamBold; b.TextSize=14; b.TextColor3=Color3.fromRGB(255,255,255)
+    b.BackgroundColor3=color; b.BackgroundTransparency=0.15; b.BorderSizePixel=0; b.ZIndex=3
+    Instance.new("UICorner",b).CornerRadius=UDim.new(0,9)
+    local s=Instance.new("UIStroke",b); s.Color=Color3.fromRGB(255,255,255); s.Transparency=0.6; s.Thickness=1.2
+    b.MouseEnter:Connect(function() tw(b,0.12,{BackgroundTransparency=0,BackgroundColor3=Color3.fromRGB(math.min(color.R*255+30,255),math.min(color.G*255+10,255),math.min(color.B*255+20,255))}) end)
+    b.MouseLeave:Connect(function() tw(b,0.12,{BackgroundTransparency=0.15,BackgroundColor3=color}) end)
+    b.MouseButton1Down:Connect(function() tw(b,0.06,{Size=UDim2.new(size.X.Scale,size.X.Offset-4,size.Y.Scale,size.Y.Offset-3)}) end)
+    b.MouseButton1Up:Connect(function() tw(b,0.08,{Size=size}) end)
+    return b
 end
 
--- PASSED — hiện 2 nút chọn platform
-statusText.Text = "✓  Compatibility Passed! Chọn phiên bản:"
-statusText.TextColor3 = Color3.fromRGB(70, 220, 70)
-
--- Nút PC
-local pcBtn = makeBtn(
-	"💻  PC",
-	Color3.fromRGB(88, 101, 242),
-	UDim2.new(0, 20, 0, 180),
-	frame
-)
-
--- Nút Mobile
-local mobileBtn = makeBtn(
-	"📱  Mobile",
-	Color3.fromRGB(50, 160, 80),
-	UDim2.new(0.5, 5, 0, 180),
-	frame
-)
-
--- Loading label
-local loadingLabel = Instance.new("TextLabel")
-loadingLabel.Size = UDim2.new(1, -40, 0, 30)
-loadingLabel.Position = UDim2.new(0, 20, 0, 235)
-loadingLabel.Text = ""
-loadingLabel.TextColor3 = Color3.fromRGB(150, 150, 160)
-loadingLabel.Font = Enum.Font.Gotham
-loadingLabel.TextSize = 12
-loadingLabel.BackgroundTransparency = 1
-loadingLabel.Parent = frame
-
-local function loadScript(url, platform)
-	pcBtn.Active = false; mobileBtn.Active = false
-	pcBtn.BackgroundColor3 = Color3.fromRGB(50,50,60)
-	mobileBtn.BackgroundColor3 = Color3.fromRGB(50,50,60)
-	loadingLabel.Text = "Đang tải "..platform.."..."
-
-	task.wait(0.5)
-	sg:Destroy()
-
-	local ok, err = pcall(function()
-		loadstring(game:HttpGet(url))()
-	end)
-
-	if not ok then
-		warn("[Tokaihub Loader] Failed: " .. tostring(err))
-	end
-end
-
-pcBtn.MouseButton1Click:Connect(function()
-	loadScript(URL_PC, "PC")
+-- ─── Sakura petals ────────────────────────────────────────────────────
+task.spawn(function()
+    local petalColors={C.petal1,C.petal2,C.petal3,Color3.fromRGB(255,220,235)}
+    while sg and sg.Parent do
+        local p=Instance.new("Frame",sg); local sz=math.random(5,12)
+        p.Size=UDim2.fromOffset(sz,math.floor(sz*0.55))
+        p.AnchorPoint=Vector2.new(0.5,0.5)
+        p.Position=UDim2.new(math.random(3,97)/100,0,-0.04,0)
+        p.BackgroundColor3=petalColors[math.random(1,#petalColors)]
+        p.BackgroundTransparency=math.random(0,3)/10
+        p.BorderSizePixel=0; p.Rotation=math.random(0,360); p.ZIndex=5
+        Instance.new("UICorner",p).CornerRadius=UDim.new(0.5,0)
+        local dur=math.random(40,80)/10; local drift=math.random(-60,60); local sx=p.Position.X.Scale
+        ts:Create(p,TweenInfo.new(dur,Enum.EasingStyle.Sine),{
+            Position=UDim2.new(sx+drift/800,drift,1.04,0),
+            Rotation=p.Rotation+math.random(200,500),
+            BackgroundTransparency=0.9,
+        }):Play()
+        game:GetService("Debris"):AddItem(p,dur+0.5)
+        task.wait(math.random(2,6)/10)
+    end
 end)
 
-mobileBtn.MouseButton1Click:Connect(function()
-	loadScript(URL_MOBILE, "Mobile")
+-- ─── UI Layout ────────────────────────────────────────────────────────
+
+-- Shimmer icon row
+local iconRow=mkLabel({Size=UDim2.new(1,0,0,26),Position=UDim2.new(0,0,0,7),Text="✿  ✿  ✿  ✿  ✿",TextColor3=Color3.fromRGB(255,255,255),Font=Enum.Font.GothamBold,TextSize=12,TextTransparency=0.3})
+task.spawn(function() local t=0; while iconRow and iconRow.Parent do t+=task.wait(0.05); iconRow.TextTransparency=0.2+math.sin(t*1.5)*0.25 end end)
+
+-- Title
+local titleLbl=mkLabel({Size=UDim2.new(1,-30,0,34),Position=UDim2.new(0,15,0,30),Text="✿  TokaiHub  ✿",TextColor3=Color3.fromRGB(255,255,255),Font=Enum.Font.GothamBold,TextSize=21,TextXAlignment=Enum.TextXAlignment.Center})
+do
+    local g=Instance.new("UIGradient",titleLbl)
+    g.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,C.accent),ColorSequenceKeypoint.new(0.5,Color3.fromRGB(255,240,248)),ColorSequenceKeypoint.new(1,C.accent)})
+    task.spawn(function() local r=0; while titleLbl and titleLbl.Parent do r+=task.wait(0.025); g.Offset=Vector2.new((r/2.5)%1*2-1,0) end end)
+end
+
+mkDivider(72)
+
+-- Executor row
+mkLabel({Size=UDim2.new(0.45,0,0,20),Position=UDim2.new(0,22,0,82),Text="Executor",TextColor3=C.textDim,Font=Enum.Font.Gotham,TextSize=12,TextXAlignment=Enum.TextXAlignment.Left})
+mkLabel({Size=UDim2.new(0.55,-22,0,20),Position=UDim2.new(0.45,0,0,82),Text=currentExecutor,TextColor3=C.title,Font=Enum.Font.GothamBold,TextSize=12,TextXAlignment=Enum.TextXAlignment.Right})
+
+-- UNC row
+mkLabel({Size=UDim2.new(0.45,0,0,20),Position=UDim2.new(0,22,0,107),Text="UNC Score",TextColor3=C.textDim,Font=Enum.Font.Gotham,TextSize=12,TextXAlignment=Enum.TextXAlignment.Left})
+local uncLbl=mkLabel({Size=UDim2.new(0.55,-22,0,20),Position=UDim2.new(0.45,0,0,107),Text="Checking...",TextColor3=C.textDim,Font=Enum.Font.GothamBold,TextSize=12,TextXAlignment=Enum.TextXAlignment.Right})
+
+-- Progress bar
+local barBg=Instance.new("Frame",panel); barBg.Size=UDim2.new(1,-40,0,5); barBg.Position=UDim2.new(0,20,0,133)
+barBg.BackgroundColor3=Color3.fromRGB(255,255,255); barBg.BackgroundTransparency=0.7; barBg.BorderSizePixel=0; barBg.ZIndex=3
+Instance.new("UICorner",barBg).CornerRadius=UDim.new(1,0)
+local barFill=Instance.new("Frame",barBg); barFill.Size=UDim2.new(0,0,1,0); barFill.BackgroundColor3=C.accent; barFill.BorderSizePixel=0; barFill.ZIndex=4
+Instance.new("UICorner",barFill).CornerRadius=UDim.new(1,0)
+local barGrad=Instance.new("UIGradient",barFill)
+barGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,C.accent),ColorSequenceKeypoint.new(1,C.pass)})
+
+mkDivider(148)
+
+-- Status
+local statusLbl=mkLabel({Size=UDim2.new(1,-40,0,28),Position=UDim2.new(0,20,0,157),Text="⏳  Đang kiểm tra...",TextColor3=C.textDim,Font=Enum.Font.GothamBold,TextSize=13,TextXAlignment=Enum.TextXAlignment.Center})
+
+-- Buttons
+local pcBtn=mkBtn("💻  PC",C.btnPC,UDim2.new(0.5,-28,0,44),UDim2.new(0,20,0,196))
+local mobileBtn=mkBtn("📱  Mobile",C.btnMobile,UDim2.new(0.5,-28,0,44),UDim2.new(0.5,8,0,196))
+local loadLbl=mkLabel({Size=UDim2.new(1,-40,0,22),Position=UDim2.new(0,20,0,249),Text="",TextColor3=C.textDim,Font=Enum.Font.Gotham,TextSize=12,TextXAlignment=Enum.TextXAlignment.Center})
+pcBtn.Visible=false; mobileBtn.Visible=false
+
+-- ─── Pop-in ───────────────────────────────────────────────────────────
+task.spawn(function()
+    tw(panel,0.45,{Size=UDim2.fromOffset(W,H),BackgroundTransparency=0.45})
+end)
+
+-- ─── Run fast UNC (instant, same frame basically) ─────────────────────
+local isBlocked=false
+for name in pairs(blockedExecutors) do
+    if currentExecutor:lower():find(name:lower()) then isBlocked=true; break end
+end
+
+task.spawn(function()
+    task.wait(0.5) -- wait for pop-in to feel natural
+    local rate, passes, fails = fastUNC()
+
+    local uncColor = rate>=90 and C.pass or rate>=70 and C.warn or C.fail
+    local stars = rate>=90 and "✿✿✿" or rate>=70 and "✿✿" or "✿"
+    uncLbl.Text=string.format("%d%% %s", rate, stars)
+    uncLbl.TextColor3=uncColor
+    barGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,C.accent),ColorSequenceKeypoint.new(1,uncColor)})
+    tw(barFill, 0.8, {Size=UDim2.new(rate/100,0,1,0)})
+
+    if isBlocked or rate<70 then
+        panelStroke.Color=C.fail
+        panelGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,Color3.fromRGB(255,120,120)),ColorSequenceKeypoint.new(1,Color3.fromRGB(255,160,160))})
+        statusLbl.Text = isBlocked and "✗  Executor không hỗ trợ" or string.format("✗  UNC thấp (%d%% < 70%%)", rate)
+        statusLbl.TextColor3=C.fail
+        local db=mkBtn("💬  Discord (Copy Link)",C.btnBlock,UDim2.new(1,-40,0,44),UDim2.new(0,20,0,196))
+        db.MouseButton1Click:Connect(function()
+            if setclipboard then setclipboard("https://discord.gg/deVVQEVybd"); db.Text="✓  Copied!"; task.wait(2); db.Text="💬  Discord (Copy Link)"
+            else db.Text="setclipboard không hỗ trợ" end
+        end)
+    else
+        statusLbl.Text="✿  Chọn phiên bản của bạn"; statusLbl.TextColor3=Color3.fromRGB(255,255,255)
+        pcBtn.Visible=true; mobileBtn.Visible=true
+
+        local function loadScript(url, platform)
+            pcBtn.Active=false; mobileBtn.Active=false
+            tw(pcBtn,0.15,{BackgroundTransparency=0.5}); tw(mobileBtn,0.15,{BackgroundTransparency=0.5})
+            local dots=""
+            local dot=task.spawn(function() while true do dots=dots=="..."and""or dots.."."
+                loadLbl.Text="Đang tải "..platform..dots; task.wait(0.4) end end)
+            task.wait(0.7); task.cancel(dot); loadLbl.Text="✿  Đang khởi động..."
+            tw(panel,0.35,{BackgroundTransparency=1,Size=UDim2.fromOffset(W*0.82,H*0.82)})
+            tw(panelStroke,0.35,{Transparency=1})
+            tw(dof,0.35,{NearIntensity=0})
+            task.wait(0.4); sg:Destroy(); dof:Destroy()
+            local ok,err=pcall(function() loadstring(game:HttpGet(url))() end)
+            if not ok then warn("[TokaiHub] "..tostring(err)) end
+        end
+
+        pcBtn.MouseButton1Click:Connect(function() loadScript(URL_PC,"PC") end)
+        mobileBtn.MouseButton1Click:Connect(function() loadScript(URL_MOBILE,"Mobile") end)
+    end
 end)
