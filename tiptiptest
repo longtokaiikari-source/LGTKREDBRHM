@@ -1,4 +1,4 @@
-local Repository = "https://raw.githubusercontent.com/longhazem/libba/main/"
+local Repository = "https://raw.githubusercontent.com/longhazem/lib-obsidian/main/"
 
 local function GetLoadstringSource(Url)
 	local function tryRequest(fn, args)
@@ -43,7 +43,7 @@ local function LoadRemote(Url)
 	return Chunk()
 end
 
-local Library = LoadRemote(Repository .. "source.lua")
+local Library = LoadRemote(Repository .. "Library.lua")
 local ThemeManager = LoadRemote(Repository .. "addons/ThemeManager.lua")
 local SaveManager = LoadRemote(Repository .. "addons/SaveManager.lua")
 
@@ -56,9 +56,14 @@ function MoonUI:RefreshCurrentColor() end
 function MoonUI:ConfigManager(Data) return Data or {} end
 function MoonUI.newNotify()
 	return { new = function(Data)
-		local text = (Data and Data.Title) or "Tokaihub"
-		if Data and (Data.Content or Data.Description) then text = text .. " — " .. (Data.Content or Data.Description) end
-		pcall(function() Library:Notify(text, (Data and Data.Duration) or 5) end)
+		pcall(function()
+			Library:Notify({
+				Title = (Data and Data.Title) or "Tokaihub",
+				Description = (Data and (Data.Content or Data.Description)) or "",
+				Icon = "circle-check",
+				Time = (Data and Data.Duration) or 5,
+			})
+		end)
 	end }
 end
 
@@ -140,7 +145,7 @@ local function WrapTab(Tab)
 end
 
 function MoonUI.new(Data)
-	local Window = Library:CreateWindow({ Title = "Tokaihub", Center = true, AutoShow = true, TabPadding = 8, MenuFadeTime = 0.2 })
+	local Window = Library:CreateWindow({ Title = "Tokaihub", Footer = "tokaihub", NotifySide = "Right", ShowCustomCursor = true, AutoShow = true })
 	local SettingsTab
 	local Wrapped = {
 		Raw = Window,
@@ -156,7 +161,10 @@ function MoonUI.new(Data)
 			SaveManager:IgnoreThemeSettings(); SaveManager:SetIgnoreIndexes({"MenuKeybind"})
 			ThemeManager:SetFolder("Tokaihub"); SaveManager:SetFolder("Tokaihub/specific-game")
 			if SaveManager.SetSubFolder then SaveManager:SetSubFolder("specific-place") end
-			SaveManager:BuildConfigSection(SettingsTab); ThemeManager:ApplyToTab(SettingsTab)
+			SaveManager:BuildConfigSection(SettingsTab)
+			if ThemeManager.AddThemeOptions then ThemeManager:AddThemeOptions(SettingsTab)
+			elseif ThemeManager.ApplyToTab then ThemeManager:ApplyToTab(SettingsTab) end
+			Library.ToggleKeybind = Options and Options.MenuKeybind
 			SaveManager:LoadAutoloadConfig()
 			return { Init = function() end }
 		end,
