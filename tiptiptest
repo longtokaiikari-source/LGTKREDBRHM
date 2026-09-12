@@ -170,6 +170,851 @@ function MoonUI.new(Data)
 	return Wrapped
 end
 
+-- ══════════════════════════════════════════════════════════════
+-- LEAN COMBAT ENGINE (từ MainSource__2_.txt)
+-- Silent Aim + TriggerBot + Gun System + Movement + Tracers
+-- Vehicle fix: Combat.Kind trả "NPCs" thay vì nil cho xe
+--              → silent aim / ragebot bắn được vào phương tiện
+-- ══════════════════════════════════════════════════════════════
+
+if getgenv().LeanCombat then pcall(getgenv().LeanCombat.Destroy) end
+
+local AimPlayers   = game:GetService("Players")
+local AimRunService = game:GetService("RunService")
+local AimUIS       = game:GetService("UserInputService")
+local AimLocalPlayer = AimPlayers.LocalPlayer
+local AimCamera    = workspace.CurrentCamera
+
+local Silent = {
+	Enabled=false, Targets={NPCs=true,Players=true,Zombies=true},
+	HitPart="Head", Hitscan=false, TeamCheck=false, VisibleCheck=true,
+	MaxDistance=1000, HitChance=100, StickyAim=false,
+	FOVEnabled=true, ShowFOV=true, FOV=120,
+	FOVColor=Color3.fromRGB(150,80,255), FillFOV=false,
+	FOVFillColor=Color3.fromRGB(150,80,255), FOVFillTransparency=.4,
+	GradientFOV=false, GradientSpin=false, GradientSpinSpeed=1,
+	GradientColorA=Color3.fromRGB(150,80,255), GradientColorB=Color3.fromRGB(255,110,60),
+	AutoPrediction=true, BulletDropCompensation=true,
+}
+
+local TriggerBotSettings = {
+	Enabled=false, Targets={NPCs=true,Players=true,Zombies=true},
+	TeamCheck=false, VisibleCheck=true, MaxDistance=1000, ReactionTime=50, ShootTime=100, Magnetic=false,
+}
+
+local Combat = {
+	Silent=Silent, Trigger=TriggerBotSettings, active=true,
+	actors={}, samples={}, parts={}, sticky=nil, target=nil,
+	nextScan=0, lastShot=0, targetSince=0, triggerActor=nil,
+	connections={}, drawings={}, hookState="Waiting for game adapter",
+}
+
+local SilentKeyPicker, TriggerKeyPicker
+
+function Combat.SetTargets(settings, selected)
+	local result={}
+	if type(selected)=="table" then
+		for _,v in ipairs(selected) do if v=="NPCs" or v=="Players" or v=="Zombies" then result[v]=true end end
+	end
+	settings.Targets=result; Combat.target=nil; Combat.sticky=nil; Combat.triggerActor=nil
+end
+
+function Combat.Service()
+	if Combat.service then return Combat.service end
+	if Combat.resolveAt and os.clock()<Combat.resolveAt then return nil end
+	Combat.resolveAt=os.clock()+2
+	for _,m in ipairs(getloadedmodules()) do
+		if m.Name=="ClientService" then
+			local ok,value=pcall(require,m)
+			if ok and type(value)=="table" and value.Replicator then Combat.service=value; break end
+		end
+	end
+	return Combat.service
+end
+
+function Combat.Inventory()
+	if Combat.inventoryService then return Combat.inventoryService end
+	if os.clock()<(Combat.inventoryRetry or 0) then return nil end
+	Combat.inventoryRetry=os.clock()+1
+	for _,module in ipairs(getloadedmodules()) do
+		if module.Name=="InventoryService" then
+			local ok,value=pcall(require,module)
+			if ok and type(value)=="table" and type(value._inventories)=="table" then
+				Combat.inventoryService=value; return value
+			end
+		end
+	end
+end
+
+function Combat.Weapon()
+	local inventory=Combat.Inventory(); local entry=inventory and inventory.Equipped
+	return entry and entry.Handler
+end
+
+function Combat.Weapons()
+	local inventory=Combat.Inventory(); local weapons={}; local seen={}
+	for _,group in pairs(inventory and inventory._inventories or {}) do
+		for _,entry in pairs(group) do
+			local w=entry.Handler
+			if w and w._firearm and not seen[w] then seen[w]=true; weapons[#weapons+1]=w end
+		end
+	end
+	return weapons
+end
+
+function Combat.IsTeammate(a)
+	local owner=a and a.Owner
+	if not owner then return false end
+	if owner==AimLocalPlayer then return true end
+	local service=Combat.Service(); local clients=service and service.Clients
+	local mine=clients and clients[AimLocalPlayer] or (service and service.LocalClient)
+	local other=clients and clients[owner]
+	if mine and other and mine.Squad~=nil and other.Squad~=nil and mine.Squad~="" and mine.Squad~="Neutral" then
+		return mine.Squad==other.Squad
+	end
+	return AimLocalPlayer.Team~=nil and not AimLocalPlayer.Neutral and not owner.Neutral and owner.Team==AimLocalPlayer.Team
+end
+
+function Combat.Kind(actor)
+	local c=Combat.Service()
+	local registry=c and c.Replicator and c.Replicator.Actors
+	if not registry or not actor or not actor.UID or registry[actor.UID]~=actor then return nil end
+	if actor.IsLocalPlayer or actor.Owner==AimLocalPlayer or actor==c.Replicator.LocalActor then return nil end
+	if actor.Zombie==true then return "Zombies" end
+	if actor.Owner==nil then
+		-- ← VEHICLE FIX: actor có xe (turret, vehicle occupant) có Owner=nil
+		-- Trước đây trả "NPCs" → silent/rage bỏ qua xe
+		-- Giờ trả "NPCs" luôn — KHÔNG skip bất kỳ actor nào có Owner=nil
+		return "NPCs"
+	end
+	if typeof(actor.Owner)=="Instance" and actor.Owner:IsA("Player") then return "Players" end
+	-- fallback: bất kỳ actor lạ nào cũng coi là NPC để silent/rage nhắm được
+	return "NPCs"
+end
+
+function Combat.IsAlive(actor)
+	if not actor or actor.Alive==false then return false end
+	if actor.Zombie then
+		return type(actor.Health)=="table" or (type(actor.Health)=="number" and actor.Health>0)
+	end
+	return type(actor.Health)=="number" and actor.Health>0
+end
+
+function Combat.Allowed(actor, settings)
+	local kind=Combat.Kind(actor)
+	if not kind then return false end
+	-- Vehicle fix: nếu settings.Targets không có key này → vẫn cho phép nếu Targets trống hoặc có NPCs
+	if settings.Targets and next(settings.Targets)~=nil and not settings.Targets[kind] then return false end
+	if not Combat.IsAlive(actor) then return false end
+	if not actor.Character or not actor.Character.Parent then return false end
+	if settings.TeamCheck and kind=="Players" and Combat.IsTeammate(actor) then return false end
+	return true
+end
+
+function Combat.Origin(camera)
+	local c=Combat.Service(); local me=c and c.Replicator and c.Replicator.LocalActor
+	return me and me.Position or camera.CFrame.Position
+end
+
+function Combat.Sync(force)
+	if not force and os.clock()<Combat.nextScan then return end
+	Combat.nextScan=os.clock()+.05
+	local c=Combat.Service(); local registry=c and c.Replicator and c.Replicator.Actors or {}
+	local list={}; local now=os.clock()
+	for _,a in pairs(registry) do
+		if Combat.Kind(a) and typeof(a.Position)=="Vector3" then
+			list[#list+1]=a
+			local old=Combat.samples[a]; local vel=Vector3.zero
+			if old and old.model==a.Character and old.root==a.RootPart and now>old.time then
+				local measured=(a.Position-old.position)/(now-old.time); local dt=now-old.time
+				if dt<.35 and measured.Magnitude<300 then
+					vel=old.velocity:Lerp(measured,1-math.exp(-dt*18))
+					if measured.Magnitude<.1 then vel=Vector3.zero end
+				end
+			end
+			Combat.samples[a]={position=a.Position,time=now,velocity=vel,model=a.Character,root=a.RootPart}
+			local cached=Combat.parts[a]
+			if not cached or cached.model~=a.Character or cached.root~=a.RootPart or now>=(cached.refreshAt or 0) then
+				local parts,seen={},{}
+				local function add(p)
+					if typeof(p)=="Instance" and p:IsA("BasePart") and a.Character
+						and p:IsDescendantOf(a.Character) and not seen[p] then
+						seen[p]=true; parts[#parts+1]=p
+					end
+				end
+				for _,p in pairs(a.Parts or {}) do add(p) end
+				if a.Character then for _,p in ipairs(a.Character:GetChildren()) do add(p) end end
+				Combat.parts[a]={model=a.Character,root=a.RootPart,list=parts,refreshAt=now+.5}
+			end
+		end
+	end
+	for a in pairs(Combat.samples) do
+		if not a.UID or registry[a.UID]~=a then Combat.samples[a]=nil; Combat.parts[a]=nil end
+	end
+	Combat.actors=list
+end
+
+function Combat.PartCFrame(actor, part)
+	if not Combat.IsAlive(actor) then return part.CFrame end
+	local root=actor.RootPart
+	if not root or root:IsDescendantOf(workspace) then return part.CFrame end
+	local pose=typeof(actor.CFrame)=="CFrame" and actor.CFrame.Rotation or CFrame.identity
+	local actorFrame=pose+actor.Position
+	return actorFrame*root.CFrame:ToObjectSpace(part.CFrame)
+end
+
+function Combat.PartPosition(actor, part)
+	return Combat.PartCFrame(actor,part).Position
+end
+
+local combatRayParams=RaycastParams.new()
+combatRayParams.FilterType=Enum.RaycastFilterType.Exclude
+combatRayParams.IgnoreWater=false
+pcall(function() combatRayParams.CollisionGroup="9" end)
+
+function Combat.Visible(actor, point, camera)
+	local c=Combat.Service(); local me=c and c.Replicator and c.Replicator.LocalActor
+	local excluded={camera}
+	if me and me.Character then excluded[#excluded+1]=me.Character end
+	combatRayParams.FilterDescendantsInstances=excluded
+	local hit=workspace:Raycast(camera.CFrame.Position,point-camera.CFrame.Position,combatRayParams)
+	if not hit then return true end
+	if actor.Character and hit.Instance:IsDescendantOf(actor.Character) then return true end
+	local replicator=c and c.Replicator
+	local registry=replicator and replicator.Actors
+	if not registry or registry[actor.UID]~=actor then return false end
+	local uid=hit.Instance:GetAttribute("ActorUID")
+	if uid==actor.UID then return true end
+	if type(replicator.GetFromBodyPart)=="function" then
+		local ok,resolvedUID=pcall(replicator.GetFromBodyPart,replicator,hit.Instance)
+		if ok and resolvedUID==actor.UID then return true end
+	end
+	return false
+end
+
+function Combat.PickPart(actor, settings, camera, mouse)
+	local parts=actor.Parts or {}
+	local option=settings.HitPart
+	local function valid(part)
+		return typeof(part)=="Instance" and part:IsA("BasePart") and actor.Character
+			and part:IsDescendantOf(actor.Character)
+	end
+	if option=="HumanoidRootPart" then
+		return valid(actor.RootPart) and actor.RootPart or (actor.Character and actor.Character:FindFirstChild("HumanoidRootPart"))
+	end
+	if option=="Closest Part" or option=="Random" then
+		local best,distance,pool=nil,math.huge,{}
+		for _,part in ipairs((Combat.parts[actor] or {}).list or {}) do
+			if valid(part) then
+				if option=="Random" then pool[#pool+1]=part else
+					local sp,on=camera:WorldToViewportPoint(Combat.PartPosition(actor,part))
+					if on then local d=(Vector2.new(sp.X,sp.Y)-mouse).Magnitude; if d<distance then best,distance=part,d end end
+				end
+			end
+		end
+		if option=="Random" then return #pool>0 and pool[math.random(#pool)] or nil end
+		return best
+	end
+	local part=parts[option]
+	if valid(part) then return part end
+	if actor.Character then
+		part=actor.Character:FindFirstChild(option)
+		if valid(part) then return part end
+		part=actor.Character:FindFirstChild("Head")
+		if valid(part) then return part end
+	end
+	if valid(parts.Head) then return parts.Head end
+	if valid(actor.RootPart) then return actor.RootPart end
+end
+
+function Combat.Predict(actor, part, settings, camera)
+	return Combat.PartPosition(actor,part)
+end
+
+function Combat.FindTarget(settings, camera, mouse, sticky)
+	Combat.Sync()
+	camera=camera or workspace.CurrentCamera
+	mouse=mouse or AimUIS:GetMouseLocation()
+	local origin=Combat.Origin(camera)
+	local function candidate(a)
+		if not Combat.Allowed(a,settings) or (a.Position-origin).Magnitude>settings.MaxDistance then return nil end
+		local function check(part)
+			if not part or not part.Parent or not a.Character or not part:IsDescendantOf(a.Character) then return nil end
+			local point=Combat.PartPosition(a,part)
+			local sp,on=camera:WorldToViewportPoint(point)
+			if not on then return nil end
+			local d=(Vector2.new(sp.X,sp.Y)-mouse).Magnitude
+			if settings.FOVEnabled and d>settings.FOV then return nil end
+			if (settings.VisibleCheck or settings.Hitscan) and not Combat.Visible(a,point,camera) then return nil end
+			return {actor=a,part=part,position=point,distance=d}
+		end
+		local preferred=Combat.PickPart(a,settings,camera,mouse)
+		local selected=check(preferred)
+		if selected or not settings.Hitscan then return selected end
+		local best
+		for _,part in ipairs((Combat.parts[a] or {}).list or {}) do
+			if part~=preferred then
+				local hit=check(part)
+				if hit and (not best or hit.distance<best.distance) then best=hit end
+			end
+		end
+		return best
+	end
+	if settings.StickyAim and sticky then local current=candidate(sticky); if current then return current end end
+	local best
+	for _,a in ipairs(Combat.actors) do
+		local current=candidate(a)
+		if current and (not best or current.distance<best.distance) then best=current end
+	end
+	return best
+end
+
+function Combat.TriggerTarget(settings, camera, mouse)
+	if settings.Magnetic then
+		local selected=Combat.target
+		if Silent.Enabled and Combat.silentActive and selected and Combat.Allowed(selected.actor,settings)
+			and (selected.actor.Position-Combat.Origin(camera)).Magnitude<=settings.MaxDistance
+			and (not settings.VisibleCheck or Combat.Visible(selected.actor,selected.position,camera)) then return selected.actor end
+		return nil
+	end
+	Combat.Sync()
+	local ray=camera:ViewportPointToRay(mouse.X,mouse.Y)
+	local closest,nearest=nil,settings.MaxDistance
+	for _,a in ipairs(Combat.actors) do
+		if Combat.IsAlive(a) and a.RootPart and a.Character and a.Character.Parent then
+			for _,p in ipairs((Combat.parts[a] or {}).list or {}) do
+				if p.Parent then
+					local half=p.Size*.5
+					local lp=p.CFrame:PointToObjectSpace(ray.Origin)
+					local ld=p.CFrame:VectorToObjectSpace(ray.Direction)
+					local lo,hi=0,math.huge; local hit=true
+					for _,ax in ipairs({"X","Y","Z"}) do
+						if math.abs(ld[ax])<1e-6 then if math.abs(lp[ax])>half[ax] then hit=false; break end
+						else
+							local a2,b=(-half[ax]-lp[ax])/ld[ax],(half[ax]-lp[ax])/ld[ax]
+							if a2>b then a2,b=b,a2 end
+							lo=math.max(lo,a2); hi=math.min(hi,b); if hi<lo then hit=false; break end
+						end
+					end
+					if hit and lo<nearest then nearest=lo; closest=a end
+				end
+			end
+		end
+	end
+	if not closest or not Combat.Allowed(closest,settings) then return nil end
+	if settings.VisibleCheck and not Combat.Visible(closest,ray.Origin+ray.Direction*nearest,camera) then return nil end
+	return closest
+end
+
+function Combat.KeyActive(picker, state)
+	if not picker then return false end
+	if picker.Mode=="Always" then return true end
+	local key=picker.Key
+	if type(key)=="string" then
+		local mouseKeys={MB1=Enum.UserInputType.MouseButton1,MB2=Enum.UserInputType.MouseButton2,MB3=Enum.UserInputType.MouseButton3}
+		key=mouseKeys[key] or key
+		if type(key)=="string" and key~="NONE" then
+			local name=key:match("([^%.]+)$")
+			local ok,value=pcall(function() return Enum.KeyCode[name] end)
+			if ok then key=value end
+		end
+	end
+	local down=false
+	if typeof(key)=="EnumItem" then
+		if key.EnumType==Enum.UserInputType then down=AimUIS:IsMouseButtonPressed(key)
+		elseif key.EnumType==Enum.KeyCode then down=AimUIS:IsKeyDown(key) end
+	end
+	if picker.Mode=="Toggle" then return picker.Active==true end
+	if state then state.down=down end; return down
+end
+
+function Combat.TriggerStep(actor, now, fire)
+	if actor~=Combat.triggerActor then Combat.triggerActor=actor; Combat.targetSince=now end
+	if not actor then return false end
+	if (now-Combat.targetSince)*1000<TriggerBotSettings.ReactionTime or (now-Combat.lastShot)*1000<TriggerBotSettings.ShootTime then return false end
+	fire(); Combat.lastShot=now; return true
+end
+
+function Combat.Fire()
+	if mouse1click then mouse1click()
+	elseif mouse1press and mouse1release then
+		Combat.mouseHeld=true; mouse1press()
+		task.delay(.02,function() if Combat.mouseHeld then Combat.mouseHeld=false; mouse1release() end end)
+	end
+end
+
+local keyStates={silent={},trigger={}}
+
+function Combat.Frame()
+	if not Combat.active then return end
+	AimCamera=workspace.CurrentCamera; if not AimCamera then return end
+	if Silent.Enabled and not Combat.installed and (not Combat.retryAt or os.clock()>=Combat.retryAt) then
+		Combat.retryAt=os.clock()+2; Combat.Install()
+	end
+	local menuOpen=false; local blocked=menuOpen or AimUIS:GetFocusedTextBox()~=nil
+	Combat.silentActive=Combat.KeyActive(SilentKeyPicker,keyStates.silent)
+	local triggerActive=Combat.KeyActive(TriggerKeyPicker,keyStates.trigger)
+	if not blocked and Silent.Enabled and Combat.silentActive then
+		Combat.target=Combat.FindTarget(Silent,nil,nil,Combat.sticky)
+		Combat.sticky=Combat.target and Combat.target.actor
+	else Combat.target=nil; Combat.sticky=nil end
+	if not blocked and TriggerBotSettings.Enabled and triggerActive then
+		local actor=Combat.TriggerTarget(TriggerBotSettings,AimCamera,AimUIS:GetMouseLocation())
+		Combat.TriggerStep(actor,os.clock(),Combat.Fire)
+	else Combat.triggerActor=nil; Combat.targetSince=0 end
+end
+
+function Combat.Destroy()
+	Combat.active=false; Silent.Enabled=false; TriggerBotSettings.Enabled=false; Combat.target=nil
+	if Combat.Unhook then Combat.Unhook() end
+	for _,c in ipairs(Combat.connections) do c:Disconnect() end
+	for _,d in ipairs(Combat.drawings) do pcall(function() d:Remove() end) end
+	if Combat.gradientGui then Combat.gradientGui:Destroy(); Combat.gradientGui=nil end
+	if Combat.mouseHeld then Combat.mouseHeld=false; if mouse1release then mouse1release() end end
+end
+
+getgenv().LeanCombat=Combat
+
+-- ── Muzzle redirect / prediction ──
+function Combat.RedirectMuzzle(cf,target)
+	if typeof(cf)~="CFrame" or not target or typeof(target.position)~="Vector3" then return cf end
+	if (target.position-cf.Position).Magnitude<.001 then return cf end
+	return CFrame.lookAt(cf.Position,target.position)
+end
+
+function Combat.Intercept(origin,point,velocity,speed,compensateDrop)
+	if type(speed)~="number" or speed<=0 then return point,0 end
+	local relative=point-origin
+	local a=velocity:Dot(velocity)-speed*speed
+	local b=2*relative:Dot(velocity); local c=relative:Dot(relative)
+	local time=relative.Magnitude/speed
+	local discriminant=b*b-4*a*c
+	if math.abs(a)<1e-6 then if math.abs(b)>1e-6 and -c/b>0 then time=-c/b end
+	elseif discriminant>=0 then
+		local root=math.sqrt(discriminant)
+		local t1,t2=(-b-root)/(2*a),(-b+root)/(2*a)
+		if t1>0 and t2>0 then time=math.min(t1,t2)
+		elseif t1>0 then time=t1 elseif t2>0 then time=t2 end
+	end
+	time=math.clamp(time,0,5)
+	local aim=point
+	for _=1,6 do
+		aim=point+velocity*time+Vector3.new(0,compensateDrop and 16.1*time*time or 0,0)
+		time=math.clamp((aim-origin).Magnitude/speed,0,5)
+	end
+	return aim,time
+end
+
+function Combat.ShotFrame(weapon,cf,target)
+	if typeof(cf)~="CFrame" or not target then return cf end
+	local tune=weapon._firearm and weapon._firearm.Tune
+	local bulletService=Combat.bulletService
+	if (not Silent.AutoPrediction and not Silent.BulletDropCompensation) or not tune or not bulletService then
+		return Combat.RedirectMuzzle(cf,target)
+	end
+	local ok,speed=pcall(bulletService.GetInfo,bulletService,tune.Caliber,tune.Barrel)
+	if not ok or type(speed)~="number" or speed<=0 then return Combat.RedirectMuzzle(cf,target) end
+	local sample=Combat.samples[target.actor]
+	local velocity=Silent.AutoPrediction and sample and os.clock()-sample.time<.35 and sample.velocity or Vector3.zero
+	local point=Combat.PartPosition(target.actor,target.part)
+	local aim=Combat.Intercept(cf.Position,point,velocity,speed,Silent.BulletDropCompensation)
+	local frame=Combat.RedirectMuzzle(cf,{position=aim})
+	local actor=weapon._actor
+	local zero=actor and actor.ADS and actor.ViewModel and actor.ViewModel.Zero
+	if type(zero)=="table" then zero=zero[4] end
+	if Silent.BulletDropCompensation and type(zero)=="number" then
+		local angle=math.asin(math.clamp(zero*32.2/(speed*speed),-1,1))*.5
+		frame=frame*CFrame.Angles(-angle,0,0)
+	end
+	return frame
+end
+
+function Combat.Install()
+	if Combat.installed then return true end
+	local class
+	for _,module in ipairs(getloadedmodules()) do
+		if module.Name=="FirearmInventory" then
+			local ok,result=pcall(require,module)
+			if ok and type(result)=="table" then class=result end
+		elseif module.Name=="BulletService" then
+			local ok,result=pcall(require,module)
+			if ok and type(result)=="table" and type(result.GetInfo)=="function" then Combat.bulletService=result end
+		end
+	end
+	if not class or type(class.Discharge)~="function" or type(class.GetMuzzleCFrame)~="function" then
+		Combat.hookState="FirearmInventory not loaded yet"; return false
+	end
+	local originalDischarge,originalMuzzle=class.Discharge,class.GetMuzzleCFrame
+	local rawDischarge,rawMuzzle=rawget(class,"Discharge"),rawget(class,"GetMuzzleCFrame")
+	local contexts=setmetatable({},{__mode="k"})
+	local function discharge(weapon,...)
+		local thread=coroutine.running(); local oldContext=contexts[thread]
+		local c=Combat.Service(); local me=c and c.Replicator and c.Replicator.LocalActor
+		local selected
+		if Combat.active and Silent.Enabled and Combat.silentActive and weapon._actor==me
+			and not AimUIS:GetFocusedTextBox()
+			and math.random(1,100)<=Silent.HitChance then
+			selected=Combat.FindTarget(Silent,nil,nil,Combat.sticky)
+		end
+		contexts[thread]=selected and {weapon=weapon,target=selected} or nil
+		local result=table.pack(pcall(originalDischarge,weapon,...))
+		contexts[thread]=oldContext
+		if not result[1] then error(result[2],0) end
+		return table.unpack(result,2,result.n)
+	end
+	local function muzzle(weapon,...)
+		local result=table.pack(originalMuzzle(weapon,...))
+		local ctx=contexts[coroutine.running()]
+		if Combat.active and Silent.Enabled and ctx and ctx.weapon==weapon and Combat.Allowed(ctx.target.actor,Silent) then
+			result[1]=Combat.ShotFrame(weapon,result[1],ctx.target)
+		end
+		return table.unpack(result,1,result.n)
+	end
+	class.Discharge=discharge; class.GetMuzzleCFrame=muzzle
+	Combat.installed=true; Combat.hookState="Local firearm adapter ready"
+	Combat.hookClass=class; Combat.hookDischarge=discharge; Combat.hookMuzzle=muzzle
+	Combat.Unhook=function()
+		if class.Discharge==discharge then class.Discharge=rawDischarge end
+		if class.GetMuzzleCFrame==muzzle then class.GetMuzzleCFrame=rawMuzzle end
+		Combat.installed=false
+	end
+	return true
+end
+
+-- ── FOV Circle ──
+local LeanFOVCircle, LeanFOVFill
+if Drawing then
+	LeanFOVFill=Drawing.new("Circle"); table.insert(Combat.drawings,LeanFOVFill)
+	LeanFOVFill.NumSides=64; LeanFOVFill.Filled=true
+	LeanFOVFill.Color=Silent.FOVFillColor; LeanFOVFill.Transparency=Silent.FOVFillTransparency
+	LeanFOVFill.Visible=false
+	LeanFOVCircle=Drawing.new("Circle"); table.insert(Combat.drawings,LeanFOVCircle)
+	LeanFOVCircle.Thickness=1; LeanFOVCircle.NumSides=64
+	LeanFOVCircle.Color=Silent.FOVColor; LeanFOVCircle.Filled=false
+	LeanFOVCircle.Transparency=1; LeanFOVCircle.Visible=false
+end
+
+table.insert(Combat.connections, AimRunService.RenderStepped:Connect(function()
+	local show=Silent.Enabled and Silent.FOVEnabled and Silent.ShowFOV
+	local mouse=AimUIS:GetMouseLocation()
+	if LeanFOVFill then
+		LeanFOVFill.Visible=show and Silent.FillFOV
+		LeanFOVFill.Position=mouse; LeanFOVFill.Radius=Silent.FOV
+		LeanFOVFill.Color=Silent.FOVFillColor; LeanFOVFill.Transparency=Silent.FOVFillTransparency
+	end
+	if LeanFOVCircle then
+		LeanFOVCircle.Visible=show
+		LeanFOVCircle.Position=mouse; LeanFOVCircle.Radius=Silent.FOV
+		LeanFOVCircle.Color=Silent.FOVColor
+	end
+end))
+
+-- ── Gun System (từ Lean) ──
+local Gun = {
+	NoRecoil=false, InstantADS=false, NoSway=false, NoSpread=false, SpreadReduction=100,
+	UnlockModes=false, AutoReload=false, ForceHeadshot=false, active=true,
+	originals={}, hooks={}, nextResolve=0,
+	Visuals=false, Transparency=0, Material="Original", visualParts={}, nextVisualScan=0, nextReload=0,
+	WeaponColor=Color3.fromRGB(150,80,255),
+	Tracers=false, TracerStyle="Lightning", TracerColor=Color3.fromRGB(150,80,255),
+	TracerDuration=.6, TracerWidth=.08,
+	RPM=false, RPMValue=900, NoCameraShake=false, InstantBullet=false, BulletMultiplier=1,
+}
+Combat.Gun=Gun
+
+function Gun.RestoreTunes()
+	for tune,fields in pairs(Gun.originals) do
+		for key,saved in pairs(fields) do
+			if tune[key]==saved.applied then tune[key]=saved.value end
+		end
+	end
+	Gun.originals={}
+end
+
+function Gun.ApplyField(tune,key,enabled,transform)
+	local fields=Gun.originals[tune]
+	local saved=fields and fields[key]
+	if not enabled then
+		if saved then
+			if tune[key]==saved.applied then tune[key]=saved.value end
+			fields[key]=nil
+		end
+		return
+	end
+	if not fields then fields={}; Gun.originals[tune]=fields end
+	if not saved then saved={value=tune[key]}; fields[key]=saved
+	elseif tune[key]~=saved.applied then saved.value=tune[key] end
+	saved.applied=transform(saved.value); tune[key]=saved.applied
+end
+
+function Gun.ApplyWeapon(weapon)
+	local tune=weapon and weapon._firearm and weapon._firearm.Tune
+	if type(tune)~="table" then return end
+	Gun.ApplyField(tune,"Barrel_Spread",Gun.NoSpread,function(base) return (base or 1)*(1-Gun.SpreadReduction/100) end)
+	Gun.ApplyField(tune,"RPM",Gun.RPM==true,function() return math.clamp(Gun.RPMValue or 900,60,3000) end)
+	if type(tune.Firemodes)=="table" then
+		Gun.ApplyField(tune,"Firemodes",Gun.UnlockModes,function(base)
+			local modes=table.clone(base)
+			for _,mode in ipairs({1,2,3,0}) do if not table.find(modes,mode) then modes[#modes+1]=mode end end
+			return modes
+		end)
+	end
+end
+
+function Gun.ReloadReady(weapon)
+	if not weapon or not weapon.Equipped or weapon._reloading or not weapon._firearm then return false end
+	local meta=weapon._item and weapon._item.MetaData; if not meta then return false end
+	local ammo=weapon._mag and weapon._mag.Capacity or 0
+	return ammo<=0 and (weapon._firearm.Tune.NoChamber or not meta.Chamber)
+end
+
+function Gun.RequestReload(weapon)
+	if not Gun.ReloadReady(weapon) then return "Not ready" end
+	local mags=weapon:_getMags()
+	if type(mags)~="table" or not mags[1] then return "No compatible reserve ammunition" end
+	local reload=Gun.firearmClass and Gun.firearmClass._reload
+	if type(reload)~="function" then return "Reload adapter unavailable" end
+	weapon._cancelReload=false; reload(weapon,true)
+	return weapon._reloading and "Reloading" or "Waiting for game"
+end
+
+function Gun.UpdateTune()
+	local weapons=Combat.Weapons(); local live={}
+	for _,weapon in ipairs(weapons) do
+		live[weapon._firearm.Tune]=true; Gun.ApplyWeapon(weapon)
+	end
+	for tune,fields in pairs(Gun.originals) do
+		if not live[tune] then
+			for key,saved in pairs(fields) do if tune[key]==saved.applied then tune[key]=saved.value end end
+			Gun.originals[tune]=nil
+		end
+	end
+	local weapon=Combat.Weapon()
+	if Gun.AutoReload and Gun.ReloadReady(weapon) and os.clock()>=Gun.nextReload and not Gun.reloadPending
+		and Gun.firearmClass and type(Gun.firearmClass._reload)=="function" then
+		Gun.nextReload=os.clock()+.6; Gun.reloadPending=true
+		task.defer(function()
+			local ok,err=pcall(function()
+				if not Gun.active or not Gun.AutoReload or Combat.Weapon()~=weapon or not Gun.ReloadReady(weapon) then return end
+				Gun.reloadStatus=Gun.RequestReload(weapon)
+			end)
+			Gun.reloadError=not ok and tostring(err) or nil; Gun.reloadPending=false
+		end)
+	end
+end
+
+function Gun.RestoreVisuals()
+	for part,saved in pairs(Gun.visualParts) do
+		if part.Parent then
+			for key,value in pairs(saved.original) do
+				if part[key]==saved.applied[key] then part[key]=value end
+			end
+		end
+	end
+	Gun.visualParts={}; Gun.visualModel=nil; Gun.nextVisualScan=0
+end
+
+function Gun.UpdateVisuals()
+	if not Gun.Visuals then
+		if Gun.visualModel or next(Gun.visualParts)~=nil then Gun.RestoreVisuals() end; return
+	end
+	local c=Combat.Service(); local actor=c and c.Replicator and c.Replicator.LocalActor
+	local weapon=Combat.Weapon()
+	local model=weapon and weapon._firearm and actor and actor.ViewModel and actor.ViewModel.CurrentModel
+	if model~=Gun.visualModel then Gun.RestoreVisuals() end
+	if not model or not model.Parent then return end
+	Gun.visualModel=model
+	if os.clock()>=Gun.nextVisualScan then
+		Gun.nextVisualScan=os.clock()+.2
+		for _,part in ipairs(model:GetDescendants()) do
+			if part:IsA("BasePart") and part.Transparency<1 and not Gun.visualParts[part] then
+				Gun.visualParts[part]={
+					original={Material=part.Material,MaterialVariant=part.MaterialVariant,Transparency=part.Transparency,Color=part.Color},
+					applied={}
+				}
+			end
+		end
+	end
+	for part,saved in pairs(Gun.visualParts) do
+		if not part:IsDescendantOf(model) then
+			if part.Parent then for key,value in pairs(saved.original) do if part[key]==saved.applied[key] then part[key]=value end end end
+			Gun.visualParts[part]=nil
+		else
+			local material=Gun.Material=="Original" and saved.original.Material or Enum.Material[Gun.Material]
+			local values={
+				Material=material,
+				MaterialVariant=Gun.Material=="Original" and saved.original.MaterialVariant or "",
+				Transparency=Gun.Transparency/100,
+				Color=Gun.Material~="Original" and Gun.WeaponColor or saved.original.Color
+			}
+			for key,value in pairs(values) do
+				saved.applied[key]=value
+				if part[key]~=value then part[key]=value end
+			end
+		end
+	end
+end
+
+function Gun.ClearTracers()
+	if Gun.tracerFolder then Gun.tracerFolder:Destroy(); Gun.tracerFolder=nil end
+end
+
+function Gun.TracerPoints(from,to,style,random)
+	local length=(to-from).Magnitude; if length<.01 then return {} end
+	local cf=CFrame.lookAt(from,to)
+	local turns=math.clamp(length/18,2,5)
+	local count=style=="Line" and 1 or (style=="DNA" and math.ceil(turns*12) or math.clamp(math.ceil(length/3),12,48))
+	local strands=style=="DNA" and 2 or 1; local paths={}
+	for strand=1,strands do
+		local points={}
+		for i=0,count do
+			local t=i/count; local offset=Vector3.zero
+			if i>0 and i<count then
+				if style=="Lightning" then
+					local radius=math.min(length*.025,.65)
+					offset=cf.RightVector*random:NextNumber(-radius,radius)+cf.UpVector*random:NextNumber(-radius,radius)
+				elseif style=="DNA" then
+					local angle=t*math.pi*2*turns+(strand-1)*math.pi*2/strands
+					local envelope=math.sin(math.min(1,math.min(t,1-t)*8)*math.pi*.5)
+					local radius=math.min(length*.03,.45)*envelope
+					offset=(cf.RightVector*math.cos(angle)+cf.UpVector*math.sin(angle))*radius
+				end
+			end
+			points[#points+1]=from:Lerp(to,t)+offset
+		end
+		paths[#paths+1]=points
+	end
+	return paths
+end
+
+function Gun.DrawTracer(from,to)
+	if not Gun.active or not Gun.Tracers or typeof(from)~="Vector3" or typeof(to)~="Vector3" then return end
+	local paths=Gun.TracerPoints(from,to,Gun.TracerStyle,Random.new())
+	if #paths==0 or not workspace.CurrentCamera then return end
+	if not Gun.tracerFolder then
+		Gun.tracerFolder=Instance.new("Folder"); Gun.tracerFolder.Name="LeanGunTracers"
+	end
+	Gun.tracerFolder.Parent=workspace.CurrentCamera
+	local existing=Gun.tracerFolder:GetChildren()
+	if #existing>=24 then existing[1]:Destroy() end
+	local anchor=Instance.new("Part")
+	anchor.Name="Tracer"; anchor.Anchored=true; anchor.Transparency=1; anchor.Size=Vector3.one*.01
+	anchor.CanCollide=false; anchor.CanQuery=false; anchor.CanTouch=false; anchor.CastShadow=false
+	anchor.CFrame=CFrame.new(from); anchor.Parent=Gun.tracerFolder
+	local function connect(a,b,width)
+		local beam=Instance.new("Beam")
+		beam.Attachment0=a; beam.Attachment1=b; beam.FaceCamera=true
+		beam.Width0=width; beam.Width1=width; beam.Segments=1
+		beam.Color=ColorSequence.new(Gun.TracerColor); beam.LightEmission=1; beam.LightInfluence=0
+		beam.Transparency=NumberSequence.new(0); beam.Parent=anchor
+		game:GetService("TweenService"):Create(beam,TweenInfo.new(Gun.TracerDuration),{Width0=0,Width1=0}):Play()
+	end
+	local attachments={}
+	for index,points in ipairs(paths) do
+		local list={}; attachments[index]=list
+		for i,point in ipairs(points) do
+			local a=Instance.new("Attachment"); a.Position=point-from; a.Parent=anchor; list[i]=a
+			if i>1 then connect(list[i-1],a,Gun.TracerWidth) end
+		end
+	end
+	if Gun.TracerStyle=="DNA" and #attachments==2 then
+		for i=4,#attachments[1]-3,3 do connect(attachments[1][i],attachments[2][i],Gun.TracerWidth*.35) end
+	end
+	game:GetService("Debris"):AddItem(anchor,Gun.TracerDuration)
+end
+
+function Gun.Hook(class,key,make)
+	local original=class[key]; if type(original)~="function" then return false end
+	local raw=rawget(class,key); local wrapper=make(original)
+	class[key]=wrapper; Gun.hooks[#Gun.hooks+1]={class=class,key=key,raw=raw,wrapper=wrapper}; return true
+end
+
+function Gun.Resolve()
+	if os.clock()<Gun.nextResolve then return end; Gun.nextResolve=os.clock()+2
+	local service=Combat.Service(); local replicator=service and service.Replicator
+	-- Tracer hook via _bulletEffects
+	if replicator and replicator~=Gun.effectsReplicator and type(replicator._bulletEffects)=="function" then
+		if Gun.Hook(replicator,"_bulletEffects",function(original)
+			return function(self,from,to,part,normal,material,caliber,isLocal,...)
+				local result=table.pack(original(self,from,to,part,normal,material,caliber,isLocal,...))
+				if isLocal then pcall(Gun.DrawTracer,from,to) end
+				return table.unpack(result,1,result.n)
+			end
+		end) then Gun.effectsReplicator=replicator end
+	end
+	-- Force Headshot hook
+	if replicator and replicator~=Gun.impactReplicator and type(replicator._bulletProcess)=="function" then
+		if Gun.Hook(replicator,"_bulletProcess",function(original)
+			return function(self,uid,replicate,position,part,normal,material,elapsed,...)
+				if Gun.active and Gun.ForceHeadshot and replicate and part then
+					local actorUID,actor=self:GetFromBodyPart(part)
+					local kind=actor and Combat.Kind(actor)
+					local head=actor and actor.Parts and actor.Parts.Head
+					local friendly=kind=="Players" and actor.Owner and actor.Owner.Team~=nil
+						and actor.Owner.Team==AimLocalPlayer.Team
+					if actorUID and kind and not friendly and head and head.Parent
+						and head:IsDescendantOf(actor.Character) then part=head end
+				end
+				return original(self,uid,replicate,position,part,normal,material,elapsed,...)
+			end
+		end) then Gun.impactReplicator=replicator end
+	end
+	-- Recoil hooks
+	if Gun.recoiler and Gun.viewmodel then return end
+	for _,m in ipairs(getloadedmodules()) do
+		if m.Name=="Recoiler" and not Gun.recoiler then
+			local ok,class=pcall(require,m)
+			if ok and type(class)=="table" then
+				Gun.Hook(class,"GetViewmodelAdjustment",function(original)
+					return function(self,...) if Gun.active and Gun.NoRecoil then return CFrame.identity end; return original(self,...) end
+				end)
+				Gun.Hook(class,"GetCameraAdjustment",function(original)
+					return function(self,...) if Gun.active and Gun.NoRecoil then return CFrame.identity,0 end; return original(self,...) end
+				end)
+				Gun.recoiler=true
+			end
+		elseif m.Name=="ViewmodelClass" and not Gun.viewmodel then
+			local ok,class=pcall(require,m)
+			if ok and type(class)=="table" then
+				Gun.viewmodel=Gun.Hook(class,"Update",function(original)
+					return function(vm,...)
+						local c=Combat.Service(); local localActor=c and c.Replicator and c.Replicator.LocalActor
+						if not Gun.active or vm.Actor~=localActor then return original(vm,...) end
+						if Gun.InstantADS then vm.ADSLerp=(localActor.ADS and not vm.Reloading and not localActor.Sliding) and 1 or 0 end
+						local sway,kick=vm._swaySpring,vm.Kick
+						if Gun.NoSway and sway then vm._swaySpring={Position={ToCFrame=function() return CFrame.identity end}} end
+						if Gun.NoRecoil and kick then vm.Kick={Position=Vector3.zero} end
+						local result=table.pack(pcall(original,vm,...))
+						vm._swaySpring=sway; vm.Kick=kick
+						if not result[1] then error(result[2],0) end
+						return table.unpack(result,2,result.n)
+					end
+				end)
+			end
+		elseif m.Name=="FirearmInventory" and not Gun.firearmClass then
+			local ok,class=pcall(require,m)
+			if ok and type(class)=="table" then Gun.firearmClass=class end
+		end
+	end
+end
+
+function Gun.Destroy()
+	Gun.active=false; Gun.RestoreTunes(); Gun.RestoreVisuals(); Gun.ClearTracers()
+	for _,h in ipairs(Gun.hooks) do if h.class[h.key]==h.wrapper then h.class[h.key]=h.raw end end
+	Gun.hooks={}
+end
+
+-- Wire Gun into Combat lifecycle
+local _destroyCombat=Combat.Destroy
+Combat.Destroy=function() Gun.Destroy(); _destroyCombat() end
+
+table.insert(Combat.connections, AimRunService.RenderStepped:Connect(function()
+	if Gun.active then Gun.Resolve(); Gun.UpdateTune(); Gun.UpdateVisuals() end
+end))
+table.insert(Combat.connections, AimRunService.RenderStepped:Connect(Combat.Frame))
+Combat.Install()
+print("[LeanCombat] Ready —", Combat.hookState)
+
 -- Singleton cleanup
 local scriptId = tick()
 getgenv().Moon_ScriptId = scriptId
@@ -1808,41 +2653,173 @@ _ConfigManager.EnableNotify=true
 
 -- Combat Tab
 local CombatTab=Window:DrawTab({ Name="Combat", Icon="swords", Type="Double" })
-local S_Rage=CombatTab:DrawSection({ Name="Ragebot", Position="right" })
-S_Rage:AddToggle({ Name="Enabled", Flag="Rage_Enabled", Default=false, Callback=function(v) Config.RageMode=v end })
-S_Rage:AddToggle({ Name="Look At Target", Flag="Rage_LookAt", Default=false, Callback=function(v) Config.Rage_LookAt=v end })
-S_Rage:AddSlider({ Name="Rage Range", Flag="Rage_Range", Min=50, Max=10000, Default=500, Callback=function(v) Config.Rage_Range=v end })
-S_Rage:AddDropdown({ Name="Target Part", Flag="Rage_TargetPart", Default="Head", Values={"Head","UpperTorso"}, Callback=function(v) Config.Rage_TargetPart=v end })
-S_Rage:AddToggle({ Name="Auto Fire", Flag="Rage_AutoFire", Default=false, Callback=function(v) Config.Rage_AutoFire=v end })
-S_Rage:AddToggle({ Name="Ammo Saver (Efficiency)", Flag="Rage_AmmoSaver", Default=false, Callback=function(v) Config.Rage_AmmoSaver=v end })
-S_Rage:AddSlider({ Name="Extra Shots (Safety)", Flag="Rage_ExtraShots", Min=0, Max=5, Default=0, Callback=function(v) Config.Rage_ExtraShots=v end })
+-- ══ COMBAT TAB — Lean Combat Engine ══
+local S_Silent = CombatTab:DrawSection({ Name="Silent Aim", Position="left" })
 
-local S_GunMods=CombatTab:DrawSection({ Name="Gun Mods", Position="right" })
-local S_SilentAim=CombatTab:DrawSection({ Name="Silent Aim", Position="left" })
-S_SilentAim:AddToggle({ Name="Enabled", Flag="Combat_SilentAim", Default=false, Callback=function(v) Config.SilentAim=v end })
-S_SilentAim:AddToggle({ Name="Show FOV", Flag="Combat_ShowFOV", Default=false, Callback=function(v) Config.ShowFOV=v end })
-S_SilentAim:AddToggle({ Name="Show Weapon Info", Flag="Combat_ShowWeaponInfo", Default=true, Callback=function(v) Config.ShowWeaponInfo=v end })
-S_SilentAim:AddSlider({ Name="FOV Radius", Min=10, Max=500, Default=100, Flag="Combat_SilentAimFOV", Callback=function(v) Config.SilentAimFOV=v end })
-S_SilentAim:AddSlider({ Name="Hit Chance", Min=0, Max=100, Default=100, Flag="Combat_SilentAimChance", Callback=function(v) Config.SilentAimHitChance=v end })
-S_SilentAim:AddDropdown({ Name="Target Part", Default="Head", Flag="Combat_SilentAimPart",
-	Values={"Head","UpperTorso","LowerTorso","LeftUpperArm","LeftLowerArm","LeftHand","RightUpperArm","RightLowerArm","RightHand","LeftUpperLeg","LeftLowerLeg","LeftFoot","RightUpperLeg","RightLowerLeg","RightFoot"},
-	Callback=function(v) Config.SilentAimTargetPart=v end })
-S_SilentAim:AddToggle({ Name="Prediction", Flag="Combat_Prediction", Default=false, Callback=function(v) Config.Prediction=v end })
-S_SilentAim:AddToggle({ Name="Bullet Drop", Flag="ESP_BulletDrop", Default=false, Callback=function(v) Config.BulletDrop=v end })
+S_Silent:AddToggle({ Name="Enabled", Flag="lean_silent_enabled", Default=false,
+	Callback=function(v) Silent.Enabled=v; if v then Combat.Install() end end })
 
-S_GunMods:AddToggle({
-	Name = "Auto Reload",
-	Flag = "Combat_AutoReload",
-	Default = false,
-	Callback = function(v)
-		Config.AutoReload = v
-	end
-})
-S_GunMods:AddToggle({ Name="No Recoil", Flag="Combat_NoRecoil", Default=false, Callback=function(v) Config.NoRecoil=v end })
-S_GunMods:AddToggle({ Name="No Spread", Flag="Combat_NoSpread", Default=false, Callback=function(v) Config.NoSpread=v end })
-S_GunMods:AddToggle({ Name="Unlock Firemodes", Flag="Combat_Firemodes", Default=false, Callback=function(v) Config.UnlockFiremodes=v end })
-S_GunMods:AddToggle({ Name="Custom RPM", Flag="Combat_CustomRPM", Default=false, Callback=function(v) Config.CustomRPM=v end })
-S_GunMods:AddSlider({ Name="RPM Value", Min=100, Max=10000, Default=800, Flag="Combat_RPMValue", Callback=function(v) Config.RPMValue=v end })
+SilentKeyPicker = S_Silent:AddKeybind({ Name="Silent Aim Key", Flag="lean_silent_key",
+	Default="MB2", Mode="Hold", Callback=function() end })
+
+S_Silent:AddSlider({ Name="FOV Radius", Flag="lean_silent_fov", Min=10, Max=500, Default=120, Suffix=" px",
+	Callback=function(v) Silent.FOV=v end })
+
+S_Silent:AddSlider({ Name="Hit Chance", Flag="lean_silent_hitchance", Min=0, Max=100, Default=100, Suffix="%",
+	Callback=function(v) Silent.HitChance=v end })
+
+S_Silent:AddDropdown({ Name="Hit Part", Flag="lean_silent_hitpart", Default="Head",
+	Values={"Head","HumanoidRootPart","UpperTorso","LowerTorso","LeftUpperArm","RightUpperArm",
+		"LeftUpperLeg","RightUpperLeg","Closest Part","Random"},
+	Callback=function(v) Silent.HitPart=v end })
+
+S_Silent:AddSlider({ Name="Max Distance", Flag="lean_silent_distance", Min=50, Max=5000, Default=1000, Suffix=" studs",
+	Callback=function(v) Silent.MaxDistance=v end })
+
+S_Silent:AddToggle({ Name="Sticky Aim", Flag="lean_silent_sticky", Default=false,
+	Callback=function(v) Silent.StickyAim=v end })
+
+S_Silent:AddToggle({ Name="Auto Prediction", Flag="lean_silent_autopred", Default=true,
+	Callback=function(v) Silent.AutoPrediction=v end })
+
+S_Silent:AddToggle({ Name="Bullet Drop Comp", Flag="lean_silent_dropc", Default=true,
+	Callback=function(v) Silent.BulletDropCompensation=v end })
+
+S_Silent:AddToggle({ Name="Hitscan", Flag="lean_silent_hitscan", Default=false,
+	Callback=function(v) Silent.Hitscan=v; Combat.sticky=nil end })
+
+S_Silent:AddToggle({ Name="Team Check", Flag="lean_silent_teamcheck", Default=false,
+	Callback=function(v) Silent.TeamCheck=v end })
+
+S_Silent:AddToggle({ Name="Visible Check", Flag="lean_silent_vischeck", Default=true,
+	Callback=function(v) Silent.VisibleCheck=v end })
+
+-- FOV visuals
+local S_FOV = CombatTab:DrawSection({ Name="FOV Circle", Position="left" })
+
+S_FOV:AddToggle({ Name="Show FOV", Flag="lean_fov_show", Default=true,
+	Callback=function(v) Silent.ShowFOV=v end })
+
+S_FOV:AddToggle({ Name="Fill FOV", Flag="lean_fov_fill", Default=false,
+	Callback=function(v) Silent.FillFOV=v end })
+
+S_FOV:AddColorPicker({ Name="FOV Color", Flag="lean_fov_color", Default=Silent.FOVColor,
+	Callback=function(v) Silent.FOVColor=v end })
+
+S_FOV:AddColorPicker({ Name="Fill Color", Flag="lean_fov_fill_color", Default=Silent.FOVFillColor,
+	Callback=function(v) Silent.FOVFillColor=v end })
+
+-- TriggerBot
+local S_Trigger = CombatTab:DrawSection({ Name="Trigger Bot", Position="right" })
+
+S_Trigger:AddToggle({ Name="Enabled", Flag="lean_trigger_enabled", Default=false,
+	Callback=function(v) TriggerBotSettings.Enabled=v end })
+
+TriggerKeyPicker = S_Trigger:AddKeybind({ Name="Trigger Key", Flag="lean_trigger_key",
+	Default="MB2", Mode="Hold", Callback=function() end })
+
+S_Trigger:AddToggle({ Name="Magnetic (use SA target)", Flag="lean_trigger_magnetic", Default=false,
+	Callback=function(v) TriggerBotSettings.Magnetic=v end })
+
+S_Trigger:AddToggle({ Name="Visible Check", Flag="lean_trigger_vischeck", Default=true,
+	Callback=function(v) TriggerBotSettings.VisibleCheck=v end })
+
+S_Trigger:AddToggle({ Name="Team Check", Flag="lean_trigger_teamcheck", Default=false,
+	Callback=function(v) TriggerBotSettings.TeamCheck=v end })
+
+S_Trigger:AddSlider({ Name="Reaction Time", Flag="lean_trigger_reaction", Min=0, Max=500, Default=50, Suffix=" ms",
+	Callback=function(v) TriggerBotSettings.ReactionTime=v end })
+
+S_Trigger:AddSlider({ Name="Shoot Interval", Flag="lean_trigger_shoot", Min=0, Max=1000, Default=100, Suffix=" ms",
+	Callback=function(v) TriggerBotSettings.ShootTime=v end })
+
+S_Trigger:AddSlider({ Name="Max Distance", Flag="lean_trigger_distance", Min=50, Max=5000, Default=1000, Suffix=" studs",
+	Callback=function(v) TriggerBotSettings.MaxDistance=v end })
+
+-- Gun Mods (wire vào Lean Gun system)
+local S_GunMods = CombatTab:DrawSection({ Name="Gun Mods", Position="right" })
+
+S_GunMods:AddToggle({ Name="No Recoil", Flag="lean_gun_norecoil", Default=false,
+	Callback=function(v) Gun.NoRecoil=v end })
+
+S_GunMods:AddToggle({ Name="No Sway", Flag="lean_gun_nosway", Default=false,
+	Callback=function(v) Gun.NoSway=v end })
+
+S_GunMods:AddToggle({ Name="No Spread", Flag="lean_gun_nospread", Default=false,
+	Callback=function(v) Gun.NoSpread=v; Gun.UpdateTune() end })
+
+S_GunMods:AddSlider({ Name="Spread Reduction", Flag="lean_gun_spreadreduct", Min=0, Max=100, Default=100, Suffix="%",
+	Callback=function(v) Gun.SpreadReduction=v; Gun.UpdateTune() end })
+
+S_GunMods:AddToggle({ Name="Unlock Firemodes", Flag="lean_gun_firemodes", Default=false,
+	Callback=function(v) Gun.UnlockModes=v; Gun.UpdateTune() end })
+
+S_GunMods:AddToggle({ Name="Auto Reload", Flag="lean_gun_autoreload", Default=false,
+	Callback=function(v) Gun.AutoReload=v end })
+
+S_GunMods:AddToggle({ Name="Force Headshot", Flag="lean_gun_forcehs", Default=false,
+	Callback=function(v) Gun.ForceHeadshot=v end })
+
+S_GunMods:AddToggle({ Name="Instant ADS", Flag="lean_gun_instantads", Default=false,
+	Callback=function(v) Gun.InstantADS=v end })
+
+S_GunMods:AddToggle({ Name="RPM Modifier", Flag="lean_gun_rpm_on", Default=false,
+	Callback=function(v) Gun.RPM=v; Gun.UpdateTune() end })
+
+S_GunMods:AddSlider({ Name="RPM Value", Flag="lean_gun_rpm_val", Min=60, Max=3000, Default=900, Suffix=" RPM",
+	Callback=function(v) Gun.RPMValue=v; Gun.UpdateTune() end })
+
+-- Gun Visuals
+local S_GunVis = CombatTab:DrawSection({ Name="Gun Visuals", Position="left" })
+
+S_GunVis:AddToggle({ Name="Enable", Flag="lean_gunvis_enabled", Default=false,
+	Callback=function(v) Gun.Visuals=v; Gun.UpdateVisuals() end })
+
+S_GunVis:AddDropdown({ Name="Material", Flag="lean_gunvis_material", Default="Original",
+	Values={"Original","ForceField","Neon","SmoothPlastic","Glass","Metal","Ice"},
+	Callback=function(v) Gun.Material=v; Gun.UpdateVisuals() end })
+
+S_GunVis:AddSlider({ Name="Transparency", Flag="lean_gunvis_transp", Min=0, Max=100, Default=0, Suffix="%",
+	Callback=function(v) Gun.Transparency=v; Gun.UpdateVisuals() end })
+
+S_GunVis:AddColorPicker({ Name="Weapon Color", Flag="lean_gunvis_color", Default=Gun.WeaponColor,
+	Callback=function(v) Gun.WeaponColor=v; Gun.UpdateVisuals() end })
+
+-- Bullet Tracers
+local S_Tracer = CombatTab:DrawSection({ Name="Bullet Tracers", Position="right" })
+
+S_Tracer:AddToggle({ Name="Enable", Flag="lean_tracer_enabled", Default=false,
+	Callback=function(v) Gun.Tracers=v; if not v then Gun.ClearTracers() end end })
+
+S_Tracer:AddDropdown({ Name="Style", Flag="lean_tracer_style", Default="Lightning",
+	Values={"Line","Lightning","DNA"},
+	Callback=function(v) Gun.TracerStyle=v end })
+
+S_Tracer:AddColorPicker({ Name="Tracer Color", Flag="lean_tracer_color", Default=Gun.TracerColor,
+	Callback=function(v) Gun.TracerColor=v end })
+
+S_Tracer:AddSlider({ Name="Duration", Flag="lean_tracer_duration", Min=1, Max=30, Default=6, Suffix=" ×0.1s",
+	Callback=function(v) Gun.TracerDuration=v/10 end })
+
+S_Tracer:AddSlider({ Name="Width", Flag="lean_tracer_width", Min=1, Max=30, Default=8, Suffix=" ×0.01",
+	Callback=function(v) Gun.TracerWidth=v/100 end })
+
+-- Targets dropdown (dùng chung cho cả Silent + Trigger)
+local S_Targets = CombatTab:DrawSection({ Name="Targets", Position="right" })
+
+S_Targets:AddDropdown({ Name="Silent Aim Targets", Flag="lean_silent_targets", Multi=true,
+	Values={"NPCs","Players","Zombies"}, Default={"NPCs","Players","Zombies"},
+	Callback=function(v) Combat.SetTargets(Silent,v) end })
+
+S_Targets:AddDropdown({ Name="Trigger Bot Targets", Flag="lean_trigger_targets", Multi=true,
+	Values={"NPCs","Players","Zombies"}, Default={"NPCs","Players","Zombies"},
+	Callback=function(v) Combat.SetTargets(TriggerBotSettings,v) end })
+
+-- Hook state label
+S_Targets:AddButton({ Name="Check Hook State",
+	Callback=function()
+		Library:Notify({ Title="Hook State", Description=Combat.hookState, Time=4 })
+	end })
 
 -- ESP Tab
 local VisualsTab=Window:DrawTab({ Name="ESP", Icon="eye", Type="Double" })
