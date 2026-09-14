@@ -3495,3 +3495,1371 @@ end})
 
 print("[VehicleTeleport] Loaded")
 end)
+
+-- ══════════════════════════════════════════════════════════════
+-- LEAN V1.9 MODULES PORT — adapted from MainSource for tippc/tipmobile
+-- Tất cả block đều pcall-wrapped độc lập, Heartbeat callbacks có pcall bên trong
+-- Không dùng warn() trực tiếp, không gọi getloadedmodules() mà không guard
+-- ══════════════════════════════════════════════════════════════
+
+-- Shared helpers (dùng lại ReplicatorService của tippc)
+local function Lean_GetReg()   return ReplicatorService and ReplicatorService.Actors end
+local function Lean_GetMe()    return ReplicatorService and ReplicatorService.LocalActor end
+local function Lean_Kind(actor)
+	local reg = Lean_GetReg()
+	if not reg or not actor or not actor.UID or reg[actor.UID] ~= actor then return nil end
+	if actor.IsLocalPlayer or actor.Owner == LocalPlayer or actor == Lean_GetMe() then return nil end
+	if actor.Zombie == true then return "Zombies" end
+	if actor.Owner == nil then return "NPCs" end
+	if typeof(actor.Owner) == "Instance" and actor.Owner:IsA("Player") then return "Players" end
+end
+local function Lean_Alive(actor)
+	if not actor or actor.Alive == false then return false end
+	if actor.Zombie then return type(actor.Health)=="table" or (type(actor.Health)=="number" and actor.Health>0) end
+	return type(actor.Health)=="number" and actor.Health>0
+end
+local function Lean_Pos(actor)
+	return typeof(actor.Position)=="Vector3" and actor.Position or nil
+end
+
+-- ══════════════════════════════════════════════════════════════
+-- 1. TRIGGERBOT
+-- ══════════════════════════════════════════════════════════════
+pcall(function()
+
+local TB = {
+	Enabled=false, TeamCheck=false, VisibleCheck=true,
+	MaxDistance=1000, ReactionTime=50, ShootTime=100, Magnetic=false,
+	Targets={NPCs=true, Players=true, Zombies=false},
+	_actor=nil, _since=0, _lastShot=0,
+}
+getgenv().TipTriggerBot = TB
+
+local TB_RayParams = RaycastParams.new()
+TB_RayParams.FilterType = Enum.RaycastFilterType.Exclude
+TB_RayParams.IgnoreWater = true
+
+local function TB_Visible(actor, point)
+	local me = Lean_GetMe()
+	local origin = workspace.CurrentCamera.CFrame.Position
+	local filter = {workspace.CurrentCamera}
+	if me and me.Character then filter[#filter+1] = me.Character end
+	TB_RayParams.FilterDescendantsInstances = filter
+	local hit = workspace:Raycast(origin, point - origin, TB_RayParams)
+	if not hit then return true end
+	if actor.Character and hit.Instance:IsDescendantOf(actor.Character) then return true end
+	local uid = hit.Instance:GetAttribute("ActorUID")
+	if uid and uid == actor.UID then return true end
+	return false
+end
+
+local function TB_RayBox(origin, direction, cf, size)
+	local p = cf:PointToObjectSpace(origin)
+	local d = cf:VectorToObjectSpace(direction)
+	local half = size * 0.5
+	local lo, hi = 0, math.huge
+	for _, axis in ipairs({"X","Y","Z"}) do
+		if math.abs(d[axis]) < 1e-6 then
+			if math.abs(p[axis]) > half[axis] then return nil end
+		else
+			local a, b = (-half[axis]-p[axis])/d[axis], (half[axis]-p[axis])/d[axis]
+			if a > b then a,b = b,a end
+			lo = math.max(lo,a); hi = math.min(hi,b)
+			if hi < lo then return nil end
+		end
+	end
+	return lo
+end
+
+local function TB_Fire()
+	if mouse1click then
+		pcall(mouse1click)
+	elseif mouse1press and mouse1release then
+		pcall(mouse1press)
+		task.delay(0.02, function() pcall(mouse1release) end)
+	end
+end
+
+local function TB_Tick()
+	if not TB.Enabled then return end
+	local cam = workspace.CurrentCamera
+	if not cam then return end
+	local mouse = UserInputService:GetMouseLocation()
+	local ray = cam:ViewportPointToRay(mouse.X, mouse.Y)
+	local reg = Lean_GetReg()
+	if not reg then return end
+
+	local closest, nearest = nil, TB.MaxDistance
+	for _, actor in pairs(reg) do
+		if Lean_Alive(actor) and actor.RootPart and actor.Character and actor.Character.Parent then
+			local kind = Lean_Kind(actor)
+			if kind and TB.Targets[kind] then
+				local pos = Lean_Pos(actor)
+				if pos and (pos - (Lean_GetMe() and Lean_GetMe().Position or cam.CFrame.Position)).Magnitude <= TB.MaxDistance then
+					if not (TB.TeamCheck and kind == "Players" and actor.Owner and actor.Owner.Team and LocalPlayer.Team and actor.Owner.Team == LocalPlayer.Team) then
+						for _, part in ipairs(actor.Character:GetChildren()) do
+							if part:IsA("BasePart") and part.Parent then
+								local hit = TB_RayBox(ray.Origin, ray.Direction, part.CFrame, part.Size)
+								if hit and hit < nearest then nearest = hit; closest = actor end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+
+	if not closest then TB._actor = nil; TB._since = 0; return end
+	if TB.VisibleCheck then
+		local pos = Lean_Pos(closest)
+		if pos and not TB_Visible(closest, pos) then TB._actor = nil; TB._since = 0; return end
+	end
+
+	local now = tick()
+	if closest ~= TB._actor then TB._actor = closest; TB._since = now end
+	local elapsed = (now - TB._since) * 1000
+	if elapsed >= TB.ReactionTime and (now - TB._lastShot) * 1000 >= TB.ShootTime then
+		TB_Fire(); TB._lastShot = now
+	end
+end
+
+local _tbConn = RunService.Heartbeat:Connect(function(dt)
+	local ok, err = pcall(TB_Tick)
+	if not ok then (warn or print)("[TriggerBot] "..tostring(err)) end
+end)
+table.insert(getgenv().Moon_Connections, _tbConn)
+
+-- UI — adiciona seção TriggerBot no CombatTab
+local S_TB = CombatTab:DrawSection({ Name="Trigger Bot", Position="right" })
+S_TB:AddToggle({ Name="Enable TriggerBot", Flag="TB_Enabled", Default=false, Callback=function(v) TB.Enabled=v end })
+S_TB:AddSlider({ Name="Reaction Time (ms)", Flag="TB_Reaction", Min=0, Max=500, Default=50, Suffix=" ms", Callback=function(v) TB.ReactionTime=v end })
+S_TB:AddSlider({ Name="Shoot Time (ms)", Flag="TB_Shoot", Min=0, Max=1000, Default=100, Suffix=" ms", Callback=function(v) TB.ShootTime=v end })
+S_TB:AddSlider({ Name="Max Distance", Flag="TB_Distance", Min=50, Max=5000, Default=1000, Suffix=" studs", Callback=function(v) TB.MaxDistance=v end })
+S_TB:AddToggle({ Name="Visible Check", Flag="TB_VisCheck", Default=true, Callback=function(v) TB.VisibleCheck=v end })
+S_TB:AddToggle({ Name="Team Check", Flag="TB_TeamCheck", Default=false, Callback=function(v) TB.TeamCheck=v end })
+S_TB:AddDropdown({ Name="Targets", Flag="TB_Targets", Default="NPCs+Players", Options={"NPCs Only","Players Only","NPCs+Players","NPCs+Zombies","All"},
+	Callback=function(v)
+		TB.Targets={NPCs=false,Players=false,Zombies=false}
+		if v=="NPCs Only" then TB.Targets.NPCs=true
+		elseif v=="Players Only" then TB.Targets.Players=true
+		elseif v=="NPCs+Players" then TB.Targets.NPCs=true;TB.Targets.Players=true
+		elseif v=="NPCs+Zombies" then TB.Targets.NPCs=true;TB.Targets.Zombies=true
+		elseif v=="All" then TB.Targets.NPCs=true;TB.Targets.Players=true;TB.Targets.Zombies=true end
+	end})
+print("[TriggerBot] Loaded")
+end)
+
+-- ══════════════════════════════════════════════════════════════
+-- 2. MOVEMENT — CharacterController hooks (Speed, Stamina, OmniSprint, SprintCombat)
+-- ══════════════════════════════════════════════════════════════
+pcall(function()
+
+local MOV = {
+	active=true, installed=false, nextResolve=0,
+	Speed=false, SpeedValue=24, Smoothing=false, Stamina=false, Penalties=false,
+	OmniSprint=false, SprintCombat=false, hooks={},
+	SpeedKey=Enum.KeyCode.G, SpeedKeyOn=false, _prevSpeedDown=false,
+}
+getgenv().LeanMovement = MOV
+
+local function MOV_IsLocal(ctrl)
+	local me = Lean_GetMe()
+	return MOV.active and me and ctrl._localActor == me
+end
+local function MOV_CanMove(ctrl)
+	local a = ctrl._localActor
+	return a and not (a.Downed or a.Frozen or a.Forced or a.Rappelling or a.Ladder or ctrl.Goal or ctrl._forceCFrame or ctrl._startPhysics
+		or (a.CurrentState and (a.CurrentState.Dragged or a.CurrentState.Emote)))
+end
+local function MOV_Wrap(class, key, handler)
+	local original = class[key]
+	if type(original) ~= "function" then return false end
+	local wrapper = function(ctrl, ...)
+		if MOV_IsLocal(ctrl) then return handler(original, ctrl, ...) end
+		return original(ctrl, ...)
+	end
+	class[key] = wrapper
+	table.insert(MOV.hooks, {class=class, key=key, original=original, wrapper=wrapper})
+	return true
+end
+local function MOV_Install(class)
+	MOV_Wrap(class, "_exhaust", function(original, ctrl, ...)
+		if MOV.Stamina then ctrl._exhaustStart=tick()-2; ctrl._exhausted=tick()-1; return true end
+		return original(ctrl, ...)
+	end)
+	MOV_Wrap(class, "_accelerate", function(original, ctrl, dt, magnitude)
+		local a = ctrl._localActor
+		local saved = {}
+		local function change(obj, k, v)
+			table.insert(saved, {obj=obj, k=k, v=rawget(obj,k)}); obj[k]=v
+		end
+		if MOV.Penalties then
+			change(a,"SpeedPenalty",nil); change(a,"HitSlowness",nil)
+			change(a,"CQB",nil); change(a,"Weight",0); change(ctrl,"_weightMulti",1)
+		end
+		local result = table.pack(pcall(original, ctrl, MOV.Smoothing and 1000000 or dt, magnitude))
+		for i=#saved,1,-1 do local v=saved[i]; v.obj[v.k]=v.v end
+		if not result[1] then error(result[2],0) end
+		if MOV.speedActive and MOV_CanMove(ctrl) then ctrl.MoveSpeed=MOV.SpeedValue*math.clamp(magnitude,0,1) end
+		return table.unpack(result, 2, result.n)
+	end)
+	MOV_Wrap(class, "_decelerate", function(original, ctrl, ...)
+		if MOV.Smoothing then ctrl.MoveSpeed=0; return end
+		return original(ctrl, ...)
+	end)
+	MOV_Wrap(class, "Update", function(original, ctrl, input, dt)
+		if MOV.Stamina then ctrl._exhaustStart=tick()-2; ctrl._exhausted=tick()-1 end
+		if MOV.Smoothing then ctrl._lastMovement=input end
+		local result = table.pack(original(ctrl, input, dt))
+		if MOV.SprintCombat and MOV_CanMove(ctrl) then
+			ctrl._localActor.Sprinting = false
+		end
+		return table.unpack(result, 1, result.n)
+	end)
+	local ok2, err = pcall(function()
+		MOV_Wrap(class, "_processMovementInput", function(original, ctrl, input, dt)
+			local actor = ctrl._localActor
+			if (MOV.OmniSprint or MOV.SprintCombat) and MOV_CanMove(ctrl)
+				and ctrl.TrySprinting and input.Magnitude > 0.01 then
+				local dirOK = MOV.OmniSprint or input.Y < -0.5
+				local aimOK = MOV.SprintCombat or not actor.ADS
+				if dirOK and aimOK then ctrl.IsSprinting = true end
+			end
+			return original(ctrl, input, dt)
+		end)
+	end)
+	MOV.installed = true
+end
+
+local function MOV_Destroy()
+	MOV.active = false
+	for i = #MOV.hooks, 1, -1 do
+		local h = MOV.hooks[i]
+		if h.class[h.key] == h.wrapper then h.class[h.key] = h.original end
+	end
+	table.clear(MOV.hooks)
+end
+getgenv().LeanMovementDestroy = MOV_Destroy
+
+local _movConn = RunService.Heartbeat:Connect(function()
+	local ok, err = pcall(function()
+		if not MOV.active then return end
+		-- Toggle speed key
+		local speedDown = UserInputService:IsKeyDown(MOV.SpeedKey)
+		if speedDown and not MOV._prevSpeedDown then MOV.SpeedKeyOn = not MOV.SpeedKeyOn end
+		MOV._prevSpeedDown = speedDown
+		MOV.speedActive = MOV.Speed and MOV.SpeedKeyOn
+
+		if not MOV.installed and tick() > MOV.nextResolve then
+			MOV.nextResolve = tick() + 2
+			if getloadedmodules then
+				for _, m in ipairs(getloadedmodules()) do
+					if m.Name == "CharacterController" then
+						local ok2, class = pcall(require, m)
+						if ok2 and type(class) == "table" then
+							local installed, err2 = pcall(MOV_Install, class)
+							if not installed then
+								(warn or print)("[Movement] "..tostring(err2))
+							end
+						end
+						break
+					end
+				end
+			end
+		end
+	end)
+	if not ok then (warn or print)("[Movement] "..tostring(err)) end
+end)
+table.insert(getgenv().Moon_Connections, _movConn)
+
+-- UI — new Movement tab
+local MovTab = Window:DrawTab({ Name="Movement", Icon="footprints", Type="Double" })
+local S_MovLeft = MovTab:DrawSection({ Name="Speed", Position="left" })
+local S_MovRight = MovTab:DrawSection({ Name="Restrictions", Position="right" })
+S_MovLeft:AddToggle({ Name="Speed Hack", Flag="MOV_Speed", Default=false, Callback=function(v) MOV.Speed=v end })
+S_MovLeft:AddSlider({ Name="Speed Value", Flag="MOV_SpeedVal", Min=1, Max=150, Default=24, Suffix=" studs/s", Callback=function(v) MOV.SpeedValue=v end })
+S_MovLeft:AddDropdown({ Name="Speed Toggle Key", Flag="MOV_SpeedKey", Default="G",
+	Options={"G","H","J","K","L","Z","X","C","V","B","N","M","F1","F2","F3","F4","F5","F6","F7","F8"},
+	Callback=function(v)
+		local ok2, kc = pcall(function() return Enum.KeyCode[v] end)
+		if ok2 and kc then MOV.SpeedKey = kc end
+	end})
+S_MovLeft:AddToggle({ Name="No Movement Smoothing", Flag="MOV_Smooth", Default=false, Callback=function(v) MOV.Smoothing=v end })
+S_MovLeft:AddToggle({ Name="Omni Sprint", Flag="MOV_OmniSprint", Default=false, Callback=function(v) MOV.OmniSprint=v end })
+S_MovLeft:AddToggle({ Name="Aim / Shoot While Sprinting", Flag="MOV_SprintCombat", Default=false, Callback=function(v) MOV.SprintCombat=v end })
+S_MovRight:AddToggle({ Name="Infinite Stamina", Flag="MOV_Stamina", Default=false, Callback=function(v) MOV.Stamina=v end })
+S_MovRight:AddToggle({ Name="No Speed Penalties", Flag="MOV_Penalties", Default=false, Callback=function(v) MOV.Penalties=v end })
+print("[Movement] Loaded")
+end)
+
+-- ══════════════════════════════════════════════════════════════
+-- 3. GUN ADDITIONS — InstantADS, NoSway, AutoReload, RPM, BulletSpeed, CamShake, SightZoom, WeaponAppearance
+-- ══════════════════════════════════════════════════════════════
+pcall(function()
+
+local GEXT = {
+	active=true, classes={}, nextScan=0, hooks={},
+	InstantADS=false, NoSway=false, AutoReload=false,
+	RPM=false, RPMValue=900, InstantBullet=false, BulletMultiplier=1,
+	NoCameraShake=false, SightZoom=false, Zoom=2, NoEquipDelay=false,
+	Visuals=false, Transparency=0, Material="Original", WeaponColor=Color3.fromRGB(150,80,255),
+	visualParts={}, visualModel=nil, nextVisualScan=0,
+	nextReload=0, reloadPending=false, shots=setmetatable({},{__mode="k"}),
+}
+getgenv().LeanGunExt = GEXT
+
+local function GEXT_Hook(class, key, make)
+	local original = class[key]
+	if type(original) ~= "function" then return false end
+	local raw = rawget(class, key)
+	local wrapper = make(original)
+	class[key] = wrapper
+	GEXT.hooks[#GEXT.hooks+1] = {class=class, key=key, raw=raw, wrapper=wrapper}
+	return true
+end
+
+local function GEXT_Actor() local me = Lean_GetMe(); return me end
+local function GEXT_LocalWeapon(w) return w and w._actor == GEXT_Actor() end
+
+local function GEXT_RestoreVisuals()
+	for part, saved in pairs(GEXT.visualParts) do
+		if part.Parent then
+			for k, v in pairs(saved.original) do
+				if part[k] == saved.applied[k] then part[k] = v end
+			end
+		end
+	end
+	GEXT.visualParts = {}; GEXT.visualModel = nil; GEXT.nextVisualScan = 0
+end
+
+local function GEXT_UpdateVisuals()
+	if not GEXT.Visuals then
+		if GEXT.visualModel or next(GEXT.visualParts) ~= nil then GEXT_RestoreVisuals() end
+		return
+	end
+	local me = GEXT_Actor()
+	local weapon = me and me._inventory and me._inventory[me._equipped]
+	local model = weapon and weapon._firearm and me.ViewModel and me.ViewModel.CurrentModel
+	if model ~= GEXT.visualModel then GEXT_RestoreVisuals() end
+	if not model or not model.Parent then return end
+	GEXT.visualModel = model
+	if tick() >= GEXT.nextVisualScan then
+		GEXT.nextVisualScan = tick() + 0.2
+		for _, part in ipairs(model:GetDescendants()) do
+			if part:IsA("BasePart") and part.Transparency < 1 and not GEXT.visualParts[part] then
+				GEXT.visualParts[part] = {
+					original={Material=part.Material,MaterialVariant=part.MaterialVariant,Transparency=part.Transparency,Color=part.Color},
+					applied={}
+				}
+			end
+		end
+	end
+	for part, saved in pairs(GEXT.visualParts) do
+		if not part:IsDescendantOf(model) then
+			if part.Parent then
+				for k, v in pairs(saved.original) do
+					if part[k] == saved.applied[k] then part[k] = v end
+				end
+			end
+			GEXT.visualParts[part] = nil
+		else
+			local matEnum = (GEXT.Material == "Original") and saved.original.Material or (Enum.Material[GEXT.Material] or saved.original.Material)
+			local values = {
+				Material = matEnum,
+				MaterialVariant = GEXT.Material == "Original" and saved.original.MaterialVariant or "",
+				Transparency = GEXT.Transparency / 100,
+				Color = GEXT.Material ~= "Original" and GEXT.WeaponColor or saved.original.Color
+			}
+			for k, v in pairs(values) do
+				saved.applied[k] = v
+				if part[k] ~= v then part[k] = v end
+			end
+		end
+	end
+end
+
+local function GEXT_Frame()
+	if not GEXT.active then return end
+	if tick() >= GEXT.nextScan and getloadedmodules then
+		GEXT.nextScan = tick() + 3
+		for _, m in ipairs(getloadedmodules()) do
+			if not GEXT.classes[m.Name] then
+				local install = nil
+				if m.Name == "ViewmodelClass" then
+					install = function(c)
+						GEXT_Hook(c, "Update", function(original)
+							return function(vm, ...)
+								local me = GEXT_Actor()
+								if not GEXT.active or vm.Actor ~= me then return original(vm, ...) end
+								if GEXT.InstantADS then
+									vm.ADSLerp = (me.ADS and not vm.Reloading and not me.Sliding) and 1 or 0
+								end
+								local sway, kick = vm._swaySpring, vm.Kick
+								if GEXT.NoSway and sway then
+									vm._swaySpring = {Position={ToCFrame=function() return CFrame.new() end}}
+								end
+								if Config.NoRecoil and kick then vm.Kick = {Position=Vector3.new(0,0,0)} end
+								local result = table.pack(pcall(original, vm, ...))
+								vm._swaySpring = sway; vm.Kick = kick
+								if not result[1] then error(result[2],0) end
+								return table.unpack(result, 2, result.n)
+							end
+						end)
+					end
+				elseif m.Name == "CharacterCamera" then
+					install = function(c)
+						GEXT_Hook(c, "Render", function(original)
+							return function(camera, ...)
+								local influences = {}
+								if GEXT.NoCameraShake then
+									for _, shake in ipairs(camera._shakes or {}) do
+										influences[#influences+1] = {shake, shake.PositionInfluence, shake.RotationInfluence}
+										shake.PositionInfluence = Vector3.zero
+										shake.RotationInfluence = Vector3.zero
+									end
+								end
+								local r = table.pack(pcall(original, camera, ...))
+								for _, v in ipairs(influences) do
+									v[1].PositionInfluence = v[2]; v[1].RotationInfluence = v[3]
+								end
+								if not r[1] then error(r[2],0) end
+								local me = GEXT_Actor(); local cam = workspace.CurrentCamera
+								if GEXT.SightZoom and me and me.ADS and cam then
+									cam.FieldOfView = math.clamp(math.deg(2*math.atan(math.tan(math.rad(cam.FieldOfView)/2)/GEXT.Zoom)), 5, 100)
+								end
+								return table.unpack(r, 2, r.n)
+							end
+						end)
+					end
+				elseif m.Name == "BulletService" then
+					install = function(c)
+						GEXT_Hook(c, "GetInfo", function(original)
+							return function(self, ...)
+								local r = table.pack(original(self, ...))
+								if GEXT.active and GEXT.InstantBullet and GEXT.shots[coroutine.running()] and type(r[1])=="number" then
+									r[1] = r[1] * GEXT.BulletMultiplier
+								end
+								return table.unpack(r, 1, r.n)
+							end
+						end)
+					end
+				elseif m.Name == "FirearmInventory" then
+					install = function(c)
+						GEXT_Hook(c, "Discharge", function(original)
+							return function(w, ...)
+								if not GEXT_LocalWeapon(w) then return original(w, ...) end
+								-- Apply RPM and equip delay
+								local tune = w._firearm and w._firearm.Tune
+								if tune then
+									if GEXT.RPM then tune._lean_rpm_saved = tune._lean_rpm_saved or tune.RPM; tune.RPM = GEXT.RPMValue
+									elseif tune._lean_rpm_saved then tune.RPM = tune._lean_rpm_saved; tune._lean_rpm_saved = nil end
+									if GEXT.NoEquipDelay then tune._lean_equip_saved = tune._lean_equip_saved or tune.Equip_Delay; tune.Equip_Delay = 0
+									elseif tune._lean_equip_saved then tune.Equip_Delay = tune._lean_equip_saved; tune._lean_equip_saved = nil end
+								end
+								local thread = coroutine.running()
+								local prev = GEXT.shots[thread]; GEXT.shots[thread] = true
+								local r = table.pack(pcall(original, w, ...)); GEXT.shots[thread] = prev
+								if not r[1] then error(r[2],0) end
+								return table.unpack(r, 2, r.n)
+							end
+						end)
+						-- Auto Reload
+						GEXT_Hook(c, "_reload", function(original)
+							return function(w, ...)
+								return original(w, ...)
+							end
+						end)
+					end
+				end
+				if install then
+					local ok2, c = pcall(require, m)
+					if ok2 and type(c) == "table" then
+						local ok3, err2 = pcall(install, c)
+						if ok3 then GEXT.classes[m.Name] = c
+						else (warn or print)("[GunExt] "..m.Name.." install: "..tostring(err2)) end
+					end
+				end
+			end
+		end
+	end
+	-- Auto reload check
+	local me = GEXT_Actor()
+	local weapon = me and me._inventory and me._inventory[me._equipped]
+	local tune = weapon and weapon._firearm and weapon._firearm.Tune
+	if GEXT.AutoReload and weapon and weapon.Equipped and not weapon._reloading and tune
+		and (not weapon._mag or (weapon._mag.Capacity or 0) <= 0)
+		and (tune.NoChamber or not (weapon._item and weapon._item.MetaData and weapon._item.MetaData.Chamber))
+		and tick() >= GEXT.nextReload and not GEXT.reloadPending then
+		GEXT.nextReload = tick() + 1
+		GEXT.reloadPending = true
+		task.defer(function()
+			if GEXT.active and GEXT.AutoReload and weapon.Equipped and not weapon._reloading then
+				local ok2, mags = pcall(function() return weapon:_getMags() end)
+				if ok2 and type(mags)=="table" and mags[1] then
+					weapon._cancelReload = false
+					pcall(function()
+						local fi = GEXT.classes.FirearmInventory
+						if fi and fi._reload then fi._reload(weapon, true) end
+					end)
+				end
+			end
+			GEXT.reloadPending = false
+		end)
+	end
+	GEXT_UpdateVisuals()
+end
+
+local _gextConn = RunService.RenderStepped:Connect(function()
+	local ok, err = pcall(GEXT_Frame)
+	if not ok then (warn or print)("[GunExt] "..tostring(err)) end
+end)
+table.insert(getgenv().Moon_Connections, _gextConn)
+
+-- UI — new Gun Ext sections in existing Gun Mods area (CombatTab já tem S_GunMods)
+-- Encontrar CombatTab e adicionar seção nova
+local S_GunExt = CombatTab:DrawSection({ Name="Gun Advanced", Position="right" })
+S_GunExt:AddToggle({ Name="Instant ADS", Flag="GEXT_InstADS", Default=false, Callback=function(v) GEXT.InstantADS=v end })
+S_GunExt:AddToggle({ Name="No Sway", Flag="GEXT_NoSway", Default=false, Callback=function(v) GEXT.NoSway=v end })
+S_GunExt:AddToggle({ Name="Auto Reload", Flag="GEXT_AutoReload", Default=false, Callback=function(v) GEXT.AutoReload=v end })
+S_GunExt:AddToggle({ Name="No Camera Shake", Flag="GEXT_NoCamShake", Default=false, Callback=function(v) GEXT.NoCameraShake=v end })
+S_GunExt:AddToggle({ Name="No Equip Delay", Flag="GEXT_NoEquipDelay", Default=false, Callback=function(v) GEXT.NoEquipDelay=v end })
+S_GunExt:AddToggle({ Name="Sight Zoom", Flag="GEXT_SightZoom", Default=false, Callback=function(v) GEXT.SightZoom=v end })
+S_GunExt:AddSlider({ Name="Sight Magnification", Flag="GEXT_Zoom", Min=1, Max=10, Default=2, Suffix="x", Callback=function(v) GEXT.Zoom=v end })
+S_GunExt:AddToggle({ Name="RPM Modifier", Flag="GEXT_RPM", Default=false, Callback=function(v) GEXT.RPM=v end })
+S_GunExt:AddSlider({ Name="RPM Value", Flag="GEXT_RPMVal", Min=60, Max=3000, Default=900, Suffix=" RPM", Callback=function(v) GEXT.RPMValue=v end })
+S_GunExt:AddToggle({ Name="Instant Bullet", Flag="GEXT_InstBullet", Default=false, Callback=function(v) GEXT.InstantBullet=v end })
+S_GunExt:AddSlider({ Name="Bullet Speed Multiplier", Flag="GEXT_BulletMult", Min=1, Max=10, Default=1, Suffix="x", Callback=function(v) GEXT.BulletMultiplier=v end })
+
+local S_GunVisuals = CombatTab:DrawSection({ Name="Weapon Appearance", Position="left" })
+S_GunVisuals:AddToggle({ Name="Custom Appearance", Flag="GEXT_Visuals", Default=false, Callback=function(v) GEXT.Visuals=v end })
+S_GunVisuals:AddDropdown({ Name="Material", Flag="GEXT_Material", Default="Original",
+	Options={"Original","ForceField","Neon","SmoothPlastic","Glass","Metal","Ice"},
+	Callback=function(v) GEXT.Material=v end })
+S_GunVisuals:AddSlider({ Name="Transparency", Flag="GEXT_Transp", Min=0, Max=100, Default=0, Suffix="%", Callback=function(v) GEXT.Transparency=v end })
+print("[GunExt] Loaded")
+end)
+
+-- ══════════════════════════════════════════════════════════════
+-- 4. LEAN BULLET TRACERS — Line / Lightning / DNA via Beams
+-- ══════════════════════════════════════════════════════════════
+pcall(function()
+
+local LT = {
+	Enabled=false, Style="Lightning", Color=Color3.fromRGB(150,80,255),
+	Duration=0.6, Width=0.08, _folder=nil, _conn=nil,
+}
+getgenv().LeanTracers = LT
+
+local function LT_TracerPoints(from, to, style, rng)
+	local length = (to - from).Magnitude
+	if length < 0.01 then return {} end
+	local cf = CFrame.lookAt(from, to)
+	local count = style=="Line" and 1 or math.clamp(math.ceil(length/3), 12, 48)
+	local paths = {}
+	local points = {}
+	for i = 0, count do
+		local t = i/count
+		local offset = Vector3.zero
+		if i > 0 and i < count and style == "Lightning" then
+			local radius = math.min(length*0.025, 0.65)
+			offset = cf.RightVector*rng:NextNumber(-radius,radius) + cf.UpVector*rng:NextNumber(-radius,radius)
+		end
+		points[#points+1] = from:Lerp(to, t) + offset
+	end
+	paths[1] = points
+	return paths
+end
+
+local function LT_Draw(from, to)
+	if not LT.Enabled or typeof(from)~="Vector3" or typeof(to)~="Vector3" then return end
+	local cam = workspace.CurrentCamera
+	if not cam then return end
+	if not LT._folder then
+		LT._folder = Instance.new("Folder"); LT._folder.Name = "LeanTracers"
+	end
+	LT._folder.Parent = cam
+	local existing = LT._folder:GetChildren()
+	if #existing >= 24 then existing[1]:Destroy() end
+	local paths = LT_TracerPoints(from, to, LT.Style, Random.new())
+	if #paths == 0 then return end
+	local anchor = Instance.new("Part")
+	anchor.Name="Tracer"; anchor.Anchored=true; anchor.Transparency=1; anchor.Size=Vector3.one*0.01
+	anchor.CanCollide=false; anchor.CanQuery=false; anchor.CanTouch=false; anchor.CastShadow=false
+	anchor.CFrame = CFrame.new(from); anchor.Parent = LT._folder
+	local attachments = {}
+	for idx, pts in ipairs(paths) do
+		local list = {}; attachments[idx] = list
+		for i, point in ipairs(pts) do
+			local a = Instance.new("Attachment"); a.Position = point - from; a.Parent = anchor; list[i] = a
+			if i > 1 then
+				local beam = Instance.new("Beam")
+				beam.Attachment0 = list[i-1]; beam.Attachment1 = a; beam.FaceCamera = true
+				beam.Width0 = LT.Width; beam.Width1 = LT.Width; beam.Segments = 1
+				beam.Color = ColorSequence.new(LT.Color); beam.LightEmission = 1; beam.LightInfluence = 0
+				beam.Transparency = NumberSequence.new(0); beam.Parent = anchor
+				game:GetService("TweenService"):Create(beam, TweenInfo.new(LT.Duration), {Width0=0,Width1=0}):Play()
+			end
+		end
+	end
+	game:GetService("Debris"):AddItem(anchor, LT.Duration)
+end
+getgenv().LeanDrawTracer = LT_Draw
+
+-- Hook _bulletEffects to capture from/to positions
+local function LT_TryHook()
+	if not ReplicatorService or not type(rawget(ReplicatorService,"_bulletEffects"))=="function" then return end
+	if ReplicatorService._leanTracerHooked then return end
+	ReplicatorService._leanTracerHooked = true
+	local orig = ReplicatorService._bulletEffects
+	ReplicatorService._bulletEffects = function(self, from, to, part, normal, material, caliber, isLocal, ...)
+		local result = table.pack(orig(self, from, to, part, normal, material, caliber, isLocal, ...))
+		if isLocal then pcall(LT_Draw, from, to) end
+		return table.unpack(result, 1, result.n)
+	end
+end
+
+local _ltConn = RunService.Heartbeat:Connect(function()
+	local ok, err = pcall(LT_TryHook)
+	if not ok then (warn or print)("[LeanTracers] "..tostring(err)) end
+end)
+table.insert(getgenv().Moon_Connections, _ltConn)
+
+-- UI in CombatTab
+local S_LT = CombatTab:DrawSection({ Name="Bullet Tracers (Lean)", Position="left" })
+S_LT:AddToggle({ Name="Enable Lean Tracers", Flag="LT_Enabled", Default=false,
+	Callback=function(v) LT.Enabled=v; if not v and LT._folder then LT._folder:Destroy(); LT._folder=nil end end })
+S_LT:AddDropdown({ Name="Tracer Style", Flag="LT_Style", Default="Lightning",
+	Options={"Line","Lightning"},
+	Callback=function(v) LT.Style=v end })
+S_LT:AddSlider({ Name="Duration", Flag="LT_Duration", Min=0.1, Max=3, Default=0.6, Suffix=" s", Callback=function(v) LT.Duration=v end })
+S_LT:AddSlider({ Name="Width", Flag="LT_Width", Min=1, Max=30, Default=8, Suffix="", Callback=function(v) LT.Width=v/100 end })
+print("[LeanTracers] Loaded")
+end)
+
+-- ══════════════════════════════════════════════════════════════
+-- 5. VEHICLE IMPROVEMENTS — Speed Mod, Stability, Heli FastStart, Noclip (via VehicleSolver)
+-- ══════════════════════════════════════════════════════════════
+pcall(function()
+
+local VI = {
+	Speed=false, SpeedValue=80, Stability=false, FastStart=false, Noclip=false,
+	active=true, hooked=false, emptyCast=nil, _conn=nil,
+}
+getgenv().LeanVehicleImp = VI
+
+local VI_keyState = {}
+local function VI_KeyActive(keyEnum)
+	if not keyEnum then return false end
+	return UserInputService:IsKeyDown(keyEnum)
+end
+
+local function VI_Direction()
+	local cam = workspace.CurrentCamera
+	if not cam or UserInputService:GetFocusedTextBox() then return Vector3.zero end
+	local function down(k) return UserInputService:IsKeyDown(k) and 1 or 0 end
+	local d = cam.CFrame.LookVector*(down(Enum.KeyCode.W)-down(Enum.KeyCode.S))
+		+ cam.CFrame.RightVector*(down(Enum.KeyCode.D)-down(Enum.KeyCode.A))
+		+ Vector3.yAxis*(down(Enum.KeyCode.Space)-down(Enum.KeyCode.LeftControl))
+	return d.Magnitude > 1 and d.Unit or d
+end
+
+local VI_hooks = {}
+local function VI_Hook(class, key, make)
+	local original = class[key]
+	if type(original) ~= "function" then return false end
+	local raw = rawget(class, key)
+	local wrapper = make(original)
+	class[key] = wrapper
+	VI_hooks[#VI_hooks+1] = {class=class, key=key, raw=raw, wrapper=wrapper}
+	return true
+end
+
+local function VI_Install(c)
+	VI_Hook(c, "Update", function(original)
+		return function(solver, dt, inputs, ...)
+			local vehicle = solver._vehicle
+			if not VI.active or not vehicle or not vehicle.Controlling then return original(solver, dt, inputs, ...) end
+			local physics = solver._solver; local state = physics and physics.State
+			if not state then return original(solver, dt, inputs, ...) end
+			local heli = vehicle.Rotors ~= nil
+			if heli and VI.FastStart then
+				for _, engine in pairs(solver.Engines or {}) do
+					if engine:GetOn() and not engine:GetFullyOn() then pcall(function() engine:TimeSkip(120) end) end
+				end
+			end
+			local cf = state.CFrame * physics.CenterOfMass:Inverse()
+			local velocity = state.Velocity; local angular = state.AngularVelocity
+			if VI.Speed and inputs and math.abs(inputs.Throttle or 0) > 0.01 then
+				local forward = cf.LookVector
+				if not heli then forward = Vector3.new(forward.X, 0, forward.Z) end
+				if forward.Magnitude > 0.01 then
+					local desired = forward.Unit * VI.SpeedValue * math.clamp(inputs.Throttle, -1, 1)
+					if not heli then desired = desired + Vector3.yAxis * velocity.Y end
+					velocity = velocity:Lerp(desired, 1 - math.exp(-math.clamp(dt,0,0.1)*4))
+					physics:SetState(nil, velocity, nil)
+				end
+			end
+			if VI.Stability and not heli then
+				local localAV = cf:VectorToObjectSpace(angular)
+				local decay = math.exp(-math.clamp(dt,0,0.1)*8)
+				local correction = cf.UpVector:Cross(Vector3.yAxis) * math.clamp(dt*4, 0, 0.4)
+				physics:SetState(nil, velocity, cf:VectorToWorldSpace(Vector3.new(localAV.X*decay, localAV.Y, localAV.Z*decay))+correction)
+			end
+			local old = physics.CollisionCastParams
+			if VI.Noclip then
+				if not VI.emptyCast then
+					VI.emptyCast = RaycastParams.new()
+					VI.emptyCast.FilterType = Enum.RaycastFilterType.Include
+					VI.emptyCast.FilterDescendantsInstances = {}
+				end
+				physics.CollisionCastParams = VI.emptyCast
+			end
+			local r = table.pack(pcall(original, solver, dt, inputs, ...))
+			physics.CollisionCastParams = old
+			if not r[1] then error(r[2], 0) end
+			return table.unpack(r, 2, r.n)
+		end
+	end)
+end
+
+local VI_nextScan = 0
+local _viConn = RunService.Heartbeat:Connect(function()
+	local ok, err = pcall(function()
+		if not VI.hooked and tick() > VI_nextScan and getloadedmodules then
+			VI_nextScan = tick() + 3
+			for _, m in ipairs(getloadedmodules()) do
+				if m.Name == "VehicleSolver" then
+					local ok2, c = pcall(require, m)
+					if ok2 and type(c) == "table" then
+						local ok3, err2 = pcall(VI_Install, c)
+						if ok3 then VI.hooked = true
+						else (warn or print)("[VehicleImp] "..tostring(err2)) end
+					end
+					break
+				end
+			end
+		end
+	end)
+	if not ok then (warn or print)("[VehicleImp] "..tostring(err)) end
+end)
+table.insert(getgenv().Moon_Connections, _viConn)
+
+-- UI — add to existing VehicleTab
+local S_VI = VehicleTab:DrawSection({ Name="Vehicle Improvements", Position="right" })
+S_VI:AddToggle({ Name="Speed Modifier", Flag="VI_Speed", Default=false, Callback=function(v) VI.Speed=v end })
+S_VI:AddSlider({ Name="Speed Value", Flag="VI_SpeedVal", Min=1, Max=250, Default=80, Suffix=" studs/s", Callback=function(v) VI.SpeedValue=v end })
+S_VI:AddToggle({ Name="Stability Assist (Cars)", Flag="VI_Stability", Default=false, Callback=function(v) VI.Stability=v end })
+S_VI:AddToggle({ Name="Heli Fast Startup", Flag="VI_FastStart", Default=false, Callback=function(v) VI.FastStart=v end })
+S_VI:AddToggle({ Name="Vehicle Noclip", Flag="VI_Noclip", Default=false, Callback=function(v) VI.Noclip=v end })
+print("[VehicleImp] Loaded")
+end)
+
+-- ══════════════════════════════════════════════════════════════
+-- 6. RADIO LOGGER — nghe TextChatService kênh Main, lọc radio
+-- ══════════════════════════════════════════════════════════════
+pcall(function()
+
+local RL = {
+	Enabled=false, active=true, rows={}, byId={}, limit=150, count=0,
+	gui=nil, frame=nil, scroll=nil, status=nil, main=nil,
+	connections={}, messageConnection=nil,
+}
+getgenv().LeanRadioLogger = RL
+
+local function RL_Connect(signal, fn)
+	local c = signal:Connect(fn); table.insert(RL.connections, c); return c
+end
+
+local function RL_Build()
+	if RL.gui then return end
+	local gui = Instance.new("ScreenGui")
+	gui.Name="LeanRadioLogger"; gui.ResetOnSpawn=false; gui.DisplayOrder=30
+	gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+	gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+	local frame = Instance.new("Frame")
+	frame.Name="RadioChat"; frame.AnchorPoint=Vector2.new(1,0)
+	frame.Position=UDim2.new(1,-18,0,88); frame.Size=UDim2.new(0.32,0,0.3,0)
+	frame.BackgroundColor3=Color3.fromRGB(15,17,21); frame.BackgroundTransparency=0.08
+	frame.BorderSizePixel=0; frame.Parent=gui
+	local corner = Instance.new("UICorner"); corner.CornerRadius=UDim.new(0,8); corner.Parent=frame
+	local header = Instance.new("TextLabel")
+	header.Name="Header"; header.Size=UDim2.new(1,-80,0,34); header.Position=UDim2.fromOffset(12,0)
+	header.BackgroundTransparency=1; header.Text="RADIO LOGGER"; header.TextColor3=Color3.fromRGB(225,230,238)
+	header.Font=Enum.Font.GothamBold; header.TextSize=13; header.TextXAlignment=Enum.TextXAlignment.Left
+	header.Active=true; header.Parent=frame
+	local clear = Instance.new("TextButton")
+	clear.Name="Clear"; clear.Size=UDim2.fromOffset(60,26); clear.Position=UDim2.new(1,-68,0,4)
+	clear.BackgroundColor3=Color3.fromRGB(37,42,51); clear.BorderSizePixel=0
+	clear.Text="Xóa"; clear.TextColor3=Color3.new(1,1,1); clear.Font=Enum.Font.Gotham
+	clear.TextSize=12; clear.Parent=frame
+	local status = Instance.new("TextLabel")
+	status.Size=UDim2.new(1,-24,0,20); status.Position=UDim2.fromOffset(12,32)
+	status.BackgroundTransparency=1; status.Text="Nhận • 0 / 150"
+	status.TextColor3=Color3.fromRGB(150,160,177); status.Font=Enum.Font.Gotham
+	status.TextSize=11; status.TextXAlignment=Enum.TextXAlignment.Left; status.Parent=frame
+	local scroll = Instance.new("ScrollingFrame")
+	scroll.Name="Messages"; scroll.Position=UDim2.fromOffset(10,58); scroll.Size=UDim2.new(1,-20,1,-68)
+	scroll.BackgroundTransparency=1; scroll.BorderSizePixel=0; scroll.ScrollBarThickness=4
+	scroll.ScrollBarImageColor3=Color3.fromRGB(111,139,175)
+	scroll.CanvasSize=UDim2.new(); scroll.AutomaticCanvasSize=Enum.AutomaticSize.Y; scroll.Parent=frame
+	local layout = Instance.new("UIListLayout")
+	layout.Padding=UDim.new(0,6); layout.SortOrder=Enum.SortOrder.LayoutOrder; layout.Parent=scroll
+	RL.gui=gui; RL.frame=frame; RL.scroll=scroll; RL.status=status
+	gui.Enabled = RL.Enabled
+	RL_Connect(clear.MouseButton1Click, function()
+		for _, row in ipairs(RL.rows) do if row.label then row.label:Destroy() end end
+		RL.rows={}; RL.byId={}; RL.count=0
+		if RL.status then RL.status.Text="Nhận • 0 / 150" end
+	end)
+end
+
+local function RL_Add(id, channel, name, message)
+	if not RL.active or not RL.Enabled then return end
+	RL_Build()
+	local row = RL.byId[id]
+	local follow = RL.scroll.CanvasPosition.Y + RL.scroll.AbsoluteSize.Y >= RL.scroll.AbsoluteCanvasSize.Y - 40
+	if not row then
+		RL.count = RL.count + 1
+		local label = Instance.new("TextLabel")
+		label.Size=UDim2.new(1,-8,0,0); label.AutomaticSize=Enum.AutomaticSize.Y
+		label.BackgroundTransparency=1; label.TextColor3=Color3.fromRGB(216,223,234)
+		label.Font=Enum.Font.Code; label.TextSize=13; label.TextWrapped=true
+		label.RichText=false; label.TextXAlignment=Enum.TextXAlignment.Left
+		label.LayoutOrder=RL.count; label.Parent=RL.scroll
+		row={id=id, label=label}; RL.byId[id]=row; RL.rows[#RL.rows+1]=row
+		if #RL.rows > RL.limit then
+			local oldest = table.remove(RL.rows, 1); RL.byId[oldest.id]=nil; oldest.label:Destroy()
+		end
+	end
+	row.label.Text = "["..tostring(channel).."] "..tostring(name)..": "..tostring(message)
+	if RL.status then RL.status.Text = "Nhận • "..#RL.rows.." / 150" end
+	if follow then task.defer(function()
+		if RL.active and RL.scroll and RL.scroll.Parent then
+			RL.scroll.CanvasPosition = Vector2.new(0, math.max(0, RL.scroll.AbsoluteCanvasSize.Y - RL.scroll.AbsoluteSize.Y))
+		end
+	end) end
+end
+
+local function RL_Process(message)
+	if not RL.Enabled or not RL.active or not message.TextSource then return end
+	if message.Status and message.Status ~= Enum.TextChatMessageStatus.Success then return end
+	local ok, metadata = pcall(function()
+		return game:GetService("HttpService"):JSONDecode(message.Metadata)
+	end)
+	if not ok or type(metadata) ~= "table" or not metadata.Radio then return end
+	local source = Players:GetPlayerByUserId(message.TextSource.UserId)
+	local name = source and (source.DisplayName.." (@"..source.Name..")") or tostring(message.TextSource.UserId)
+	local channel = type(metadata.Channel)=="string" and metadata.Channel or "000"
+	RL_Add(message.MessageId, channel, name, message.Text)
+end
+
+local function RL_AttachMain(channel)
+	if channel.Name ~= "Main" or not channel:IsA("TextChannel") or RL.main == channel then return end
+	if RL.messageConnection then RL.messageConnection:Disconnect() end
+	RL.main = channel
+	RL.messageConnection = RL_Connect(channel.MessageReceived, function(msg)
+		pcall(RL_Process, msg)
+	end)
+end
+
+local chat = game:GetService("TextChatService")
+local mainCh = chat:FindFirstChild("Main")
+if mainCh then pcall(RL_AttachMain, mainCh) end
+RL_Connect(chat.ChildAdded, function(ch) pcall(RL_AttachMain, ch) end)
+
+-- UI — MiscTab
+local S_RL = MiscTab:DrawSection({ Name="Radio Logger", Position="right" })
+S_RL:AddToggle({ Name="Enable Radio Logger", Flag="RL_Enabled", Default=false,
+	Callback=function(v)
+		RL.Enabled = v
+		if v then RL_Build() end
+		if RL.gui then RL.gui.Enabled = v end
+	end })
+print("[RadioLogger] Loaded")
+end)
+
+-- ══════════════════════════════════════════════════════════════
+-- 7. WORLD VISUALS — Ambient, Color Shift, World Time, Fog, Lighting, Graphics
+-- ══════════════════════════════════════════════════════════════
+pcall(function()
+
+local WML = game:GetService("Lighting")
+local WMBackup = {
+	Ambient=WML.Ambient, OutdoorAmbient=WML.OutdoorAmbient,
+	ColorShift_Top=WML.ColorShift_Top, ColorShift_Bottom=WML.ColorShift_Bottom,
+	ClockTime=WML.ClockTime,
+	FogStart=WML.FogStart, FogEnd=WML.FogEnd, FogColor=WML.FogColor,
+	Brightness=WML.Brightness, ExposureCompensation=WML.ExposureCompensation,
+	GlobalShadows=WML.GlobalShadows, ShadowSoftness=WML.ShadowSoftness,
+}
+local WM = {
+	ambient    = {enabled=false, a=WML.Ambient, b=WML.OutdoorAmbient},
+	colorShift = {enabled=false, top=WML.ColorShift_Top, bottom=WML.ColorShift_Bottom},
+	time       = {enabled=false, value=WML.ClockTime},
+	fog        = {enabled=false, s=WML.FogStart, e=WML.FogEnd, color=WML.FogColor},
+	light      = {enabled=false, brightness=WML.Brightness, exposure=WML.ExposureCompensation},
+	shadows    = {enabled=false, softness=WML.ShadowSoftness},
+}
+getgenv().LeanWorldMod = WM
+
+local _wmConn = RunService.RenderStepped:Connect(function()
+	local ok, err = pcall(function()
+		if WM.ambient.enabled then WML.Ambient=WM.ambient.a; WML.OutdoorAmbient=WM.ambient.b end
+		if WM.colorShift.enabled then WML.ColorShift_Top=WM.colorShift.top; WML.ColorShift_Bottom=WM.colorShift.bottom end
+		if WM.time.enabled then WML.ClockTime=WM.time.value end
+		if WM.fog.enabled then WML.FogStart=WM.fog.s; WML.FogEnd=WM.fog.e; WML.FogColor=WM.fog.color end
+		if WM.light.enabled then WML.Brightness=WM.light.brightness; WML.ExposureCompensation=WM.light.exposure end
+		if WM.shadows.enabled then WML.GlobalShadows=true; WML.ShadowSoftness=WM.shadows.softness end
+	end)
+	if not ok then (warn or print)("[WorldMod] "..tostring(err)) end
+end)
+table.insert(getgenv().Moon_Connections, _wmConn)
+
+-- UI — new World tab
+local WorldTab = Window:DrawTab({ Name="World", Icon="globe", Type="Double" })
+local S_WMWorld = WorldTab:DrawSection({ Name="World", Position="left" })
+local S_WMLight = WorldTab:DrawSection({ Name="Lighting", Position="right" })
+
+-- Ambient
+S_WMWorld:AddToggle({ Name="Custom Ambient", Flag="WM_Ambient", Default=false,
+	Callback=function(v)
+		WM.ambient.enabled=v
+		if not v then WML.Ambient=WMBackup.Ambient; WML.OutdoorAmbient=WMBackup.OutdoorAmbient end
+	end })
+S_WMWorld:AddSlider({ Name="World Time (0-24)", Flag="WM_Time", Min=0, Max=24, Default=14,
+	Callback=function(v) WM.time.value=v end })
+S_WMWorld:AddToggle({ Name="Custom Time", Flag="WM_TimeEn", Default=false,
+	Callback=function(v) WM.time.enabled=v; if not v then WML.ClockTime=WMBackup.ClockTime end end })
+S_WMWorld:AddToggle({ Name="Remove Fog", Flag="WM_FogEn", Default=false,
+	Callback=function(v)
+		WM.fog.enabled=v
+		if v then WM.fog.s=100000; WM.fog.e=100001
+		else WML.FogStart=WMBackup.FogStart; WML.FogEnd=WMBackup.FogEnd end
+	end })
+S_WMWorld:AddSlider({ Name="Fog Start", Flag="WM_FogStart", Min=0, Max=5000, Default=0, Callback=function(v) WM.fog.s=v end })
+S_WMWorld:AddSlider({ Name="Fog End", Flag="WM_FogEnd", Min=0, Max=10000, Default=1000, Callback=function(v) WM.fog.e=v end })
+
+-- Lighting
+S_WMLight:AddToggle({ Name="Custom Lighting", Flag="WM_Light", Default=false,
+	Callback=function(v)
+		WM.light.enabled=v
+		if not v then WML.Brightness=WMBackup.Brightness; WML.ExposureCompensation=WMBackup.ExposureCompensation end
+	end })
+S_WMLight:AddSlider({ Name="Brightness", Flag="WM_Bright", Min=0, Max=10, Default=2, Callback=function(v) WM.light.brightness=v end })
+S_WMLight:AddSlider({ Name="Exposure", Flag="WM_Exposure", Min=-5, Max=5, Default=0, Callback=function(v) WM.light.exposure=v end })
+S_WMLight:AddToggle({ Name="Fullbright", Flag="WM_Fullbright", Default=false,
+	Callback=function(v)
+		if v then
+			WM.ambient.enabled=true; WM.ambient.a=Color3.new(1,1,1); WM.ambient.b=Color3.new(1,1,1)
+			WM.light.enabled=true; WM.light.brightness=6
+		else
+			WM.ambient.enabled=false; WML.Ambient=WMBackup.Ambient; WML.OutdoorAmbient=WMBackup.OutdoorAmbient
+			WM.light.enabled=false; WML.Brightness=WMBackup.Brightness
+		end
+	end })
+S_WMLight:AddToggle({ Name="Custom Shadows", Flag="WM_Shadows", Default=false,
+	Callback=function(v)
+		WM.shadows.enabled=v
+		if not v then WML.GlobalShadows=WMBackup.GlobalShadows; WML.ShadowSoftness=WMBackup.ShadowSoftness end
+	end })
+S_WMLight:AddSlider({ Name="Shadow Softness", Flag="WM_ShadowSoft", Min=0, Max=100, Default=14, Callback=function(v) WM.shadows.softness=v/100 end })
+S_WMLight:AddDropdown({ Name="Graphics Tech", Flag="WM_Tech", Default="ShadowMap",
+	Options={"ShadowMap","Unified","Future","Voxel","Compatibility"},
+	Callback=function(v)
+		pcall(function() WML.Technology = Enum.Technology[v] end)
+	end })
+print("[WorldMod] Loaded")
+end)
+
+-- ══════════════════════════════════════════════════════════════
+-- 8. LEAN SENSE ESP — Box 2D/3D, Health, Name, Distance, Tracer, Skeleton, Chams
+-- Hệ thống ESP riêng từ Lean, chạy song song với ESP gốc của tippc
+-- ══════════════════════════════════════════════════════════════
+pcall(function()
+
+local SE = {
+	active=true, loaded=false, objects={}, errors={}, scanAt=0,
+	shared={textSize=13, textFont=2, limitDistance=false, maxDistance=1000,
+		teamBasedColor=false, neutralColor=Color3.fromRGB(100,220,150)},
+	settings={}, chams={}, advanced={},
+}
+getgenv().LeanSense = SE
+
+local white, black = Color3.new(1,1,1), Color3.new(0,0,0)
+
+-- Default template per type
+local function SE_Template()
+	return {
+		enabled=false, box=false, box3d=false, boxColor={white,1}, box3dColor={white,1},
+		boxOutline=true, boxOutlineColor={black,1}, boxOutlineThickness=1,
+		boxFill=false, boxFillColor={Color3.fromRGB(150,80,255),0.2},
+		healthBar=false, healthyColor=Color3.new(0,1,0), dyingColor=Color3.new(1,0,0),
+		healthBarOutline=true, healthText=false, healthTextColor={white,1},
+		name=false, nameColor={white,1}, nameOutline=true,
+		distance=false, distanceColor={white,1}, distanceOutline=true,
+		tracer=false, tracerOrigin="Bottom", tracerColor={white,1}, tracerOutline=true,
+		offScreenArrow=false, offScreenArrowSize=15, offScreenArrowRadius=150, offScreenArrowColor={white,1},
+	}
+end
+for _, kind in ipairs({"npc","players","zombies","corpses"}) do
+	SE.settings[kind] = SE_Template()
+	SE.chams[kind] = {enabled=false, visibleColor=Color3.fromRGB(0,255,100), visibleIntensity=0.85,
+		occludedColor=white, occludedIntensity=0.25}
+	SE.advanced[kind] = {nameType="Name", skeleton=false, skeletonColor=white}
+end
+SE.settings.npc.enabled = true
+SE.settings.npc.name = true
+SE.settings.npc.distance = true
+
+local SE_RayParams = RaycastParams.new()
+SE_RayParams.FilterType = Enum.RaycastFilterType.Exclude
+SE_RayParams.IgnoreWater = true
+
+local SE_signs = {
+	Vector3.new(-1,-1,-1),Vector3.new(-1,1,-1),Vector3.new(-1,1,1),Vector3.new(-1,-1,1),
+	Vector3.new(1,-1,-1),Vector3.new(1,1,-1),Vector3.new(1,1,1),Vector3.new(1,-1,1),
+}
+local SE_edges = {{1,2},{2,3},{3,4},{4,1},{5,6},{6,7},{7,8},{8,5},{1,5},{2,6},{3,7},{4,8}}
+
+local function SE_Kind(actor)
+	local reg = Lean_GetReg()
+	if not reg or not actor or not actor.UID or reg[actor.UID] ~= actor then return nil end
+	local me = Lean_GetMe()
+	if actor.IsLocalPlayer or actor.Owner == LocalPlayer or actor == me then return nil end
+	if not Lean_Alive(actor) then return "corpses" end
+	if actor.Zombie then return "zombies" end
+	if actor.Owner == nil then return "npc" end
+	if typeof(actor.Owner) == "Instance" and actor.Owner:IsA("Player") then return "players" end
+end
+
+local function SE_PartCFrame(actor, part)
+	if not Lean_Alive(actor) then return part.CFrame end
+	local root = actor.RootPart
+	if not root or root:IsDescendantOf(workspace) then return part.CFrame end
+	local pose = typeof(actor.CFrame)=="CFrame" and actor.CFrame.Rotation or CFrame.new()
+	local af = pose + actor.Position
+	return af * root.CFrame:ToObjectSpace(part.CFrame)
+end
+
+local function SE_PartPos(actor, part)
+	return SE_PartCFrame(actor, part).Position
+end
+
+local function SE_NewDrawing(o, key, class, props)
+	if not Drawing then return end
+	local d = Drawing.new(class); d.Visible=false; d.Transparency=1
+	for k,v in pairs(props or {}) do d[k]=v end
+	o.drawings[key] = d; return d
+end
+local function SE_Drawing(o, key, class, props)
+	return o.drawings[key] or SE_NewDrawing(o, key, class, props)
+end
+local function SE_Hide(o)
+	for _, d in pairs(o.drawings) do d.Visible=false end
+	for _, d in pairs(o.adornments) do d.Visible=false end
+end
+local function SE_Destroy(o)
+	for _, d in pairs(o.drawings) do pcall(function() d:Remove() end) end
+	for _, d in pairs(o.adornments) do pcall(function() d:Destroy() end) end
+	for _, c in ipairs(o.rigListeners or {}) do c:Disconnect() end
+end
+local function SE_Rig(o)
+	o.rigDirty=false; o.parts={}; o.links={}
+	local seen={}
+	for _, part in pairs(o.actor.Parts or {}) do
+		if typeof(part)=="Instance" and part:IsA("BasePart") and part:IsDescendantOf(o.model) and not seen[part] then
+			o.parts[#o.parts+1]=part; seen[part]=true
+		end
+	end
+	if #o.parts==0 then
+		for _, part in ipairs(o.model:GetChildren()) do
+			if part:IsA("BasePart") and part ~= o.actor.RootPart and not seen[part] then
+				o.parts[#o.parts+1]=part; seen[part]=true
+			end
+		end
+	end
+	for _, joint in ipairs(o.model:GetDescendants()) do
+		if joint:IsA("Motor6D") and seen[joint.Part0] and seen[joint.Part1] then
+			o.links[#o.links+1] = {joint.Part0, joint.Part1}
+		end
+	end
+end
+
+local function SE_Sync()
+	if tick() < SE.scanAt then return end
+	SE.scanAt = tick() + 0.4
+	local reg = Lean_GetReg()
+	for actor, o in pairs(SE.objects) do
+		if not SE_Kind(actor) or actor.Character ~= o.model or not o.model.Parent then
+			SE_Destroy(o); SE.objects[actor] = nil
+		end
+	end
+	for _, actor in pairs(reg or {}) do
+		if SE_Kind(actor) and actor.Character and actor.Character.Parent then
+			local o = SE.objects[actor]
+			if not o then
+				o = {actor=actor, model=actor.Character, drawings={}, adornments={}, nextRay=0, rigListeners={}}
+				local function changed(inst)
+					if inst:IsA("BasePart") or inst:IsA("Motor6D") then o.rigDirty=true end
+				end
+				o.rigListeners[1] = o.model.DescendantAdded:Connect(changed)
+				o.rigListeners[2] = o.model.DescendantRemoving:Connect(changed)
+				SE.objects[actor] = o; SE_Rig(o)
+			elseif o.rigDirty then SE_Rig(o) end
+		end
+	end
+end
+
+local function SE_Color(value)
+	if typeof(value)=="Color3" then return value, 1 end
+	if type(value)=="table" then return value[1], math.clamp(value[2] or 1, 0, 1) end
+	return white, 1
+end
+local function SE_Style(d, value)
+	local c, a = SE_Color(value); d.Color=c; d.Transparency=a; d.Visible=a>0
+end
+local function SE_Line(o, key, a, b, value, thickness)
+	local d = SE_Drawing(o, key, "Line")
+	if not d then return end
+	d.From=a; d.To=b; d.Thickness=thickness or 1; SE_Style(d, value)
+end
+local function SE_Square(o, key, pos, size, value, filled, thickness)
+	local view = workspace.CurrentCamera.ViewportSize
+	local corner = (pos+size):Min(view); pos = pos:Max(Vector2.zero); size = corner-pos
+	if size.X<=0 or size.Y<=0 then return end
+	local d = SE_Drawing(o, key, "Square")
+	if not d then return end
+	d.Position=pos; d.Size=size; d.Filled=filled; d.Thickness=thickness or 1; SE_Style(d, value)
+end
+local function SE_TextAt(o, key, value, pos, col, outline)
+	local view = workspace.CurrentCamera.ViewportSize
+	if pos.X<0 or pos.Y<0 or pos.X>view.X or pos.Y>view.Y then return end
+	local d = SE_Drawing(o, key, "Text")
+	if not d then return end
+	d.Text=tostring(value); d.Position=pos; d.Size=SE.shared.textSize
+	d.Font=SE.shared.textFont; d.Center=true; d.Outline=outline; d.OutlineColor=black
+	SE_Style(d, col)
+end
+
+local function SE_BodyBounds(o, delta, position)
+	local lo, hi
+	for _, p in ipairs(o.parts) do
+		if p.Parent then
+			local cf=p.CFrame; local h=p.Size*0.5
+			local r,u,l=cf.RightVector,cf.UpVector,cf.LookVector
+			local ext=Vector3.new(
+				math.abs(r.X)*h.X+math.abs(u.X)*h.Y+math.abs(l.X)*h.Z,
+				math.abs(r.Y)*h.X+math.abs(u.Y)*h.Y+math.abs(l.Y)*h.Z,
+				math.abs(r.Z)*h.X+math.abs(u.Z)*h.Y+math.abs(l.Z)*h.Z)
+			local center = p.Position + delta
+			lo = lo and lo:Min(center-ext) or center-ext
+			hi = hi and hi:Max(center+ext) or center+ext
+		end
+	end
+	if not lo then return position, Vector3.new(2,5,2) end
+	return (lo+hi)*0.5, hi-lo
+end
+
+local SE_anchor = nil
+local function SE_Chams(o, camera, delta, position)
+	local kind = SE_Kind(o.actor)
+	local cfg = kind and SE.chams[kind]
+	if not cfg or not cfg.enabled then return end
+	if tick() >= o.nextRay then
+		o.nextRay = tick() + 0.12
+		local me = Lean_GetMe()
+		local ignore = {o.model, workspace.CurrentCamera}
+		if me and me.Character then ignore[#ignore+1] = me.Character end
+		SE_RayParams.FilterDescendantsInstances = ignore
+		o.partClear = {}
+		for _, p in ipairs(o.parts) do
+			if p:IsDescendantOf(o.model) then
+				local cf = SE_PartCFrame(o.actor, p)
+				for _, offset in ipairs({0, 0.35, -0.35}) do
+					local point = cf:PointToWorldSpace(Vector3.new(0, p.Size.Y*offset, 0))
+					local hit = workspace:Raycast(camera.CFrame.Position, point-camera.CFrame.Position, SE_RayParams)
+					if not hit then o.partClear[p]=true; break end
+				end
+			end
+		end
+	end
+	if not SE_anchor then
+		SE_anchor = Instance.new("Part")
+		SE_anchor.Name="LeanSenseAnchor"; SE_anchor.Size=Vector3.one*0.01
+		SE_anchor.Transparency=1; SE_anchor.Anchored=true
+		SE_anchor.CanCollide=false; SE_anchor.CanQuery=false; SE_anchor.CanTouch=false
+	end
+	SE_anchor.Parent = workspace.CurrentCamera
+	for i, p in ipairs(o.parts) do
+		if p:IsDescendantOf(o.model) and p ~= o.actor.RootPart then
+			local clear = o.partClear and o.partClear[p]
+			local col = clear and cfg.visibleColor or cfg.occludedColor
+			local alpha = clear and cfg.visibleIntensity or cfg.occludedIntensity
+			local ad = o.adornments[i]
+			if not ad then
+				ad = Instance.new("BoxHandleAdornment")
+				ad.Name="LeanSenseChams"; ad.Adornee=SE_anchor; ad.AlwaysOnTop=true
+				ad.ZIndex=3; ad.Parent=SE_anchor; o.adornments[i]=ad
+			end
+			ad.Size=p.Size; ad.CFrame=SE_PartCFrame(o.actor,p)
+			ad.Color3=col; ad.Transparency=1-math.clamp(alpha,0,1); ad.Visible=alpha>0
+		end
+	end
+end
+
+local function SE_RenderActor(o, camera, origin)
+	SE_Hide(o)
+	local a = o.actor
+	local kind = SE_Kind(a)
+	if not kind then return end
+	local t = SE.settings[kind]
+	if not t or not t.enabled then return end
+	if not a.Character or a.Character ~= o.model or not o.model.Parent then return end
+	local root = a.RootPart
+	local position = Lean_Pos(a) or (root and root.Position)
+	if not position then return end
+	local dist = (position - origin).Magnitude
+	if SE.shared.limitDistance and dist > SE.shared.maxDistance then return end
+	local view = camera.ViewportSize
+	local sp, onScreen = camera:WorldToViewportPoint(position)
+	if sp.Z <= 0.05 and not onScreen then return end
+
+	local delta = root and position - root.Position or Vector3.zero
+	local needsBox = t.box or t.box3d or t.boxFill or t.name or t.distance or t.healthBar or t.tracer
+	local min, max, corners
+	if needsBox then
+		local center, size = SE_BodyBounds(o, delta, position)
+		corners = {}
+		for i, sign in ipairs(SE_signs) do
+			local p = camera:WorldToViewportPoint(center + size*0.5*sign)
+			corners[i] = p
+			if p.Z > 0.05 then
+				local v = Vector2.new(p.X, p.Y)
+				min = min and min:Min(v) or v; max = max and max:Max(v) or v
+			end
+		end
+	end
+	local boxVisible = min and max and max.X>=0 and max.Y>=0 and min.X<=view.X and min.Y<=view.Y
+	if onScreen or boxVisible then SE_Chams(o, camera, delta, position) end
+	if not boxVisible then
+		-- Off-screen arrow
+		if t.offScreenArrow and not onScreen then
+			local rel = camera.CFrame:PointToObjectSpace(position)
+			local dir = Vector2.new(rel.X, rel.Z)
+			if dir.Magnitude > 0.0001 then dir = dir.Unit end
+			local center2 = view * 0.5
+			local radius = math.min(t.offScreenArrowRadius, math.min(view.X, view.Y)*0.5 - t.offScreenArrowSize - 4)
+			local tip = center2 + dir*radius
+			local back = tip - dir*t.offScreenArrowSize
+			local side = Vector2.new(-dir.Y, dir.X) * t.offScreenArrowSize * 0.5
+			local d = SE_Drawing(o, "arrow", "Triangle")
+			if d then d.PointA=tip; d.PointB=back+side; d.PointC=back-side; d.Filled=true; SE_Style(d,t.offScreenArrowColor) end
+		end
+		return
+	end
+	local size = max - min; local cx = (min.X+max.X)*0.5
+	if t.boxFill then SE_Square(o,"fill",min,size,t.boxFillColor,true,1) end
+	if t.box then
+		if t.boxOutline then SE_Square(o,"boxOut",min,size,t.boxOutlineColor,false,1+2*t.boxOutlineThickness) end
+		SE_Square(o,"box",min,size,t.boxColor,false,1)
+	end
+	if t.box3d and corners then
+		for i, edge in ipairs(SE_edges) do
+			local p,q = corners[edge[1]], corners[edge[2]]
+			if p and q and p.Z>0.05 and q.Z>0.05 then
+				local v,w = Vector2.new(p.X,p.Y), Vector2.new(q.X,q.Y)
+				if t.boxOutline then SE_Line(o,"eO"..i,v,w,t.boxOutlineColor,1+2*t.boxOutlineThickness) end
+				SE_Line(o,"e"..i,v,w,t.box3dColor,1)
+			end
+		end
+	end
+	local hp = type(a.Health)=="number" and a.Health or 0
+	local maxhp = a.MaxHealth or 100
+	local ratio = math.clamp(hp/math.max(1,maxhp),0,1)
+	if t.healthBar then
+		local bottom = Vector2.new(min.X-5, max.Y)
+		if t.healthBarOutline then SE_Line(o,"hpOut",bottom+Vector2.new(0,1),Vector2.new(min.X-5,min.Y-1),black,4) end
+		SE_Line(o,"hp",bottom,Vector2.new(min.X-5,max.Y-size.Y*ratio),t.dyingColor:Lerp(t.healthyColor,ratio),2)
+	end
+	if t.name then
+		local label = (kind=="players" and a.Owner and a.Owner.Name) or o.model.Name
+		SE_TextAt(o,"name",label,Vector2.new(cx,min.Y-SE.shared.textSize-3),t.nameColor,t.nameOutline)
+	end
+	local textY = max.Y + 2
+	if t.distance then SE_TextAt(o,"dist",string.format("%.0f studs",dist),Vector2.new(cx,textY),t.distanceColor,t.distanceOutline) end
+	if t.tracer then
+		local y = t.tracerOrigin=="Top" and 0 or (t.tracerOrigin=="Middle" and view.Y*0.5 or view.Y)
+		local from2, to2 = Vector2.new(view.X*0.5,y), Vector2.new(cx,max.Y)
+		if t.tracerOutline then SE_Line(o,"tracOut",from2,to2,black,3) end
+		SE_Line(o,"trac",from2,to2,t.tracerColor,1)
+	end
+	if SE.advanced[kind] and SE.advanced[kind].skeleton then
+		for i, pair in ipairs(o.links) do
+			if pair[1].Parent and pair[2].Parent then
+				local p2,po = camera:WorldToViewportPoint(pair[1].Position+delta)
+				local q2,qo = camera:WorldToViewportPoint(pair[2].Position+delta)
+				if p2.Z>0.05 and q2.Z>0.05 and (po or qo) then
+					SE_Line(o,"bone"..i,Vector2.new(p2.X,p2.Y),Vector2.new(q2.X,q2.Y),SE.advanced[kind].skeletonColor,1)
+				end
+			end
+		end
+	end
+end
+
+local function SE_Render()
+	if not SE.active or not SE.loaded then return end
+	SE_Sync()
+	local cam = workspace.CurrentCamera; if not cam then return end
+	local me = Lean_GetMe()
+	local origin = me and Lean_Pos(me) or cam.CFrame.Position
+	for actor, o in pairs(SE.objects) do
+		local ok, err = pcall(SE_RenderActor, o, cam, origin)
+		if not ok and not SE.errors[tostring(err)] then
+			SE.errors[tostring(err)] = true
+			(warn or print)("[LeanESP] "..tostring(err))
+		end
+	end
+end
+
+-- Start rendering
+SE.loaded = true
+local _seConn = RunService.RenderStepped:Connect(function()
+	local ok, err = pcall(SE_Render)
+	if not ok then (warn or print)("[LeanESP] "..tostring(err)) end
+end)
+table.insert(getgenv().Moon_Connections, _seConn)
+
+-- UI — new "Lean ESP" tab
+local LeanESPTab = Window:DrawTab({ Name="Lean ESP", Icon="scan-eye", Type="Double" })
+
+local function SE_AddSection(tab, kind, label)
+	local sect = tab:DrawSection({ Name=label, Position="left" })
+	local t = SE.settings[kind]
+	local chams = SE.chams[kind]
+	local adv = SE.advanced[kind]
+	sect:AddToggle({ Name="ESP Enabled", Flag="SE_"..kind.."_en", Default=t.enabled, Callback=function(v) t.enabled=v end })
+	sect:AddToggle({ Name="Box 2D", Flag="SE_"..kind.."_box", Default=false, Callback=function(v) t.box=v end })
+	sect:AddToggle({ Name="Box 3D", Flag="SE_"..kind.."_box3d", Default=false, Callback=function(v) t.box3d=v end })
+	sect:AddToggle({ Name="Health Bar", Flag="SE_"..kind.."_hp", Default=false, Callback=function(v) t.healthBar=v end })
+	sect:AddToggle({ Name="Name", Flag="SE_"..kind.."_name", Default=t.name, Callback=function(v) t.name=v end })
+	sect:AddToggle({ Name="Distance", Flag="SE_"..kind.."_dist", Default=t.distance, Callback=function(v) t.distance=v end })
+	sect:AddToggle({ Name="Tracer", Flag="SE_"..kind.."_trac", Default=false, Callback=function(v) t.tracer=v end })
+	sect:AddToggle({ Name="Off-Screen Arrow", Flag="SE_"..kind.."_osa", Default=false, Callback=function(v) t.offScreenArrow=v end })
+	sect:AddToggle({ Name="Skeleton", Flag="SE_"..kind.."_skel", Default=false, Callback=function(v) adv.skeleton=v end })
+	sect:AddToggle({ Name="Chams", Flag="SE_"..kind.."_chams", Default=false, Callback=function(v) chams.enabled=v end })
+end
+
+SE_AddSection(LeanESPTab, "npc", "NPCs")
+SE_AddSection(LeanESPTab, "players", "Players")
+SE_AddSection(LeanESPTab, "zombies", "Zombies")
+SE_AddSection(LeanESPTab, "corpses", "Corpses")
+
+local S_SEShared = LeanESPTab:DrawSection({ Name="Shared Settings", Position="right" })
+S_SEShared:AddSlider({ Name="Text Size", Flag="SE_TextSize", Min=8, Max=24, Default=13, Callback=function(v) SE.shared.textSize=v end })
+S_SEShared:AddToggle({ Name="Limit Distance", Flag="SE_LimitDist", Default=false, Callback=function(v) SE.shared.limitDistance=v end })
+S_SEShared:AddSlider({ Name="Max Distance", Flag="SE_MaxDist", Min=50, Max=2000, Default=1000, Suffix=" studs", Callback=function(v) SE.shared.maxDistance=v end })
+S_SEShared:AddToggle({ Name="Team Based Color", Flag="SE_TeamColor", Default=false, Callback=function(v) SE.shared.teamBasedColor=v end })
+print("[LeanESP] Loaded")
+end)
+
+print("[Lean Modules] All features loaded")
