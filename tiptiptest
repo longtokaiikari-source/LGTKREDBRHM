@@ -1,4 +1,4 @@
-local Repository = "https://raw.githubusercontent.com/longhazem/libba/main/"
+local Repository = "https://raw.githubusercontent.com/longhazem/lib-obsidian/main/"
 
 local function GetLoadstringSource(Url)
 	local function tryRequest(fn, args)
@@ -20,7 +20,7 @@ local function GetLoadstringSource(Url)
 	end
 	if not body then error("[TokaiHub] HTTP failed: " .. tostring(Url), 2) end
 	if body:match("^429") or body:lower():match("rate limit") then
-		(warn or print)("[TokaiHub] Rate limit — cho 10s roi thu lai")
+		warn("[TokaiHub] Rate limit — cho 10s roi thu lai")
 		task.wait(10)
 		return GetLoadstringSource(Url)
 	end
@@ -37,18 +37,18 @@ end
 
 local function LoadRemote(Url)
 	local Source = GetLoadstringSource(Url)
-	if string.find(Url, "/source.lua", 1, true) then Source = PatchObsidianSource(Source) end
+	if string.find(Url, "/Library.lua", 1, true) then Source = PatchObsidianSource(Source) end
 	local Chunk, LoadError = loadstring(Source)
 	if not Chunk then error("loadstring failed for " .. tostring(Url) .. ": " .. tostring(LoadError), 2) end
 	return Chunk()
 end
 
-local Library = LoadRemote(Repository .. "source.lua")
+local Library = LoadRemote(Repository .. "Library.lua")
 local ThemeManager = LoadRemote(Repository .. "addons/ThemeManager.lua")
 local SaveManager = LoadRemote(Repository .. "addons/SaveManager.lua")
 
-local Options = getgenv().Options or {}
-local Toggles = getgenv().Toggles or {}
+local Options = Library.Options
+local Toggles = Library.Toggles
 
 local MoonUI = { Scale = { Window = 1 } }
 function MoonUI:SetTheme() end
@@ -56,9 +56,13 @@ function MoonUI:RefreshCurrentColor() end
 function MoonUI:ConfigManager(Data) return Data or {} end
 function MoonUI.newNotify()
 	return { new = function(Data)
-		local text = (Data and Data.Title) or "Tokaihub"
-		if Data and (Data.Content or Data.Description) then text = text .. " — " .. (Data.Content or Data.Description) end
-		pcall(function() Library:Notify(text, (Data and Data.Duration) or 5) end)
+		pcall(function()
+			Library:Notify({
+				Title       = (Data and Data.Title) or "Tokaihub",
+				Description = (Data and (Data.Content or Data.Description)) or "",
+				Time        = (Data and Data.Duration) or 5,
+			})
+		end)
 	end }
 end
 
@@ -120,7 +124,7 @@ local function WrapSection(Groupbox)
 		local Input = Groupbox:AddInput(Flag, {
 			Text = NormalizeUIString(Data.Name or Flag, Flag),
 			Default = Data.Default or "",
-			NumericOnly = Data.NumericOnly or false,
+			Numeric = Data.NumericOnly or false,
 			Placeholder = Data.Placeholder or "",
 			Tooltip = Data.Tooltip,
 		})
@@ -140,27 +144,27 @@ local function WrapTab(Tab)
 end
 
 function MoonUI.new(Data)
-	local Window = Library:CreateWindow({ Title = "Tokaihub", Center = true, AutoShow = true, TabPadding = 8, MenuFadeTime = 0.2 })
+	local Window = Library:CreateWindow({ Title = "Tokaihub", Footer = "discord.gg/6zSx7gUeMQ", NotifySide = "Right", ShowCustomCursor = false })
 	local SettingsTab
 	local Wrapped = {
 		Raw = Window,
 		DrawTab = function(_, TabData)
 			local Name = TabData.Name or "Tab"
-			local Tab = Window:AddTab(Name)
+			local Tab = Window:AddTab(Name, "", Name)
 			if Name == "Settings" or Name == "System" then SettingsTab = Tab end
 			return WrapTab(Tab)
 		end,
 		DrawConfig = function(_, ConfigData)
-			SettingsTab = SettingsTab or Window:AddTab("Settings")
+			SettingsTab = SettingsTab or Window:AddTab("Settings", "settings", "UI settings")
 			ThemeManager:SetLibrary(Library); SaveManager:SetLibrary(Library)
 			SaveManager:IgnoreThemeSettings(); SaveManager:SetIgnoreIndexes({"MenuKeybind"})
 			ThemeManager:SetFolder("Tokaihub"); SaveManager:SetFolder("Tokaihub/specific-game")
 			if SaveManager.SetSubFolder then SaveManager:SetSubFolder("specific-place") end
-			SaveManager:BuildConfigSection(SettingsTab); ThemeManager:ApplyToTab(SettingsTab)
+			SaveManager:BuildConfigSection(SettingsTab); ThemeManager:AddThemeOptions(SettingsTab)
 			SaveManager:LoadAutoloadConfig()
 			return { Init = function() end }
 		end,
-		SetMenuKey = function(_, Key) task.defer(function() Library.ToggleKeybind = getgenv().Options and getgenv().Options.MenuKeybind end) end,
+		SetMenuKey = function(_, Key) task.defer(function() Library.ToggleKeybind = Library.Options and Library.Options.MenuKeybind end) end,
 		Unload = function() Library:Unload() end,
 	}
 	return Wrapped
@@ -240,7 +244,7 @@ local Config = {
 	ShowNames = true, ShowDistance = true, ShowHealth = true, ShowWeaponInfo = true, BoxStyle = "Full",
 	ShowVehicleBox = true, VehicleBoxStyle = "Full", ShowVehicleName = true, ShowVehicleHealth = true, VehicleHealthBarSide = "Bottom",
 	TextScale = 1.20, DynamicTextScaling = true, MaxDistance = 2000,
-	NoRecoil = false, NoSpread = false, UnlockFiremodes = false, CustomRPM = false, RPMValue = 800, ForceHeadshot = false,
+	NoRecoil = false, NoSpread = false, UnlockFiremodes = false, CustomRPM = false, RPMValue = 800,
 	SilentAim = false, SilentAimFOV = 100, SilentAimHitChance = 100, SilentAimTargetPart = "Head",
 	RageMode = false, Rage_LookAt = false, Rage_FOV = 360, Rage_Range = 500, Rage_TargetPart = "Head",
 	ShowFOV = false, Prediction = false, BulletDrop = false, ShowPrediction = false,
@@ -602,27 +606,6 @@ local function IsIgnored(part)
 	return false
 end
 
--- Resolve correct world-space position of a part on any actor, including
--- NPCs mounted inside a vehicle whose character lives in a WorldModel.
--- Parts in a WorldModel are in local (vehicle-relative) space; actor.Position
--- and actor.CFrame are always world-space replication state.
-local function GetPartWorldPos(actor, part)
-	if not part then return actor.Position end
-	local char = actor.Character
-	if not char then return actor.Position end
-	local root = char.PrimaryPart or char:FindFirstChild("HumanoidRootPart")
-	-- Root in workspace: part.CFrame.Position is already world space.
-	if root and root:IsDescendantOf(Workspace) then
-		return part.CFrame.Position
-	end
-	-- Parked WorldModel rig (NPC seated in a vehicle): reconstruct from
-	-- the replicated actor state, same method MainSource Combat.PartCFrame uses.
-	if not root then return actor.Position end
-	local pose = typeof(actor.CFrame) == "CFrame" and actor.CFrame.Rotation or CFrame.new()
-	local actorFrame = pose + actor.Position
-	return (actorFrame * root.CFrame:ToObjectSpace(part.CFrame)).Position
-end
-
 local function IsVisible(targetActor,targetPart,origin,isPriority)
 	if not targetPart or not targetPart.Parent then return false end
 	local now=tick(); local uid=targetActor.UID
@@ -639,9 +622,7 @@ local function IsVisible(targetActor,targetPart,origin,isPriority)
 	end
 	local character=targetPart.Parent
 	local originPos=origin or Camera.CFrame.Position
-	-- GetPartWorldPos handles vehicle-mounted NPCs whose parts are in local space
-	local targetWorldPos=GetPartWorldPos(targetActor,targetPart)
-	local direction=(targetWorldPos-originPos)
+	local direction=(targetPart.Position-originPos)
 	local dist=direction.Magnitude
 	if not targetActor.ViewportOnScreen and (dist>100) then
 		VisCache[uid]={result=false,last=now}; return false
@@ -653,28 +634,17 @@ local function IsVisible(targetActor,targetPart,origin,isPriority)
 		local myActor=ReplicatorService.LocalActor
 		if myActor.Seat and myActor.Seat.Model then table.insert(VisFilterTable,myActor.Seat.Model) end
 	end
-	-- Filter the vehicle the target NPC is seated in so it doesn't block visibility
-	if targetActor.Seat and targetActor.Seat.Model then
-		table.insert(VisFilterTable,targetActor.Seat.Model)
-	end
 	VisRayParams.FilterDescendantsInstances=VisFilterTable
 	local isVisible=false
 	local result=Workspace:Raycast(originPos,direction,VisRayParams)
-	-- Check both character descendant and ActorUID attribute (render rig vs collision body)
-	local function hitBelongsToTarget(instance)
-		if instance:IsDescendantOf(character) then return true end
-		local attrUID = instance:GetAttribute("ActorUID")
-		if attrUID and attrUID == uid then return true end
-		return false
-	end
 	if not result then isVisible=true
-	elseif hitBelongsToTarget(result.Instance) then isVisible=true
+	elseif result.Instance:IsDescendantOf(character) then isVisible=true
 	else
 		local penetrations=0; local dirUnit=direction.Unit
 		while penetrations<2 do
 			if not result then isVisible=true; break end
 			local hitPart=result.Instance
-			if hitBelongsToTarget(hitPart) then isVisible=true; break end
+			if hitPart:IsDescendantOf(character) then isVisible=true; break end
 			if IsIgnored(hitPart) then
 				table.insert(VisFilterTable,hitPart)
 				VisRayParams.FilterDescendantsInstances=VisFilterTable
@@ -703,10 +673,7 @@ GetCombatTarget = function(mode)
 			if not dist or dist<=0 then dist=(activeActor.Position-checkOrigin).Magnitude end
 			if dist<=maxDistance then
 				local targetPart=activeActor.Parts and activeActor.Parts[targetPartName]
-				if targetPart and IsVisible(activeActor,targetPart,checkOrigin,true) then
-					getgenv()._combatTargetWorldPos=GetPartWorldPos(activeActor,targetPart)
-					return targetPart,activeActor
-				end
+				if targetPart and IsVisible(activeActor,targetPart,checkOrigin,true) then return targetPart,activeActor end
 			end
 		end
 		ActorManager.SelectedActor_RB=nil; ActorManager.SelectedTarget_RB=nil
@@ -714,8 +681,8 @@ GetCombatTarget = function(mode)
 	local candidates=getgenv()._targetCandidates or table.create(64)
 	table.clear(candidates); getgenv()._targetCandidates=candidates
 	local now=tick(); local ignoredTargets=ActorManager._ignoredTargets
-	local mouseX,mouseY
-	if useFOV then local sc=Camera.ViewportSize/2; mouseX,mouseY=sc.X,sc.Y end
+	local mouse,mouseX,mouseY
+	if useFOV then mouse=UserInputService:GetMouseLocation(); mouseX,mouseY=mouse.X,mouse.Y end
 	local enemyList
 	if mode=="Rage" and ActorManager._sectors and ActorManager._playerSector then
 		enemyList={}
@@ -737,17 +704,18 @@ GetCombatTarget = function(mode)
 		local char=actor.Character; if not char then continue end
 		local dist=actor.LOD_Distance
 		if not dist or dist<=0 then
-			-- actor.Position is the replicated world position — always correct
-			-- even when the NPC's character is inside a vehicle WorldModel
-			local delta=actor.Position-checkOrigin
+			local root=char.PrimaryPart or char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
+			if not root then continue end
+			local delta=root.Position-checkOrigin
 			dist=math.sqrt(delta.X*delta.X+delta.Y*delta.Y+delta.Z*delta.Z)
 		end
 		if dist>maxDistance then continue end
 		local score=dist
 		if useFOV then
 			if not actor.ViewportOnScreen and dist>50 then continue end
-			-- Use actor.Position (world space) not root.Position (may be vehicle-local)
-			local pos,onScreen=Camera:WorldToViewportPoint(actor.Position)
+			local root=char.PrimaryPart or char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
+			if not root then continue end
+			local pos,onScreen=Camera:WorldToViewportPoint(root.Position)
 			if not onScreen then continue end
 			local dx=pos.X-mouseX; local dy=pos.Y-mouseY
 			local screenDistSq=(dx*dx)+(dy*dy)
@@ -763,11 +731,7 @@ GetCombatTarget = function(mode)
 		local part=char:FindFirstChild(targetPartName)
 		if not part then part=char:FindFirstChild("Head") or char:FindFirstChild("UpperTorso") end
 		if part and part.Parent then
-			if IsVisible(actor,part,checkOrigin) then
-				-- Cache world pos so every muzzle/discharge hook uses correct coords
-				getgenv()._combatTargetWorldPos=GetPartWorldPos(actor,part)
-				return part,actor
-			end
+			if IsVisible(actor,part,checkOrigin) then return part,actor end
 			if getgenv().RaycastBudget<=0 then break end
 		end
 	end
@@ -793,9 +757,7 @@ local function HookController(controller)
 			local combatTarget=ActorManager.SelectedTarget_RB or ActorManager.SelectedTarget_SA
 			local targetActor=ActorManager.SelectedActor_RB or ActorManager.SelectedActor_SA
 			if (Config.SilentAim or Config.RageMode) and combatTarget and targetActor then
-				-- Use cached world-space pos; combatTarget.Position is local for vehicle NPCs
-				local targetPos=getgenv()._combatTargetWorldPos or combatTarget.Position
-				local gravity=32.2; local muzzle_velocity=2000
+				local targetPos=combatTarget.Position; local gravity=32.2; local muzzle_velocity=2000
 				if self._firearm and self._firearm.Tune then
 					local caliberName=self._firearm.Tune.Caliber; local barrelLen=self._firearm.Tune.Barrel
 					if BulletService and BulletService.GetInfo then
@@ -804,11 +766,7 @@ local function HookController(controller)
 					end
 				end
 				local targetVelocity=Vector3_new(0,0,0)
-				if targetActor._oldDirection then
-					targetVelocity=targetActor._oldDirection*60
-				elseif targetActor.Seat and targetActor.Seat.Model and targetActor.Seat.Model.PrimaryPart then
-					-- NPC in vehicle: use vehicle body velocity for lead calculation
-					targetVelocity=targetActor.Seat.Model.PrimaryPart.AssemblyLinearVelocity or Vector3_new(0,0,0)
+				if targetActor._oldDirection then targetVelocity=targetActor._oldDirection*60
 				elseif combatTarget.Parent and combatTarget.Parent.PrimaryPart then
 					targetVelocity=combatTarget.Parent.PrimaryPart.AssemblyLinearVelocity or Vector3_new(0,0,0)
 				end
@@ -840,8 +798,7 @@ local function HookController(controller)
 						local tool=self._actor.Character:FindFirstChild("HumanoidRootPart")
 						if tool then muzzlePos=tool.Position end
 					end
-					local targetPos=getgenv()._combatTargetWorldPos or targetHead.Position
-					local direction=(targetPos-muzzlePos).Unit
+					local targetPos=targetHead.Position; local direction=(targetPos-muzzlePos).Unit
 					if self._actor and self._actor.IsLocalPlayer and ReplicatorService and ReplicatorService.LocalActor and ReplicatorService.LocalActor.Character then
 						local root=ReplicatorService.LocalActor.Character.PrimaryPart
 						if root then
@@ -858,11 +815,13 @@ local function HookController(controller)
 	end
 end
 
-local FOVCircle=Drawing.new("Circle")
-FOVCircle.Thickness=1
-pcall(function() FOVCircle.NumSides=60 end)
-FOVCircle.Radius=Config.SilentAimFOV
-FOVCircle.Filled=false; FOVCircle.Visible=false; FOVCircle.Color=Color3.fromRGB(255,255,255)
+local FOVCircle = Drawing.new("Circle")
+FOVCircle.Thickness = 1
+FOVCircle.NumSides = 60
+FOVCircle.Radius = Config.SilentAimFOV
+FOVCircle.Filled = false
+FOVCircle.Visible = false
+FOVCircle.Color = Color3.fromRGB(255, 255, 255)
 
 getgenv().VelocityCache={}
 getgenv().PredictionDot=Drawing.new("Circle")
@@ -1156,7 +1115,7 @@ function SetupHooks()
 		end
 	end
 	else
-		(warn or print)("[ESP] Could not find CharacterController.Update to hook!")
+		warn("[ESP] Could not find CharacterController.Update to hook!")
 	end
 end
 
@@ -1175,7 +1134,7 @@ local function InitializeServices()
 				local targetHead=ActorManager.SelectedTarget_RB or ActorManager.SelectedTarget_SA
 				local targetActor=ActorManager.SelectedActor_RB or ActorManager.SelectedActor_SA
 				if targetHead then
-					local targetPos=getgenv()._combatTargetWorldPos or targetHead.Position; local muzzle_velocity=2000
+					local targetPos=targetHead.Position; local muzzle_velocity=2000
 					if p49==lastUsedCaliber then muzzle_velocity=lastUsedVelocity
 					elseif p49 and BulletService.GetInfo then
 						local vel=BulletService:GetInfo(p49,p50)
@@ -1197,26 +1156,6 @@ local function InitializeServices()
 			return BulletService._originalDischarge(self,originCF,p49,p50,p51,p52,p53,p54,p55,p56,p57)
 		end
 		getgenv()._BulletServiceHooked=true
-	end
-	-- Force Headshot: hook _bulletProcess to redirect any hit part to Head before damage is applied
-	if ReplicatorService and type(ReplicatorService._bulletProcess)=="function" then
-		if not ReplicatorService._originalBulletProcess then
-			ReplicatorService._originalBulletProcess=ReplicatorService._bulletProcess
-			ReplicatorService._bulletProcess=function(self,uid,replicate,position,part,normal,material,elapsed,...)
-				if Config.ForceHeadshot and replicate and part and type(self.GetFromBodyPart)=="function" then
-					local ok,actorUID,actor=pcall(function() return self:GetFromBodyPart(part) end)
-					if ok and actor and actor.Alive and actor.Character and not actor._isTeammate then
-						local head=actor.Parts and actor.Parts.Head
-						if head and head.Parent and head:IsDescendantOf(actor.Character) then
-							part=head
-							-- Use reconstructed world pos for vehicle-mounted NPCs
-							position=GetPartWorldPos(actor,head)
-						end
-					end
-				end
-				return ReplicatorService._originalBulletProcess(self,uid,replicate,position,part,normal,material,elapsed,...)
-			end
-		end
 	end
 	if Recoiler then
 		local rc=Recoiler
@@ -1262,6 +1201,7 @@ local function UpdateCombat(frameId)
 				local chamberCount = (equippedController._item and equippedController._item.MetaData and equippedController._item.MetaData.Chamber) and 1 or 0
 				local totalAmmo = magCapacity + chamberCount
 				local isReloading = equippedController._reloading == true
+				-- Stuck detection: _reloading true > 4s → force reset
 				if isReloading then
 					local reloadStart = getgenv()._autoReloadStart or now_ar
 					getgenv()._autoReloadStart = reloadStart
@@ -1421,11 +1361,13 @@ local function UpdateCombat(frameId)
 			end
 		end
 	end
+	local mouse = UserInputService:GetMouseLocation()
 	if FOVCircle then
-		pcall(function() FOVCircle.Radius=Config.SilentAimFOV end)
-		local fovShow=Config.SilentAim and Config.ShowFOV
-		pcall(function() FOVCircle.Visible=fovShow end)
-		if fovShow then local sc=Camera.ViewportSize/2; pcall(function() FOVCircle.Position=Vector2.new(sc.X,sc.Y) end) end
+		FOVCircle.Visible = Config.SilentAim and Config.ShowFOV
+		if FOVCircle.Visible then
+			FOVCircle.Position = mouse
+			FOVCircle.Radius = Config.SilentAimFOV
+		end
 	end
 	local targetPart=targetPart_SA; local targetActor=ActorManager.SelectedActor_SA
 	if targetPart then
@@ -1441,7 +1383,7 @@ local function UpdateCombat(frameId)
 		local dot=getgenv().PredictionDot
 		if Config.ShowPrediction and targetPart then
 			local muzzlePos=GetMuzzlePosition() or Camera.CFrame.Position
-			local targetPos=getgenv()._combatTargetWorldPos or targetPart.Position; local targetVel=getgenv()._lastPredVel or Vector3_new(0,0,0)
+			local targetPos=targetPart.Position; local targetVel=getgenv()._lastPredVel or Vector3_new(0,0,0)
 			local gravity=32.2; local aimPos,_=SolveLead(muzzlePos,targetPos,targetVel,activeVelocity,gravity)
 			local screenPos,onScreen=Camera:WorldToViewportPoint(aimPos)
 			if onScreen then dot.Position=Vector2_new(screenPos.X,screenPos.Y); dot.Color=cfg.PredictionColor or Color3_fromHSV(0.33,1,1); dot.Visible=true
@@ -1572,24 +1514,14 @@ local function UpdateESPForActor(uid,espData,frameId,cachedCfg,localSquad)
 	if not actor or not actor.Alive then RemoveESP(uid); return end
 	if not ShouldShowEntity(actor,entityType,localSquad) then SetAllVisible(espData.Drawing,espData,false); return end
 	-- Tính distance thực nếu LOD_Distance không có
-	local distance = actor.LOD_Distance
-	if not distance or distance <= 0 then
-		local pos = actor.Position
-		if not pos and actor.Character and actor.Character.PrimaryPart then
-			pos = actor.Character.PrimaryPart.Position
-		end
-		if pos then
-			distance = (Camera.CFrame.Position - pos).Magnitude
-		else
-			distance = 0
-		end
-	end
+	local distance = actor.LOD_Distance or 9999
 	if distance > cachedCfg.MaxDistance then
 		SetAllVisible(espData.Drawing,espData,false)
 		if espData.SimpleESP and espData.SimpleESP.Box then pcall(function() espData.SimpleESP.Box.Visible=false end) end
 		return
 	end
-	if distance > 1500 and (frameId%2) ~= 0 then return end
+	if distance > 1500 and (frameId % 4) ~= 0 then return end
+	if distance > 500 and (frameId % 2) ~= 0 then return end
 	if cachedCfg.SimpleESP then
 		SetAllVisible(espData.Drawing,espData,false)
 		local sESP=espData.SimpleESP
@@ -1603,7 +1535,7 @@ local function UpdateESPForActor(uid,espData,frameId,cachedCfg,localSquad)
 		return
 	end
 	local drawings=espData.Drawing
-	local worldPos = actor.Position
+	local worldPos = actor.Position or (actor.RootPart and actor.RootPart.Position)
 	if not worldPos then
 		if actor.Character then
 			local pp = actor.Character.PrimaryPart or actor.Character:FindFirstChild("Head")
@@ -1612,8 +1544,15 @@ local function UpdateESPForActor(uid,espData,frameId,cachedCfg,localSquad)
 	end
 	if not worldPos then SetAllVisible(drawings,espData,false); return end
 	local screen_point,onScreen=Camera:WorldToViewportPoint(worldPos)
-	-- Chỉ dùng onScreen — reliable trên PC
-	if not onScreen then SetAllVisible(drawings,espData,false); return end
+	local engineVisible = actor.LOD_OnScreen or (distance < 128 and actor.ViewportOnScreen)
+	if not engineVisible then
+		SetAllVisible(drawings, espData, false)
+		return
+	end
+	if not onScreen then
+		SetAllVisible(drawings, espData, false)
+		return
+	end
 	local screenPos=Vector2_new(screen_point.X,screen_point.Y)
 	SetAllVisible(drawings,espData,true)
 	if espData.Highlight then espData.Highlight.FillColor=espData.Color;espData.Highlight.OutlineColor=espData.Color end
@@ -1901,7 +1840,6 @@ S_GunMods:AddToggle({
 })
 S_GunMods:AddToggle({ Name="No Recoil", Flag="Combat_NoRecoil", Default=false, Callback=function(v) Config.NoRecoil=v end })
 S_GunMods:AddToggle({ Name="No Spread", Flag="Combat_NoSpread", Default=false, Callback=function(v) Config.NoSpread=v end })
-S_GunMods:AddToggle({ Name="Force Headshot", Flag="Combat_ForceHeadshot", Default=false, Callback=function(v) Config.ForceHeadshot=v end })
 S_GunMods:AddToggle({ Name="Unlock Firemodes", Flag="Combat_Firemodes", Default=false, Callback=function(v) Config.UnlockFiremodes=v end })
 S_GunMods:AddToggle({ Name="Custom RPM", Flag="Combat_CustomRPM", Default=false, Callback=function(v) Config.CustomRPM=v end })
 S_GunMods:AddSlider({ Name="RPM Value", Min=100, Max=10000, Default=800, Flag="Combat_RPMValue", Callback=function(v) Config.RPMValue=v end })
@@ -2062,8 +2000,8 @@ MenuGroup:AddDropdown({
 MenuGroup:AddDropdown({ Name="DPI Scale", Flag="DPIDropdown", Values={"50%","75%","100%","125%","150%","175%","200%"}, Default="100%", Callback=function(value)
 	value=tostring(value):gsub("%%",""); local DPI=tonumber(value)
 	if DPI and Library.SetDPIScale then Library:SetDPIScale(DPI) end end })
-MenuGroup:AddSlider({ Name="Corner Radius", Flag="UICornerSlider", Default=Library.CornerRadius or 8, Min=0, Max=20, Rounding=0, Callback=function(value)
-	if Window.Raw and Window.Raw.SetCornerRadius then Window.Raw:SetCornerRadius(value) end end })
+MenuGroup:AddSlider({ Name="Corner Radius", Flag="UICornerSlider", Default=(Library.CornerRadius or 8), Min=0, Max=20, Rounding=0, Callback=function(value)
+	if Window.SetCornerRadius then Window:SetCornerRadius(value) elseif Window.Raw and Window.Raw.SetCornerRadius then Window.Raw:SetCornerRadius(value) end end })
 MenuGroup:AddKeybind({ Name="Menu bind", Flag="MenuKeybind", Default="RightShift", NoUI=true, Callback=function()
 	Library.ToggleKeybind=Options.MenuKeybind end })
 MenuGroup:AddButton({ Name="Unload", Callback=function()
@@ -2081,7 +2019,6 @@ ConfigUI:Init()
 -- Main Loop
 local frameCount=0
 local espLoop=RunService.RenderStepped:Connect(function()
-	local ok,err=pcall(function()
 	frameCount=(frameCount+1)%60
 	if ActorManager then
 		ActorManager:Update()
@@ -2095,8 +2032,6 @@ local espLoop=RunService.RenderStepped:Connect(function()
 	UpdateESP()
 	if frameCount%2==0 then UpdateVehicles(frameCount,Config) end
 	UpdateCombat(frameCount)
-	end)
-	if not ok then (warn or print)("[EspLoop] "..tostring(err)) end
 end)
 table.insert(getgenv().Moon_Connections,espLoop)
 
@@ -2137,8 +2072,8 @@ local AutoFarm = {
 	_lastShot = 0,
 	_phase = "seek",          -- seek | shoot | switch | return
 	_enemyIndex = 1,
-	_originCF = nil,
-	_returnTimer = 0,
+	_originCF = nil,          -- vị trí lưu trước khi teleport đến target
+	_returnTimer = 0,         -- timestamp khi bắt đầu phase return
 }
 
 -- Teleport LocalActor đến vị trí gần target
@@ -2211,6 +2146,7 @@ local function AutoFarm_Tick()
 		local target = AutoFarm_NextTarget()
 		if not target then return end
 
+		-- Lưu vị trí hiện tại trước khi teleport — dùng để return về sau
 		if not AutoFarm._originCF then
 			local myActor = ReplicatorService and ReplicatorService.LocalActor
 			if myActor then
@@ -2290,6 +2226,7 @@ local function AutoFarm_Tick()
 
 	-- PHASE: RETURN — teleport về vị trí ban đầu trước khi seek target kế
 	if AutoFarm._phase == "return" then
+		-- Teleport về ngay lập tức mỗi tick (giữ nguyên vị trí nếu bị server push)
 		if AutoFarm._originCF then
 			local myActor = ReplicatorService and ReplicatorService.LocalActor
 			if myActor then
@@ -2300,6 +2237,7 @@ local function AutoFarm_Tick()
 				end)
 			end
 		end
+		-- Chờ 0.5s ổn định rồi mới seek target kế
 		if (now - AutoFarm._returnTimer) >= 0.5 then
 			AutoFarm._originCF = nil
 			AutoFarm._phase = "seek"
@@ -2735,7 +2673,7 @@ local function AF_Hook()
 	end
 
 	if not TargetController then
-		(warn or print)("[AntiFall] Controller not found — retry after 2s")
+		warn("[AntiFall] Controller not found — retry after 2s")
 		task.delay(2, AF_Hook)
 		return
 	end
@@ -2817,7 +2755,6 @@ print("[AntiFall] Loaded")
 
 
 
--- ==========================================
 -- AURA KILL — Verified từ Flux_client.lua source
 -- Cipher đúng 100%: netEncode verified = RSpy dump match
 -- net:FireServer() = RemoteEvent:FireServer(netEncode(JSONEncode({_code,...}), _key))
@@ -3051,7 +2988,8 @@ S_AK:AddButton({Name="Rescan Network",
 
 print("[AuraKill] Loaded — Cipher verified vs RSpy dump")
 
--- ==========================================
+
+
 pcall(function()
 -- AUTO FARM
 local AutoFarm = {Enabled=false, OffsetY=-2, _connection=nil, _running=false}
@@ -3138,186 +3076,82 @@ S_AF:AddSlider({Name="Y Offset", Flag="AF_OffsetY", Min=-10, Max=0, Default=-2, 
 print("[AutoFarm] Loaded")
 end)
 
--- AUTO LOCKPICK — rewrite
--- Strategy 1 (primary): getloadedmodules → LockpickController class → hook _progress + complete
--- Strategy 2 (fallback): filtergc → live lockpick state table with _active + _progress
--- Strategy 3 (fallback): InputService._mounts["PickLock"] called correctly as a mount object
+
+
+
+
+-- AUTO LOCKPICK v4
+-- InputService._mounts["PickLock"] là callback thật
+-- Tìm InputService instance → gọi _mounts["PickLock"](true) mỗi frame
 pcall(function()
 
-local AutoLockpick = {
-	Enabled       = false,
-	_connection   = nil,
-	_ctrl         = nil,
-	_nextResolve  = 0,
-	_lastGCScan   = 0,
-	_inputSvc     = nil,
-}
-
-local function ALP_FindController()
-	if not getloadedmodules then return nil end
-	for _, m in ipairs(getloadedmodules()) do
-		if m.Name == "LockpickController" or m.Name == "Lockpick" or m.Name == "LockPick" then
-			local ok, ctrl = pcall(require, m)
-			if ok and type(ctrl) == "table" then return ctrl end
-		end
-	end
-	return nil
-end
-
-local function ALP_FindActiveState()
-	local ok, gc = pcall(function() return filtergc("table") end)
-	if not ok then ok, gc = pcall(function() return getgc(true) end) end
-	if not ok or type(gc) ~= "table" then return nil end
-	for _, v in pairs(gc) do
-		if type(v) == "table" then
-			local prog  = rawget(v, "_progress") or rawget(v, "_pickProgress") or rawget(v, "Progress")
-			local activ = rawget(v, "_active")   or rawget(v, "_pickActive")   or rawget(v, "Active")
-			if type(prog) == "number" and activ == true then return v end
-		end
-	end
-	return nil
-end
+local AutoLockpick = {Enabled=false, _connection=nil}
 
 local function ALP_FindInputService()
-	local ok, gc = pcall(function() return filtergc("table") end)
-	if not ok then ok, gc = pcall(function() return getgc(true) end) end
-	if not ok or type(gc) ~= "table" then return nil end
-	for _, v in pairs(gc) do
-		if type(v) == "table"
-			and rawget(v, "_mounts")   ~= nil
-			and rawget(v, "Binds")     ~= nil
-			and rawget(v, "Connected") ~= nil
-			and rawget(v, "Overrides") ~= nil
-		then return v end
-	end
-	return nil
+    -- InputService: table có _mounts, Binds, Connected, Overrides
+    local ok, gc = pcall(function() return filtergc("table") end)
+    if not ok then ok, gc = pcall(function() return getgc(true) end) end
+    if not ok or not gc then return nil end
+    for _, v in pairs(gc) do
+        if type(v) == "table"
+            and rawget(v, "_mounts") ~= nil
+            and rawget(v, "Binds") ~= nil
+            and rawget(v, "Connected") ~= nil
+            and rawget(v, "Overrides") ~= nil
+        then
+            return v
+        end
+    end
+    return nil
 end
 
-local function ALP_TryComplete(obj)
-	for _, name in ipairs({"_complete","Complete","_onComplete","OnComplete","_finish","Finish","_succeed","Succeed"}) do
-		local fn = rawget(obj, name)
-		if type(fn) == "function" then pcall(fn, obj); return true end
-	end
-	return false
-end
+local _inputSvc = nil
+local _lastScan = 0
 
-local function ALP_TryMountCall(mount, dt)
-	if type(mount) == "function" then pcall(mount, true); return end
-	if type(mount) ~= "table" then return end
-	for _, key in ipairs({"Update","_update","fire","Fire","Activate","activate"}) do
-		local fn = rawget(mount, key)
-		if type(fn) == "function" then pcall(fn, mount, dt); break end
-	end
-	local mt = getmetatable(mount)
-	if mt and type(rawget(mt, "__call")) == "function" then
-		pcall(mt.__call, mount, mount, true)
-	end
-end
+local function ALP_Tick()
+    if not AutoLockpick.Enabled then return end
 
-local function ALP_Tick(dt)
-	if not AutoLockpick.Enabled then return end
-	local now = tick()
+    -- Rescan InputService mỗi 1s
+    local now = tick()
+    if not _inputSvc or (now - _lastScan > 1) then
+        _lastScan = now
+        _inputSvc = ALP_FindInputService()
+    end
+    if not _inputSvc then return end
 
-	if not AutoLockpick._ctrl and now > AutoLockpick._nextResolve then
-		AutoLockpick._nextResolve = now + 3
-		AutoLockpick._ctrl = ALP_FindController()
-	end
+    local mounts = rawget(_inputSvc, "_mounts")
+    if not mounts then return end
 
-	if AutoLockpick._ctrl then
-		local ctrl = AutoLockpick._ctrl
-		local isActive = rawget(ctrl, "_active") or rawget(ctrl, "_pickActive") or rawget(ctrl, "Active")
-		if isActive == true then
-			local maxProg = rawget(ctrl, "_maxProgress") or rawget(ctrl, "MaxProgress") or 1
-			if rawget(ctrl, "_progress")      ~= nil then ctrl._progress      = maxProg end
-			if rawget(ctrl, "_pickProgress")  ~= nil then ctrl._pickProgress  = maxProg end
-			if rawget(ctrl, "Progress")       ~= nil then ctrl.Progress       = maxProg end
-			local pins = rawget(ctrl, "_pins") or rawget(ctrl, "Pins")
-			if type(pins) == "table" then
-				for _, pin in pairs(pins) do
-					if type(pin) == "table" then
-						if rawget(pin, "_solved")   ~= nil then pin._solved   = true end
-						if rawget(pin, "_set")      ~= nil then pin._set      = true end
-						if rawget(pin, "Solved")    ~= nil then pin.Solved    = true end
-						if rawget(pin, "_position") ~= nil then pin._position = rawget(pin, "_target") or 1 end
-					end
-				end
-			end
-			ALP_TryComplete(ctrl)
-			return
-		end
-	end
-
-	if now - AutoLockpick._lastGCScan > 0.1 then
-		AutoLockpick._lastGCScan = now
-		local state = ALP_FindActiveState()
-		if state then
-			local maxProg = rawget(state, "_maxProgress") or rawget(state, "MaxProgress") or 1
-			if rawget(state, "_progress")     ~= nil then state._progress     = maxProg end
-			if rawget(state, "_pickProgress") ~= nil then state._pickProgress = maxProg end
-			if rawget(state, "Progress")      ~= nil then state.Progress      = maxProg end
-			local pins = rawget(state, "_pins") or rawget(state, "Pins")
-			if type(pins) == "table" then
-				for _, pin in pairs(pins) do
-					if type(pin) == "table" then
-						if rawget(pin, "_solved")   ~= nil then pin._solved   = true end
-						if rawget(pin, "_set")      ~= nil then pin._set      = true end
-						if rawget(pin, "Solved")    ~= nil then pin.Solved    = true end
-						if rawget(pin, "_position") ~= nil then pin._position = rawget(pin, "_target") or 1 end
-					end
-				end
-			end
-			ALP_TryComplete(state)
-			return
-		end
-	end
-
-	if not AutoLockpick._inputSvc then
-		AutoLockpick._inputSvc = ALP_FindInputService()
-	end
-	if AutoLockpick._inputSvc then
-		local mounts = rawget(AutoLockpick._inputSvc, "_mounts")
-		if mounts then
-			local mount = rawget(mounts, "PickLock") or rawget(mounts, "Lockpick") or rawget(mounts, "lockpick")
-			if mount then ALP_TryMountCall(mount, dt) end
-		end
-	end
+    -- Gọi PickLock callback nếu đang active
+    local pickFn = rawget(mounts, "PickLock")
+    if pickFn and type(pickFn) == "function" then
+        pcall(pickFn, true)
+    end
 end
 
 function AutoLockpick.Start()
-	if AutoLockpick._connection then return end
-	AutoLockpick._ctrl     = nil
-	AutoLockpick._inputSvc = nil
-	AutoLockpick._nextResolve = 0
-	AutoLockpick._connection = RunService.Heartbeat:Connect(function(dt)
-		local ok, err = pcall(ALP_Tick, dt)
-		if not ok then
-			(warn or print)("[AutoLockpick] " .. tostring(err))
-			AutoLockpick._ctrl     = nil
-			AutoLockpick._inputSvc = nil
-			AutoLockpick._nextResolve = 0
-		end
-	end)
-	table.insert(getgenv().Moon_Connections, AutoLockpick._connection)
-	print("[AutoLockpick] Started")
+    if AutoLockpick._connection then return end
+    AutoLockpick._connection = RunService.Heartbeat:Connect(ALP_Tick)
+    table.insert(getgenv().Moon_Connections, AutoLockpick._connection)
+    print("[AutoLockpick] Started")
 end
 
 function AutoLockpick.Stop()
-	if AutoLockpick._connection then
-		pcall(function() AutoLockpick._connection:Disconnect() end)
-		AutoLockpick._connection = nil
-	end
-	AutoLockpick._ctrl     = nil
-	AutoLockpick._inputSvc = nil
+    if AutoLockpick._connection then
+        pcall(function() AutoLockpick._connection:Disconnect() end)
+        AutoLockpick._connection = nil
+    end
+    _inputSvc = nil
 end
 
 getgenv().AutoLockpick = AutoLockpick
 
 local S_ALP = MiscTab:DrawSection({Name="Auto Lockpick", Position="right"})
 S_ALP:AddToggle({Name="Enable Auto Lockpick", Flag="ALP_Enabled", Default=false,
-	Callback=function(v)
-		AutoLockpick.Enabled = v
-		if v then AutoLockpick.Start() else AutoLockpick.Stop() end
-	end})
+    Callback=function(v)
+        AutoLockpick.Enabled = v
+        if v then AutoLockpick.Start() else AutoLockpick.Stop() end
+    end})
 print("[AutoLockpick] Loaded")
 end)
 
@@ -3377,14 +3211,18 @@ end)
 
 pcall(function()
 -- VEHICLE TELEPORTER
+-- ControllerService không được assign trong BulkScan → luôn nil
+-- Lấy vehicle qua VehicleService.Vehicles + LocalActor.Seat.UID
 local VehicleTeleport = { _savedCF = nil }
 
 local function VT_GetVehicle()
     local localActor = ReplicatorService and ReplicatorService.LocalActor
     if not localActor then return nil end
+
     local seat = localActor.Seat
     if not seat then return nil end
 
+    -- Method 1: VehicleService.Vehicles lookup theo UID
     local uid = seat.UID
     if uid and VehicleService and VehicleService.Vehicles then
         for _, veh in pairs(VehicleService.Vehicles) do
@@ -3392,6 +3230,7 @@ local function VT_GetVehicle()
         end
     end
 
+    -- Method 2: GC scan — tìm vehicle có Controlling = true + ComponentReplicates
     local ok, gc = pcall(function() return getgc(true) end)
     if not ok or not gc then return nil end
     for _, obj in pairs(gc) do
@@ -3407,6 +3246,7 @@ local function VT_GetVehicle()
 end
 
 local function VT_GetSolver(vehicle)
+    -- Tìm controller có _vehicle match để lấy solver
     local ok, gc = pcall(function() return getgc(true) end)
     if not ok or not gc then return nil end
     for _, obj in pairs(gc) do
@@ -3427,11 +3267,13 @@ local function TeleportVehicle(targetCF)
         return
     end
 
+    -- Step 1: set CFrame
     pcall(function()
         vehicle.CFrame = targetCF
         if vehicle.Hitbox then vehicle.Hitbox.CFrame = targetCF end
     end)
 
+    -- Step 2: reset solver velocity → không drift sau teleport
     pcall(function()
         local solver = VT_GetSolver(vehicle)
         if solver and solver.SetState then
@@ -3439,6 +3281,7 @@ local function TeleportVehicle(targetCF)
         end
     end)
 
+    -- Step 3: SimulatedPosition — cách VehicleFly replicate lên server
     pcall(function()
         if ReplicatorService and ReplicatorService.LocalActor then
             ReplicatorService.LocalActor.SimulatedPosition = targetCF.Position
@@ -3452,6 +3295,7 @@ getgenv().VehicleTeleport = VehicleTeleport
 
 local S_VT = VehicleTab:DrawSection({Name="Vehicle Teleporter", Position="left"})
 
+-- Button 1: Lấy toạ độ
 S_VT:AddButton({ Name="Lấy Toạ Độ", Callback=function()
     pcall(function()
         local vehicle = VT_GetVehicle()
@@ -3476,6 +3320,7 @@ S_VT:AddButton({ Name="Lấy Toạ Độ", Callback=function()
     end)
 end})
 
+-- Button 2: Teleport phương tiện
 S_VT:AddButton({ Name="Teleport Phương Tiện", Callback=function()
     pcall(function()
         if not VehicleTeleport._savedCF then
@@ -3486,6 +3331,7 @@ S_VT:AddButton({ Name="Teleport Phương Tiện", Callback=function()
     end)
 end})
 
+-- Button 3: Xóa toạ độ
 S_VT:AddButton({ Name="Xóa Toạ Độ", Callback=function()
     pcall(function()
         VehicleTeleport._savedCF = nil
@@ -3495,837 +3341,3 @@ end})
 
 print("[VehicleTeleport] Loaded")
 end)
--- ══════════════════════════════════════════════════════
--- TOKAIHUB MODULES PORT — tippc/tipmobile compatible
--- Tất cả pcall-wrapped. Heartbeat/RenderStepped có inner pcall.
--- ══════════════════════════════════════════════════════
-
-local function Tokai_GetReg() return ReplicatorService and ReplicatorService.Actors end
-local function Tokai_GetMe()  return ReplicatorService and ReplicatorService.LocalActor end
-local function Tokai_Alive(a)
-	if not a or a.Alive==false then return false end
-	if a.Zombie then return type(a.Health)=="table" or (type(a.Health)=="number" and a.Health>0) end
-	return type(a.Health)=="number" and a.Health>0
-end
-local function Tokai_Pos(a) return typeof(a.Position)=="Vector3" and a.Position or nil end
-local function Tokai_Kind(a)
-	local reg=Tokai_GetReg()
-	if not reg or not a or not a.UID or reg[a.UID]~=a then return nil end
-	local me=Tokai_GetMe()
-	if a.IsLocalPlayer or a.Owner==LocalPlayer or a==me then return nil end
-	if a.Zombie==true then return "Zombies" end
-	if a.Owner==nil then return "NPCs" end
-	if typeof(a.Owner)=="Instance" and a.Owner:IsA("Player") then return "Players" end
-	return nil
-end
-
--- ══════════════════
--- 1. TRIGGERBOT
--- ══════════════════
-pcall(function()
-	local TB={Enabled=false,TeamCheck=false,VisibleCheck=true,MaxDist=1000,
-		Reaction=50,ShootTime=100,Targets={NPCs=true,Players=true,Zombies=false},
-		_actor=nil,_since=0,_lastShot=0}
-	getgenv().TokaiTriggerBot=TB
-	local TBray=RaycastParams.new()
-	TBray.FilterType=Enum.RaycastFilterType.Exclude
-	TBray.IgnoreWater=true
-	local function TBvisible(actor,pos)
-		local me=Tokai_GetMe()
-		local orig=workspace.CurrentCamera.CFrame.Position
-		local filt={workspace.CurrentCamera}
-		if me and me.Character then filt[#filt+1]=me.Character end
-		TBray.FilterDescendantsInstances=filt
-		local hit=workspace:Raycast(orig,pos-orig,TBray)
-		if not hit then return true end
-		if actor.Character and hit.Instance:IsDescendantOf(actor.Character) then return true end
-		local uid=hit.Instance:GetAttribute("ActorUID")
-		return uid and uid==actor.UID
-	end
-	local function TBbox(orig,dir,cf,sz)
-		local p=cf:PointToObjectSpace(orig)
-		local d=cf:VectorToObjectSpace(dir)
-		local h=sz*0.5
-		local lo,hi=0,math.huge
-		for _,ax in ipairs({"X","Y","Z"}) do
-			if math.abs(d[ax])<1e-6 then
-				if math.abs(p[ax])>h[ax] then return nil end
-			else
-				local a,b=(-h[ax]-p[ax])/d[ax],(h[ax]-p[ax])/d[ax]
-				if a>b then a,b=b,a end
-				lo=math.max(lo,a); hi=math.min(hi,b)
-				if hi<lo then return nil end
-			end
-		end
-		return lo
-	end
-	local function TBfire()
-		if mouse1click then pcall(mouse1click)
-		elseif mouse1press and mouse1release then
-			pcall(mouse1press)
-			if task and task.delay then task.delay(0.02,function() pcall(mouse1release) end) end
-		end
-	end
-	local function TBtick()
-		if not TB.Enabled then return end
-		local cam=workspace.CurrentCamera; if not cam then return end
-		local mouse=UserInputService:GetMouseLocation()
-		local ray=cam:ViewportPointToRay(mouse.X,mouse.Y)
-		local reg=Tokai_GetReg(); if not reg then return end
-		local closest,nearest=nil,TB.MaxDist
-		for _,actor in pairs(reg) do
-			if Tokai_Alive(actor) and actor.Character and actor.Character.Parent then
-				local kind=Tokai_Kind(actor)
-				if kind and TB.Targets[kind] then
-					local pos=Tokai_Pos(actor)
-					local me=Tokai_GetMe()
-					local mypos=me and Tokai_Pos(me) or cam.CFrame.Position
-					if pos and (pos-mypos).Magnitude<=TB.MaxDist then
-						if not(TB.TeamCheck and kind=="Players" and actor.Owner
-							and actor.Owner.Team and LocalPlayer.Team
-							and actor.Owner.Team==LocalPlayer.Team) then
-							for _,part in ipairs(actor.Character:GetChildren()) do
-								if part:IsA("BasePart") and part.Parent then
-									local hit=TBbox(ray.Origin,ray.Direction,part.CFrame,part.Size)
-									if hit and hit<nearest then nearest=hit; closest=actor end
-								end
-							end
-						end
-					end
-				end
-			end
-		end
-		if not closest then TB._actor=nil; TB._since=0; return end
-		if TB.VisibleCheck then
-			local pos=Tokai_Pos(closest)
-			if pos and not TBvisible(closest,pos) then TB._actor=nil; TB._since=0; return end
-		end
-		local now=tick()
-		if closest~=TB._actor then TB._actor=closest; TB._since=now end
-		local elapsed=(now-TB._since)*1000
-		if elapsed>=TB.Reaction and (now-TB._lastShot)*1000>=TB.ShootTime then
-			TBfire(); TB._lastShot=now
-		end
-	end
-	local _c=RunService.Heartbeat:Connect(function()
-		local ok,err=pcall(TBtick)
-		if not ok then (warn or print)("[TokaiTriggerBot] "..tostring(err)) end
-	end)
-	table.insert(getgenv().Moon_Connections,_c)
-	local S=CombatTab:DrawSection({Name="Trigger Bot",Position="right"})
-	S:AddToggle({Name="Enable TriggerBot",Flag="TB_En",Default=false,Callback=function(v) TB.Enabled=v end})
-	S:AddSlider({Name="Reaction (ms)",Flag="TB_React",Min=0,Max=500,Default=50,Suffix=" ms",Callback=function(v) TB.Reaction=v end})
-	S:AddSlider({Name="Shoot Time (ms)",Flag="TB_Shoot",Min=0,Max=1000,Default=100,Suffix=" ms",Callback=function(v) TB.ShootTime=v end})
-	S:AddSlider({Name="Max Distance",Flag="TB_Dist",Min=50,Max=5000,Default=1000,Suffix=" m",Callback=function(v) TB.MaxDist=v end})
-	S:AddToggle({Name="Visible Check",Flag="TB_Vis",Default=true,Callback=function(v) TB.VisibleCheck=v end})
-	S:AddToggle({Name="Team Check",Flag="TB_Team",Default=false,Callback=function(v) TB.TeamCheck=v end})
-	S:AddDropdown({Name="Targets",Flag="TB_Tgt",Default="NPCs+Players",
-		Options={"NPCs Only","Players Only","NPCs+Players","All"},
-		Callback=function(v)
-			TB.Targets={NPCs=false,Players=false,Zombies=false}
-			if v=="NPCs Only" then TB.Targets.NPCs=true
-			elseif v=="Players Only" then TB.Targets.Players=true
-			elseif v=="NPCs+Players" then TB.Targets.NPCs=true; TB.Targets.Players=true
-			elseif v=="All" then TB.Targets.NPCs=true; TB.Targets.Players=true; TB.Targets.Zombies=true
-			end
-		end})
-	print("[TokaiTriggerBot] Loaded")
-end)
-
--- ══════════════════
--- 2. MOVEMENT
--- ══════════════════
-pcall(function()
-	local MOV={active=true,installed=false,nextResolve=0,
-		Speed=false,SpeedValue=24,Smoothing=false,Stamina=false,Penalties=false,
-		OmniSprint=false,SprintCombat=false,speedActive=false,
-		SpeedKey=Enum.KeyCode.G,SpeedKeyOn=false,_prevSpeedDown=false,hooks={}}
-	getgenv().TokaiMovement=MOV
-	local function MOVwrap(class,key,handler)
-		local orig=class[key]
-		if type(orig)~="function" then return false end
-		local wrap=function(ctrl,...) if MOV.active then return handler(orig,ctrl,...) end; return orig(ctrl,...) end
-		class[key]=wrap; MOV.hooks[#MOV.hooks+1]={class=class,key=key,orig=orig,wrap=wrap}
-		return true
-	end
-	local function MOVinstall(class)
-		MOVwrap(class,"_exhaust",function(orig,ctrl,...)
-			if MOV.Stamina then ctrl._exhaustStart=tick()-2; ctrl._exhausted=tick()-1; return true end
-			return orig(ctrl,...)
-		end)
-		MOVwrap(class,"_accelerate",function(orig,ctrl,dt,magnitude)
-			local a=ctrl._localActor; local saved={}
-			local function chg(obj,k,v) saved[#saved+1]={obj=obj,k=k,v=rawget(obj,k)}; obj[k]=v end
-			if MOV.Penalties and a then
-				chg(a,"SpeedPenalty",nil); chg(a,"HitSlowness",nil)
-				chg(a,"CQB",nil); chg(a,"Weight",0); chg(ctrl,"_weightMulti",1)
-			end
-			local r=table.pack(pcall(orig,ctrl,MOV.Smoothing and 1e6 or dt,magnitude))
-			for i=#saved,1,-1 do local v=saved[i]; v.obj[v.k]=v.v end
-			if not r[1] then error(r[2],0) end
-			if MOV.speedActive then ctrl.MoveSpeed=MOV.SpeedValue*math.clamp(magnitude,0,1) end
-			return table.unpack(r,2,r.n)
-		end)
-		MOVwrap(class,"_decelerate",function(orig,ctrl,...)
-			if MOV.Smoothing then ctrl.MoveSpeed=0; return end
-			return orig(ctrl,...)
-		end)
-		MOVwrap(class,"Update",function(orig,ctrl,input,dt)
-			if MOV.Stamina then ctrl._exhaustStart=tick()-2; ctrl._exhausted=tick()-1 end
-			local r=table.pack(orig(ctrl,input,dt))
-			if MOV.SprintCombat and ctrl._localActor then ctrl._localActor.Sprinting=false end
-			return table.unpack(r,1,r.n)
-		end)
-		pcall(function()
-			MOVwrap(class,"_processMovementInput",function(orig,ctrl,input,dt)
-				local actor=ctrl._localActor
-				if (MOV.OmniSprint or MOV.SprintCombat) and actor
-					and not(actor.Downed or actor.Frozen or actor.Forced) and input.Magnitude>0.01 then
-					local dirOK=MOV.OmniSprint or input.Y<-0.5
-					local aimOK=MOV.SprintCombat or not actor.ADS
-					if dirOK and aimOK then ctrl.IsSprinting=true end
-				end
-				return orig(ctrl,input,dt)
-			end)
-		end)
-		MOV.installed=true
-	end
-	local _mc=RunService.Heartbeat:Connect(function()
-		local ok,err=pcall(function()
-			local down=UserInputService:IsKeyDown(MOV.SpeedKey)
-			if down and not MOV._prevSpeedDown then MOV.SpeedKeyOn=not MOV.SpeedKeyOn end
-			MOV._prevSpeedDown=down
-			MOV.speedActive=MOV.Speed and MOV.SpeedKeyOn
-			if not MOV.installed and tick()>MOV.nextResolve then
-				MOV.nextResolve=tick()+2
-				if getloadedmodules then
-					for _,m in ipairs(getloadedmodules()) do
-						if m.Name=="CharacterController" then
-							local ok2,c=pcall(require,m)
-							if ok2 and type(c)=="table" then pcall(MOVinstall,c) end
-							break
-						end
-					end
-				end
-			end
-		end)
-		if not ok then (warn or print)("[TokaiMovement] "..tostring(err)) end
-	end)
-	table.insert(getgenv().Moon_Connections,_mc)
-	local MovTab=Window:DrawTab({Name="Movement",Icon="footprints",Type="Double"})
-	local SL=MovTab:DrawSection({Name="Speed & Sprint",Position="left"})
-	local SR=MovTab:DrawSection({Name="Restrictions",Position="right"})
-	SL:AddToggle({Name="Speed Hack",Flag="MOV_Speed",Default=false,Callback=function(v) MOV.Speed=v end})
-	SL:AddSlider({Name="Speed Value",Flag="MOV_SpeedVal",Min=1,Max=150,Default=24,Suffix=" s/s",Callback=function(v) MOV.SpeedValue=v end})
-	SL:AddDropdown({Name="Speed Toggle Key",Flag="MOV_Key",Default="G",
-		Options={"G","H","J","K","L","Z","X","C","V","B","N","M"},
-		Callback=function(v) local ok2,kc=pcall(function() return Enum.KeyCode[v] end); if ok2 and kc then MOV.SpeedKey=kc end end})
-	SL:AddToggle({Name="No Smoothing",Flag="MOV_Smooth",Default=false,Callback=function(v) MOV.Smoothing=v end})
-	SL:AddToggle({Name="Omni Sprint",Flag="MOV_OmniSpr",Default=false,Callback=function(v) MOV.OmniSprint=v end})
-	SL:AddToggle({Name="ADS While Sprinting",Flag="MOV_SprCombat",Default=false,Callback=function(v) MOV.SprintCombat=v end})
-	SR:AddToggle({Name="Infinite Stamina",Flag="MOV_Stam",Default=false,Callback=function(v) MOV.Stamina=v end})
-	SR:AddToggle({Name="No Speed Penalties",Flag="MOV_Pen",Default=false,Callback=function(v) MOV.Penalties=v end})
-	print("[TokaiMovement] Loaded")
-end)
-
--- ══════════════════
--- 3. GUN ADVANCED
--- ══════════════════
-pcall(function()
-	local GEXT={active=true,classes={},nextScan=0,hooks={},
-		InstantADS=false,NoSway=false,AutoReload=false,RPM=false,RPMValue=900,
-		InstantBullet=false,BulletMult=1,NoCamShake=false,SightZoom=false,Zoom=2,
-		NoEquipDelay=false,reloadPending=false,nextReload=0,shots=setmetatable({},{__mode="k"})}
-	getgenv().TokaiGunExt=GEXT
-	local function GEhook(class,key,make)
-		local orig=class[key]; if type(orig)~="function" then return false end
-		local wrap=make(orig); class[key]=wrap
-		GEXT.hooks[#GEXT.hooks+1]={class=class,key=key,orig=orig,wrap=wrap}; return true
-	end
-	local function GElocalWeapon(w) local me=Tokai_GetMe(); return w and me and w._actor==me end
-	local function GEframe()
-		if not GEXT.active then return end
-		if tick()>=GEXT.nextScan and getloadedmodules then
-			GEXT.nextScan=tick()+3
-			for _,m in ipairs(getloadedmodules()) do
-				if not GEXT.classes[m.Name] then
-					if m.Name=="ViewmodelClass" then
-						local ok2,c=pcall(require,m)
-						if ok2 and type(c)=="table" then
-							pcall(function()
-								GEhook(c,"Update",function(orig)
-									return function(vm,...)
-										local me=Tokai_GetMe()
-										if not GEXT.active or not me or vm.Actor~=me then return orig(vm,...) end
-										if GEXT.InstantADS then
-											vm.ADSLerp=(me.ADS and not vm.Reloading and not me.Sliding) and 1 or 0
-										end
-										local sway=vm._swaySpring
-										if GEXT.NoSway and sway then vm._swaySpring={Position={ToCFrame=function() return CFrame.new() end}} end
-										local r=table.pack(pcall(orig,vm,...))
-										vm._swaySpring=sway
-										if not r[1] then error(r[2],0) end
-										return table.unpack(r,2,r.n)
-									end
-								end)
-							end)
-							GEXT.classes[m.Name]=c
-						end
-					elseif m.Name=="CharacterCamera" then
-						local ok2,c=pcall(require,m)
-						if ok2 and type(c)=="table" then
-							pcall(function()
-								GEhook(c,"Render",function(orig)
-									return function(camera,...)
-										local influences={}
-										if GEXT.NoCamShake then
-											for _,sh in ipairs(camera._shakes or {}) do
-												influences[#influences+1]={sh,sh.PositionInfluence,sh.RotationInfluence}
-												sh.PositionInfluence=Vector3.zero; sh.RotationInfluence=Vector3.zero
-											end
-										end
-										local r=table.pack(pcall(orig,camera,...))
-										for _,v in ipairs(influences) do v[1].PositionInfluence=v[2]; v[1].RotationInfluence=v[3] end
-										if not r[1] then error(r[2],0) end
-										local me=Tokai_GetMe(); local cam=workspace.CurrentCamera
-										if GEXT.SightZoom and me and me.ADS and cam then
-											cam.FieldOfView=math.clamp(math.deg(2*math.atan(math.tan(math.rad(cam.FieldOfView)/2)/GEXT.Zoom)),5,100)
-										end
-										return table.unpack(r,2,r.n)
-									end
-								end)
-							end)
-							GEXT.classes[m.Name]=c
-						end
-					elseif m.Name=="FirearmInventory" then
-						local ok2,c=pcall(require,m)
-						if ok2 and type(c)=="table" then
-							pcall(function()
-								GEhook(c,"Discharge",function(orig)
-									return function(w,...)
-										if not GElocalWeapon(w) then return orig(w,...) end
-										local tune=w._firearm and w._firearm.Tune
-										if tune then
-											if GEXT.RPM then
-												tune._lean_rpm=tune._lean_rpm or tune.RPM; tune.RPM=GEXT.RPMValue
-											elseif tune._lean_rpm then
-												tune.RPM=tune._lean_rpm; tune._lean_rpm=nil
-											end
-											if GEXT.NoEquipDelay then
-												tune._lean_eq=tune._lean_eq or tune.Equip_Delay; tune.Equip_Delay=0
-											elseif tune._lean_eq then
-												tune.Equip_Delay=tune._lean_eq; tune._lean_eq=nil
-											end
-										end
-										return orig(w,...)
-									end
-								end)
-							end)
-							GEXT.classes[m.Name]=c
-						end
-					end
-				end
-			end
-		end
-		-- Auto Reload
-		local me=Tokai_GetMe()
-		local weapon=me and me._inventory and me._inventory[me._equipped]
-		if GEXT.AutoReload and weapon and weapon.Equipped and not weapon._reloading
-			and weapon._mag and (weapon._mag.Capacity or 0)<=0
-			and tick()>=GEXT.nextReload and not GEXT.reloadPending then
-			GEXT.nextReload=tick()+1; GEXT.reloadPending=true
-			local c=GEXT.classes.FirearmInventory
-			if c and type(c._reload)=="function" then
-				pcall(c._reload,weapon,true)
-			end
-			GEXT.reloadPending=false
-		end
-	end
-	local _gc=RunService.RenderStepped:Connect(function()
-		local ok,err=pcall(GEframe)
-		if not ok then (warn or print)("[TokaiGunExt] "..tostring(err)) end
-	end)
-	table.insert(getgenv().Moon_Connections,_gc)
-	local SGA=CombatTab:DrawSection({Name="Gun Advanced",Position="right"})
-	SGA:AddToggle({Name="Instant ADS",Flag="GE_IADS",Default=false,Callback=function(v) GEXT.InstantADS=v end})
-	SGA:AddToggle({Name="No Sway",Flag="GE_NSway",Default=false,Callback=function(v) GEXT.NoSway=v end})
-	SGA:AddToggle({Name="Auto Reload",Flag="GE_AR",Default=false,Callback=function(v) GEXT.AutoReload=v end})
-	SGA:AddToggle({Name="No Camera Shake",Flag="GE_NCS",Default=false,Callback=function(v) GEXT.NoCamShake=v end})
-	SGA:AddToggle({Name="No Equip Delay",Flag="GE_NED",Default=false,Callback=function(v) GEXT.NoEquipDelay=v end})
-	SGA:AddToggle({Name="Sight Zoom",Flag="GE_SZ",Default=false,Callback=function(v) GEXT.SightZoom=v end})
-	SGA:AddSlider({Name="Zoom Multiplier",Flag="GE_Zoom",Min=1,Max=10,Default=2,Suffix="x",Callback=function(v) GEXT.Zoom=v end})
-	SGA:AddToggle({Name="RPM Modifier",Flag="GE_RPM",Default=false,Callback=function(v) GEXT.RPM=v end})
-	SGA:AddSlider({Name="RPM Value",Flag="GE_RPMVal",Min=60,Max=3000,Default=900,Suffix=" RPM",Callback=function(v) GEXT.RPMValue=v end})
-	SGA:AddToggle({Name="Instant Bullet",Flag="GE_IB",Default=false,Callback=function(v) GEXT.InstantBullet=v end})
-	SGA:AddSlider({Name="Bullet Multiplier",Flag="GE_BM",Min=1,Max=10,Default=1,Suffix="x",Callback=function(v) GEXT.BulletMult=v end})
-	print("[TokaiGunAdvanced] Loaded")
-end)
-
--- ══════════════════
--- 4. VEHICLE IMPROVEMENTS
--- ══════════════════
-pcall(function()
-	local VI={Speed=false,SpeedValue=80,Stability=false,FastStart=false,Noclip=false,
-		hooked=false,nextScan=0,hooks={}}
-	getgenv().TokaiVehicleImp=VI
-	local VIempty=nil
-	local function VIhook(class,key,make)
-		local orig=class[key]; if type(orig)~="function" then return false end
-		local wrap=make(orig); class[key]=wrap
-		VI.hooks[#VI.hooks+1]={class=class,key=key,orig=orig,wrap=wrap}; return true
-	end
-	local function VIinstall(c)
-		VIhook(c,"Update",function(orig)
-			return function(solver,dt,inputs,...)
-				local vehicle=solver._vehicle
-				if not vehicle or not vehicle.Controlling then return orig(solver,dt,inputs,...) end
-				local physics=solver._solver; local state=physics and physics.State
-				if not state then return orig(solver,dt,inputs,...) end
-				local heli=vehicle.Rotors~=nil
-				if heli and VI.FastStart then
-					for _,engine in pairs(solver.Engines or {}) do
-						if engine:GetOn() and not engine:GetFullyOn() then
-							pcall(function() engine:TimeSkip(120) end)
-						end
-					end
-				end
-				local cf=state.CFrame*physics.CenterOfMass:Inverse()
-				local vel=state.Velocity
-				if VI.Speed and inputs and math.abs(inputs.Throttle or 0)>0.01 then
-					local fwd=cf.LookVector
-					if not heli then fwd=Vector3.new(fwd.X,0,fwd.Z) end
-					if fwd.Magnitude>0.01 then
-						local desired=fwd.Unit*VI.SpeedValue*math.clamp(inputs.Throttle,-1,1)
-						if not heli then desired=desired+Vector3.yAxis*vel.Y end
-						vel=vel:Lerp(desired,1-math.exp(-math.clamp(dt,0,0.1)*4))
-						physics:SetState(nil,vel,nil)
-					end
-				end
-				if VI.Stability and not heli then
-					local ang=state.AngularVelocity
-					local lav=cf:VectorToObjectSpace(ang)
-					local decay=math.exp(-math.clamp(dt,0,0.1)*8)
-					physics:SetState(nil,vel,cf:VectorToWorldSpace(Vector3.new(lav.X*decay,lav.Y,lav.Z*decay)))
-				end
-				local old=physics.CollisionCastParams
-				if VI.Noclip then
-					if not VIempty then
-						VIempty=RaycastParams.new()
-						VIempty.FilterType=Enum.RaycastFilterType.Include
-						VIempty.FilterDescendantsInstances={}
-					end
-					physics.CollisionCastParams=VIempty
-				end
-				local r=table.pack(pcall(orig,solver,dt,inputs,...))
-				physics.CollisionCastParams=old
-				if not r[1] then error(r[2],0) end
-				return table.unpack(r,2,r.n)
-			end
-		end)
-	end
-	local _vc=RunService.Heartbeat:Connect(function()
-		local ok,err=pcall(function()
-			if not VI.hooked and tick()>VI.nextScan and getloadedmodules then
-				VI.nextScan=tick()+3
-				for _,m in ipairs(getloadedmodules()) do
-					if m.Name=="VehicleSolver" then
-						local ok2,c=pcall(require,m)
-						if ok2 and type(c)=="table" then
-							local ok3,e=pcall(VIinstall,c)
-							if ok3 then VI.hooked=true else (warn or print)("[TokaiVehicleImp] "..tostring(e)) end
-						end
-						break
-					end
-				end
-			end
-		end)
-		if not ok then (warn or print)("[TokaiVehicleImp] "..tostring(err)) end
-	end)
-	table.insert(getgenv().Moon_Connections,_vc)
-	local SVi=VehicleTab:DrawSection({Name="Vehicle Improvements",Position="right"})
-	SVi:AddToggle({Name="Speed Modifier",Flag="VI_Spd",Default=false,Callback=function(v) VI.Speed=v end})
-	SVi:AddSlider({Name="Speed Value",Flag="VI_SpdVal",Min=1,Max=250,Default=80,Suffix=" s/s",Callback=function(v) VI.SpeedValue=v end})
-	SVi:AddToggle({Name="Stability Assist",Flag="VI_Stab",Default=false,Callback=function(v) VI.Stability=v end})
-	SVi:AddToggle({Name="Heli Fast Startup",Flag="VI_Heli",Default=false,Callback=function(v) VI.FastStart=v end})
-	SVi:AddToggle({Name="Vehicle Noclip",Flag="VI_NC",Default=false,Callback=function(v) VI.Noclip=v end})
-	print("[TokaiVehicleImp] Loaded")
-end)
-
--- ══════════════════
--- 5. RADIO LOGGER
--- ══════════════════
-pcall(function()
-	local RL={Enabled=false,rows={},byId={},count=0,gui=nil,scroll=nil,status=nil,
-		connections={},main=nil,msgConn=nil}
-	getgenv().TokaiRadioLogger=RL
-	local function RLconn(sig,fn) local c=sig:Connect(fn); RL.connections[#RL.connections+1]=c; return c end
-	local function RLbuild()
-		if RL.gui then return end
-		local ok2,err2=pcall(function()
-			local gui=Instance.new("ScreenGui")
-			gui.Name="TokaiRadio"; gui.ResetOnSpawn=false; gui.DisplayOrder=30
-			gui.Parent=LocalPlayer:WaitForChild("PlayerGui")
-			local frame=Instance.new("Frame")
-			frame.AnchorPoint=Vector2.new(1,0); frame.Position=UDim2.new(1,-18,0,88)
-			frame.Size=UDim2.new(0.3,0,0.28,0); frame.BackgroundColor3=Color3.fromRGB(15,17,21)
-			frame.BackgroundTransparency=0.1; frame.BorderSizePixel=0; frame.Parent=gui
-			local corner=Instance.new("UICorner"); corner.CornerRadius=UDim.new(0,8); corner.Parent=frame
-			local hdr=Instance.new("TextLabel")
-			hdr.Size=UDim2.new(1,0,0,34); hdr.BackgroundTransparency=1
-			hdr.Text="RADIO LOGGER"; hdr.TextColor3=Color3.new(1,1,1)
-			hdr.Font=Enum.Font.GothamBold; hdr.TextSize=13
-			hdr.TextXAlignment=Enum.TextXAlignment.Left; hdr.Position=UDim2.fromOffset(12,0); hdr.Parent=frame
-			local status=Instance.new("TextLabel")
-			status.Size=UDim2.new(1,0,0,18); status.Position=UDim2.fromOffset(12,32)
-			status.BackgroundTransparency=1; status.Text="0 / 100"
-			status.TextColor3=Color3.fromRGB(150,160,177); status.Font=Enum.Font.Gotham
-			status.TextSize=11; status.TextXAlignment=Enum.TextXAlignment.Left; status.Parent=frame
-			local scroll=Instance.new("ScrollingFrame")
-			scroll.Position=UDim2.fromOffset(10,56); scroll.Size=UDim2.new(1,-20,1,-62)
-			scroll.BackgroundTransparency=1; scroll.BorderSizePixel=0; scroll.ScrollBarThickness=4
-			scroll.CanvasSize=UDim2.new(); scroll.AutomaticCanvasSize=Enum.AutomaticSize.Y; scroll.Parent=frame
-			local layout=Instance.new("UIListLayout")
-			layout.Padding=UDim.new(0,4); layout.SortOrder=Enum.SortOrder.LayoutOrder; layout.Parent=scroll
-			RL.gui=gui; RL.scroll=scroll; RL.status=status
-			gui.Enabled=RL.Enabled
-		end)
-		if not ok2 then (warn or print)("[TokaiRadioLogger] build: "..tostring(err2)) end
-	end
-	local function RLadd(id,channel,name,msg)
-		if not RL.Enabled then return end
-		RLbuild()
-		if not RL.scroll then return end
-		if RL.byId[id] then return end
-		RL.count=RL.count+1
-		local lbl=Instance.new("TextLabel")
-		lbl.Size=UDim2.new(1,-4,0,0); lbl.AutomaticSize=Enum.AutomaticSize.Y
-		lbl.BackgroundTransparency=1; lbl.TextColor3=Color3.fromRGB(216,223,234)
-		lbl.Font=Enum.Font.Code; lbl.TextSize=12; lbl.TextWrapped=true
-		lbl.TextXAlignment=Enum.TextXAlignment.Left; lbl.LayoutOrder=RL.count
-		lbl.Text="["..tostring(channel).."] "..tostring(name)..": "..tostring(msg)
-		lbl.Parent=RL.scroll
-		RL.byId[id]=lbl; RL.rows[#RL.rows+1]={id=id,lbl=lbl}
-		if #RL.rows>100 then
-			local old=table.remove(RL.rows,1); RL.byId[old.id]=nil; old.lbl:Destroy()
-		end
-		if RL.status then RL.status.Text=#RL.rows.." / 100" end
-	end
-	local function RLprocess(message)
-		if not RL.Enabled or not message.TextSource then return end
-		local ok2,meta=pcall(function()
-			return game:GetService("HttpService"):JSONDecode(message.Metadata)
-		end)
-		if not ok2 or type(meta)~="table" or not meta.Radio then return end
-		local src=Players:GetPlayerByUserId(message.TextSource.UserId)
-		local name=src and (src.DisplayName.." (@"..src.Name..")") or tostring(message.TextSource.UserId)
-		local ch=type(meta.Channel)=="string" and meta.Channel or "000"
-		RLadd(message.MessageId,ch,name,message.Text)
-	end
-	local function RLattach(channel)
-		if not channel or channel.Name~="Main" then return end
-		if not channel:IsA("TextChannel") then return end
-		if RL.main==channel then return end
-		if RL.msgConn then RL.msgConn:Disconnect() end
-		RL.main=channel
-		RL.msgConn=RLconn(channel.MessageReceived,function(msg) pcall(RLprocess,msg) end)
-	end
-	pcall(function()
-		local chat=game:GetService("TextChatService")
-		local ch=chat:FindFirstChild("Main")
-		if ch then RLattach(ch) end
-		RLconn(chat.ChildAdded,function(c) pcall(RLattach,c) end)
-	end)
-	local SRL=MiscTab:DrawSection({Name="Radio Logger",Position="right"})
-	SRL:AddToggle({Name="Enable Radio Logger",Flag="RL_En",Default=false,
-		Callback=function(v)
-			RL.Enabled=v
-			if v then RLbuild() end
-			if RL.gui then RL.gui.Enabled=v end
-		end})
-	print("[TokaiRadioLogger] Loaded")
-end)
-
--- ══════════════════
--- 6. WORLD VISUALS
--- ══════════════════
-pcall(function()
-	local WML=game:GetService("Lighting")
-	local WMsaved={Ambient=WML.Ambient,OutdoorAmbient=WML.OutdoorAmbient,
-		ClockTime=WML.ClockTime,FogStart=WML.FogStart,FogEnd=WML.FogEnd,
-		Brightness=WML.Brightness,ExposureCompensation=WML.ExposureCompensation,
-		GlobalShadows=WML.GlobalShadows,ShadowSoftness=WML.ShadowSoftness}
-	local WM={ambient=false,ambientA=WML.Ambient,ambientB=WML.OutdoorAmbient,
-		time=false,timeVal=WML.ClockTime,fog=false,fogS=WML.FogStart,fogE=WML.FogEnd,
-		light=false,bright=WML.Brightness,exposure=WML.ExposureCompensation,
-		shadows=false,softness=WML.ShadowSoftness,fullbright=false}
-	getgenv().TokaiWorldMod=WM
-	local _wc=RunService.RenderStepped:Connect(function()
-		local ok,err=pcall(function()
-			if WM.fullbright then
-				WML.Ambient=Color3.new(1,1,1); WML.OutdoorAmbient=Color3.new(1,1,1); WML.Brightness=6
-			elseif WM.ambient then
-				WML.Ambient=WM.ambientA; WML.OutdoorAmbient=WM.ambientB
-			end
-			if WM.time then WML.ClockTime=WM.timeVal end
-			if WM.fog then WML.FogStart=WM.fogS; WML.FogEnd=WM.fogE end
-			if WM.light and not WM.fullbright then WML.Brightness=WM.bright; WML.ExposureCompensation=WM.exposure end
-			if WM.shadows then WML.GlobalShadows=true; WML.ShadowSoftness=WM.softness end
-		end)
-		if not ok then (warn or print)("[TokaiWorldMod] "..tostring(err)) end
-	end)
-	table.insert(getgenv().Moon_Connections,_wc)
-	local WorldTab=Window:DrawTab({Name="World",Icon="globe",Type="Double"})
-	local SWL=WorldTab:DrawSection({Name="World",Position="left"})
-	local SWR=WorldTab:DrawSection({Name="Lighting",Position="right"})
-	SWL:AddToggle({Name="Custom Ambient",Flag="WM_Amb",Default=false,Callback=function(v)
-		WM.ambient=v; if not v then WML.Ambient=WMsaved.Ambient; WML.OutdoorAmbient=WMsaved.OutdoorAmbient end
-	end})
-	SWL:AddToggle({Name="Custom Time",Flag="WM_TimeEn",Default=false,Callback=function(v)
-		WM.time=v; if not v then WML.ClockTime=WMsaved.ClockTime end
-	end})
-	SWL:AddSlider({Name="World Time",Flag="WM_Time",Min=0,Max=24,Default=14,Callback=function(v) WM.timeVal=v end})
-	SWL:AddToggle({Name="Remove Fog",Flag="WM_FogEn",Default=false,Callback=function(v)
-		WM.fog=v
-		if v then WM.fogS=100000; WM.fogE=100001
-		else WML.FogStart=WMsaved.FogStart; WML.FogEnd=WMsaved.FogEnd end
-	end})
-	SWL:AddSlider({Name="Fog Start",Flag="WM_FogS",Min=0,Max=5000,Default=0,Callback=function(v) WM.fogS=v end})
-	SWL:AddSlider({Name="Fog End",Flag="WM_FogE",Min=0,Max=10000,Default=1000,Callback=function(v) WM.fogE=v end})
-	SWR:AddToggle({Name="Fullbright",Flag="WM_Full",Default=false,Callback=function(v)
-		WM.fullbright=v
-		if not v then WML.Ambient=WMsaved.Ambient; WML.OutdoorAmbient=WMsaved.OutdoorAmbient; WML.Brightness=WMsaved.Brightness end
-	end})
-	SWR:AddToggle({Name="Custom Lighting",Flag="WM_Light",Default=false,Callback=function(v)
-		WM.light=v
-		if not v then WML.Brightness=WMsaved.Brightness; WML.ExposureCompensation=WMsaved.ExposureCompensation end
-	end})
-	SWR:AddSlider({Name="Brightness",Flag="WM_Bright",Min=0,Max=10,Default=2,Callback=function(v) WM.bright=v end})
-	SWR:AddSlider({Name="Exposure",Flag="WM_Exp",Min=-5,Max=5,Default=0,Callback=function(v) WM.exposure=v end})
-	SWR:AddToggle({Name="Custom Shadows",Flag="WM_Shad",Default=false,Callback=function(v)
-		WM.shadows=v
-		if not v then WML.GlobalShadows=WMsaved.GlobalShadows; WML.ShadowSoftness=WMsaved.ShadowSoftness end
-	end})
-	SWR:AddSlider({Name="Shadow Softness",Flag="WM_ShadSoft",Min=0,Max=100,Default=14,Callback=function(v) WM.softness=v/100 end})
-	SWR:AddDropdown({Name="Graphics Tech",Flag="WM_Tech",Default="ShadowMap",
-		Options={"ShadowMap","Unified","Future","Voxel","Compatibility"},
-		Callback=function(v) pcall(function() WML.Technology=Enum.Technology[v] end) end})
-	print("[TokaiWorldMod] Loaded")
-end)
-
--- ══════════════════
--- 7. LEAN SENSE ESP
--- ══════════════════
-pcall(function()
-	local SE={active=true,objects={},scanAt=0,anchor=nil}
-	local SE_cfg={
-		npc   ={en=true, box=false,hp=false,name=true,dist=true,tracer=false,osa=false,skel=false,chams=false,
-			boxC={1,1,1},hpC={0,1,0},nameC={1,1,1},distC={1,1,1},tracC={1,1,1},chamC={0,1,0.4},chamO={1,1,1}},
-		player={en=true, box=false,hp=false,name=true,dist=false,tracer=false,osa=false,skel=false,chams=false,
-			boxC={1,1,1},hpC={0,1,0},nameC={1,1,1},distC={1,1,1},tracC={1,1,1},chamC={0.2,0.8,1},chamO={1,1,1}},
-		zombie={en=false,box=false,hp=false,name=false,dist=false,tracer=false,osa=false,skel=false,chams=false,
-			boxC={1,0.5,0},hpC={0,1,0},nameC={1,1,1},distC={1,1,1},tracC={1,1,1},chamC={1,0.4,0},chamO={1,1,1}},
-	}
-	getgenv().TokaiSense=SE
-	getgenv().TokaiSenseCfg=SE_cfg
-
-	local SEray=RaycastParams.new()
-	SEray.FilterType=Enum.RaycastFilterType.Exclude
-	SEray.IgnoreWater=true
-
-	local function SEkind(a)
-		local reg=Tokai_GetReg(); if not reg then return nil end
-		if not a or not a.UID or reg[a.UID]~=a then return nil end
-		local me=Tokai_GetMe()
-		if a.IsLocalPlayer or a.Owner==LocalPlayer or a==me then return nil end
-		if not Tokai_Alive(a) then return nil end
-		if a.Zombie then return "zombie" end
-		if a.Owner==nil then return "npc" end
-		if typeof(a.Owner)=="Instance" and a.Owner:IsA("Player") then return "player" end
-		return nil
-	end
-	local function SEc3(t) return Color3.new(t[1],t[2],t[3]) end
-	local function SEpartCF(actor,part)
-		local root=actor.RootPart
-		if not root or root:IsDescendantOf(workspace) then return part.CFrame end
-		local pose=typeof(actor.CFrame)=="CFrame" and actor.CFrame.Rotation or CFrame.new()
-		local af=pose+actor.Position
-		return af*root.CFrame:ToObjectSpace(part.CFrame)
-	end
-
-	local function SEsync()
-		if tick()<SE.scanAt then return end
-		SE.scanAt=tick()+0.4
-		local reg=Tokai_GetReg()
-		for a,o in pairs(SE.objects) do
-			if not SEkind(a) or not a.Character or not a.Character.Parent then
-				for _,d in pairs(o.d) do pcall(function() d:Remove() end) end
-				for _,ad in pairs(o.ad) do pcall(function() ad:Destroy() end) end
-				SE.objects[a]=nil
-			end
-		end
-		for _,a in pairs(reg or {}) do
-			if SEkind(a) and a.Character and a.Character.Parent then
-				if not SE.objects[a] then
-					SE.objects[a]={a=a,d={},ad={},parts={},clear={},nextRay=0}
-					for _,p in ipairs(a.Character:GetDescendants()) do
-						if p:IsA("BasePart") then SE.objects[a].parts[#SE.objects[a].parts+1]=p end
-					end
-				end
-			end
-		end
-	end
-
-	local function SEchams(o,cam)
-		local kind=SEkind(o.a); if not kind then return end
-		local cfg=SE_cfg[kind]; if not cfg or not cfg.chams then return end
-		if tick()>=o.nextRay then
-			o.nextRay=tick()+0.15; o.clear={}
-			local me=Tokai_GetMe()
-			local filt={o.a.Character,workspace.CurrentCamera}
-			if me and me.Character then filt[#filt+1]=me.Character end
-			SEray.FilterDescendantsInstances=filt
-			for _,p in ipairs(o.parts) do
-				if p.Parent then
-					local cf=SEpartCF(o.a,p)
-					local hit=workspace:Raycast(cam.CFrame.Position,cf.Position-cam.CFrame.Position,SEray)
-					if not hit then o.clear[p]=true end
-				end
-			end
-		end
-		if not SE.anchor then
-			SE.anchor=Instance.new("Part"); SE.anchor.Name="TokaiSEAnchor"
-			SE.anchor.Size=Vector3.one*0.01; SE.anchor.Transparency=1
-			SE.anchor.Anchored=true; SE.anchor.CanCollide=false; SE.anchor.CanQuery=false
-		end
-		SE.anchor.Parent=workspace.CurrentCamera
-		for i,p in ipairs(o.parts) do
-			if p.Parent and p:IsDescendantOf(o.a.Character) then
-				local clear=o.clear[p]
-				local col=clear and SEc3(cfg.chamC) or SEc3(cfg.chamO)
-				local alpha=clear and 0.15 or 0.75
-				local ad=o.ad[i]
-				if not ad then
-					ad=Instance.new("BoxHandleAdornment")
-					ad.Name="TokaiSEChams"; ad.Adornee=SE.anchor
-					ad.AlwaysOnTop=true; ad.ZIndex=3; ad.Parent=SE.anchor; o.ad[i]=ad
-				end
-				ad.Size=p.Size; ad.CFrame=SEpartCF(o.a,p)
-				ad.Color3=col; ad.Transparency=alpha; ad.Visible=true
-			end
-		end
-	end
-
-	local function SErender(o,cam,origin)
-		for _,d in pairs(o.d) do d.Visible=false end
-		for _,ad in pairs(o.ad) do ad.Visible=false end
-		local a=o.a; local kind=SEkind(a); if not kind then return end
-		local cfg=SE_cfg[kind]; if not cfg or not cfg.en then return end
-		if not a.Character or not a.Character.Parent then return end
-		local pos=Tokai_Pos(a); if not pos then return end
-		local dist=(pos-origin).Magnitude
-		local cam_pos,onScreen=cam:WorldToViewportPoint(pos)
-		if cam_pos.Z<0.05 and not onScreen then return end
-		local view=cam.ViewportSize
-		-- Bounding box 2D from parts
-		local mn,mx
-		for _,p in ipairs(o.parts) do
-			if p.Parent then
-				local sp,os2=cam:WorldToViewportPoint(SEpartCF(a,p).Position)
-				if sp.Z>0.05 and os2 then
-					local v=Vector2.new(sp.X,sp.Y)
-					mn=mn and mn:Min(v) or v; mx=mx and mx:Max(v) or v
-				end
-			end
-		end
-		local bvis=mn and mx and mx.X>=0 and mx.Y>=0 and mn.X<=view.X and mn.Y<=view.Y
-		if bvis then pcall(SEchams,o,cam) end
-		if not bvis then
-			if cfg.osa and not onScreen then
-				local rel=cam.CFrame:PointToObjectSpace(pos)
-				local dir=Vector2.new(rel.X,rel.Z)
-				if dir.Magnitude>0.001 then dir=dir.Unit end
-				local ctr=view*0.5
-				local rad=math.min(120,math.min(view.X,view.Y)*0.5-20)
-				local tip=ctr+dir*rad
-				local bk=tip-dir*12
-				local sd=Vector2.new(-dir.Y,dir.X)*6
-				local d=o.d.arrow
-				if not d and Drawing then d=Drawing.new("Triangle"); o.d.arrow=d end
-				if d then d.PointA=tip; d.PointB=bk+sd; d.PointC=bk-sd; d.Filled=true; d.Color=SEc3(cfg.tracC); d.Visible=true end
-			end
-			return
-		end
-		local sz=mx-mn; local cx=(mn.X+mx.X)*0.5
-		if cfg.box then
-			local d=o.d.box
-			if not d and Drawing then d=Drawing.new("Square"); o.d.box=d end
-			if d then d.Position=mn; d.Size=sz; d.Filled=false; d.Thickness=1; d.Color=SEc3(cfg.boxC); d.Visible=true end
-		end
-		if cfg.hp then
-			local hp=type(a.Health)=="number" and a.Health or 0
-			local maxhp=a.MaxHealth or 100
-			local ratio=math.clamp(hp/math.max(1,maxhp),0,1)
-			local bot=Vector2.new(mn.X-5,mx.Y)
-			local top=Vector2.new(mn.X-5,mx.Y-sz.Y*ratio)
-			local dh=o.d.hp
-			if not dh and Drawing then dh=Drawing.new("Line"); o.d.hp=dh end
-			if dh then
-				dh.From=bot; dh.To=top; dh.Thickness=2
-				dh.Color=Color3.new(1-ratio,ratio,0); dh.Visible=true
-			end
-		end
-		if cfg.name then
-			local lbl=a.Character.Name
-			local dn=o.d.name
-			if not dn and Drawing then dn=Drawing.new("Text"); o.d.name=dn end
-			if dn then dn.Text=lbl; dn.Position=Vector2.new(cx,mn.Y-14); dn.Size=13; dn.Center=true; dn.Outline=true; dn.Color=SEc3(cfg.nameC); dn.Visible=true end
-		end
-		if cfg.dist then
-			local dd=o.d.dist
-			if not dd and Drawing then dd=Drawing.new("Text"); o.d.dist=dd end
-			if dd then dd.Text=string.format("%.0fm",dist); dd.Position=Vector2.new(cx,mx.Y+2); dd.Size=11; dd.Center=true; dd.Outline=true; dd.Color=SEc3(cfg.distC); dd.Visible=true end
-		end
-		if cfg.tracer then
-			local dt=o.d.tracer
-			if not dt and Drawing then dt=Drawing.new("Line"); o.d.tracer=dt end
-			if dt then dt.From=Vector2.new(view.X*0.5,view.Y); dt.To=Vector2.new(cx,mx.Y); dt.Thickness=1; dt.Color=SEc3(cfg.tracC); dt.Visible=true end
-		end
-	end
-
-	local function SErender_all()
-		if not SE.active then return end
-		SEsync()
-		local cam=workspace.CurrentCamera; if not cam then return end
-		local me=Tokai_GetMe()
-		local origin=me and Tokai_Pos(me) or cam.CFrame.Position
-		for _,o in pairs(SE.objects) do
-			pcall(SErender,o,cam,origin)
-		end
-	end
-
-	local _sc=RunService.RenderStepped:Connect(function()
-		local ok,err=pcall(SErender_all)
-		if not ok then (warn or print)("[TokaiESP] "..tostring(err)) end
-	end)
-	table.insert(getgenv().Moon_Connections,_sc)
-
-	local TokaiESPTab=Window:DrawTab({Name="Tokai ESP",Icon="scan-eye",Type="Double"})
-	local function SEsection(tab,kind,label)
-		local cfg=SE_cfg[kind]
-		local S=tab:DrawSection({Name=label,Position="left"})
-		S:AddToggle({Name="Enable",Flag="SE_"..kind.."_en",Default=cfg.en,Callback=function(v) cfg.en=v end})
-		S:AddToggle({Name="Box",Flag="SE_"..kind.."_box",Default=false,Callback=function(v) cfg.box=v end})
-		S:AddToggle({Name="Health Bar",Flag="SE_"..kind.."_hp",Default=false,Callback=function(v) cfg.hp=v end})
-		S:AddToggle({Name="Name",Flag="SE_"..kind.."_name",Default=cfg.name,Callback=function(v) cfg.name=v end})
-		S:AddToggle({Name="Distance",Flag="SE_"..kind.."_dist",Default=cfg.dist,Callback=function(v) cfg.dist=v end})
-		S:AddToggle({Name="Tracer",Flag="SE_"..kind.."_trac",Default=false,Callback=function(v) cfg.tracer=v end})
-		S:AddToggle({Name="Off-Screen Arrow",Flag="SE_"..kind.."_osa",Default=false,Callback=function(v) cfg.osa=v end})
-		S:AddToggle({Name="Chams",Flag="SE_"..kind.."_chams",Default=false,Callback=function(v) cfg.chams=v end})
-	end
-	SEsection(TokaiESPTab,"npc","NPCs")
-	SEsection(TokaiESPTab,"player","Players")
-	SEsection(TokaiESPTab,"zombie","Zombies")
-	print("[TokaiESP] Loaded")
-end)
-
-print("[Tokaihub Modules] All loaded")
