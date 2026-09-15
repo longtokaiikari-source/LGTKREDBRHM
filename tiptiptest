@@ -1,4 +1,4 @@
-local Repository = "https://raw.githubusercontent.com/longhazem/lib-obsidian/main/"
+local Repository = "https://raw.githubusercontent.com/longhazem/libba/main/"
 
 local function GetLoadstringSource(Url)
 	local function tryRequest(fn, args)
@@ -20,7 +20,7 @@ local function GetLoadstringSource(Url)
 	end
 	if not body then error("[TokaiHub] HTTP failed: " .. tostring(Url), 2) end
 	if body:match("^429") or body:lower():match("rate limit") then
-		warn("[TokaiHub] Rate limit — cho 10s roi thu lai")
+		(warn or print)("[TokaiHub] Rate limit — cho 10s roi thu lai")
 		task.wait(10)
 		return GetLoadstringSource(Url)
 	end
@@ -37,18 +37,18 @@ end
 
 local function LoadRemote(Url)
 	local Source = GetLoadstringSource(Url)
-	if string.find(Url, "/Library.lua", 1, true) then Source = PatchObsidianSource(Source) end
+	if string.find(Url, "/source.lua", 1, true) then Source = PatchObsidianSource(Source) end
 	local Chunk, LoadError = loadstring(Source)
 	if not Chunk then error("loadstring failed for " .. tostring(Url) .. ": " .. tostring(LoadError), 2) end
 	return Chunk()
 end
 
-local Library = LoadRemote(Repository .. "Library.lua")
+local Library = LoadRemote(Repository .. "source.lua")
 local ThemeManager = LoadRemote(Repository .. "addons/ThemeManager.lua")
 local SaveManager = LoadRemote(Repository .. "addons/SaveManager.lua")
 
-local Options = Library.Options
-local Toggles = Library.Toggles
+local Options = getgenv().Options or {}
+local Toggles = getgenv().Toggles or {}
 
 local MoonUI = { Scale = { Window = 1 } }
 function MoonUI:SetTheme() end
@@ -56,13 +56,9 @@ function MoonUI:RefreshCurrentColor() end
 function MoonUI:ConfigManager(Data) return Data or {} end
 function MoonUI.newNotify()
 	return { new = function(Data)
-		pcall(function()
-			Library:Notify({
-				Title       = (Data and Data.Title) or "Tokaihub",
-				Description = (Data and (Data.Content or Data.Description)) or "",
-				Time        = (Data and Data.Duration) or 5,
-			})
-		end)
+		local text = (Data and Data.Title) or "Tokaihub"
+		if Data and (Data.Content or Data.Description) then text = text .. " — " .. (Data.Content or Data.Description) end
+		pcall(function() Library:Notify(text, (Data and Data.Duration) or 5) end)
 	end }
 end
 
@@ -124,7 +120,7 @@ local function WrapSection(Groupbox)
 		local Input = Groupbox:AddInput(Flag, {
 			Text = NormalizeUIString(Data.Name or Flag, Flag),
 			Default = Data.Default or "",
-			Numeric = Data.NumericOnly or false,
+			NumericOnly = Data.NumericOnly or false,
 			Placeholder = Data.Placeholder or "",
 			Tooltip = Data.Tooltip,
 		})
@@ -144,27 +140,27 @@ local function WrapTab(Tab)
 end
 
 function MoonUI.new(Data)
-	local Window = Library:CreateWindow({ Title = "Tokaihub", Footer = "discord.gg/6zSx7gUeMQ", NotifySide = "Right", ShowCustomCursor = false })
+	local Window = Library:CreateWindow({ Title = "Tokaihub", Center = true, AutoShow = true, TabPadding = 8, MenuFadeTime = 0.2 })
 	local SettingsTab
 	local Wrapped = {
 		Raw = Window,
 		DrawTab = function(_, TabData)
 			local Name = TabData.Name or "Tab"
-			local Tab = Window:AddTab(Name, "", Name)
+			local Tab = Window:AddTab(Name)
 			if Name == "Settings" or Name == "System" then SettingsTab = Tab end
 			return WrapTab(Tab)
 		end,
 		DrawConfig = function(_, ConfigData)
-			SettingsTab = SettingsTab or Window:AddTab("Settings", "settings", "UI settings")
+			SettingsTab = SettingsTab or Window:AddTab("Settings")
 			ThemeManager:SetLibrary(Library); SaveManager:SetLibrary(Library)
 			SaveManager:IgnoreThemeSettings(); SaveManager:SetIgnoreIndexes({"MenuKeybind"})
 			ThemeManager:SetFolder("Tokaihub"); SaveManager:SetFolder("Tokaihub/specific-game")
 			if SaveManager.SetSubFolder then SaveManager:SetSubFolder("specific-place") end
-			SaveManager:BuildConfigSection(SettingsTab); ThemeManager:AddThemeOptions(SettingsTab)
+			SaveManager:BuildConfigSection(SettingsTab); ThemeManager:ApplyToTab(SettingsTab)
 			SaveManager:LoadAutoloadConfig()
 			return { Init = function() end }
 		end,
-		SetMenuKey = function(_, Key) task.defer(function() Library.ToggleKeybind = Library.Options and Library.Options.MenuKeybind end) end,
+		SetMenuKey = function(_, Key) task.defer(function() Library.ToggleKeybind = getgenv().Options and getgenv().Options.MenuKeybind end) end,
 		Unload = function() Library:Unload() end,
 	}
 	return Wrapped
@@ -244,7 +240,7 @@ local Config = {
 	ShowNames = true, ShowDistance = true, ShowHealth = true, ShowWeaponInfo = true, BoxStyle = "Full",
 	ShowVehicleBox = true, VehicleBoxStyle = "Full", ShowVehicleName = true, ShowVehicleHealth = true, VehicleHealthBarSide = "Bottom",
 	TextScale = 1.20, DynamicTextScaling = true, MaxDistance = 2000,
-	NoRecoil = false, NoSpread = false, UnlockFiremodes = false, CustomRPM = false, RPMValue = 800,
+	NoRecoil = false, NoSpread = false, UnlockFiremodes = false, CustomRPM = false, RPMValue = 800, ForceHeadshot = false,
 	SilentAim = false, SilentAimFOV = 100, SilentAimHitChance = 100, SilentAimTargetPart = "Head",
 	RageMode = false, Rage_LookAt = false, Rage_FOV = 360, Rage_Range = 500, Rage_TargetPart = "Head",
 	ShowFOV = false, Prediction = false, BulletDrop = false, ShowPrediction = false,
@@ -606,6 +602,27 @@ local function IsIgnored(part)
 	return false
 end
 
+-- Resolve correct world-space position of a part on any actor, including
+-- NPCs mounted inside a vehicle whose character lives in a WorldModel.
+-- Parts in a WorldModel are in local (vehicle-relative) space; actor.Position
+-- and actor.CFrame are always world-space replication state.
+local function GetPartWorldPos(actor, part)
+	if not part then return actor.Position end
+	local char = actor.Character
+	if not char then return actor.Position end
+	local root = char.PrimaryPart or char:FindFirstChild("HumanoidRootPart")
+	-- Root in workspace: part.CFrame.Position is already world space.
+	if root and root:IsDescendantOf(Workspace) then
+		return part.CFrame.Position
+	end
+	-- Parked WorldModel rig (NPC seated in a vehicle): reconstruct from
+	-- the replicated actor state, same method MainSource Combat.PartCFrame uses.
+	if not root then return actor.Position end
+	local pose = typeof(actor.CFrame) == "CFrame" and actor.CFrame.Rotation or CFrame.new()
+	local actorFrame = pose + actor.Position
+	return (actorFrame * root.CFrame:ToObjectSpace(part.CFrame)).Position
+end
+
 local function IsVisible(targetActor,targetPart,origin,isPriority)
 	if not targetPart or not targetPart.Parent then return false end
 	local now=tick(); local uid=targetActor.UID
@@ -622,7 +639,9 @@ local function IsVisible(targetActor,targetPart,origin,isPriority)
 	end
 	local character=targetPart.Parent
 	local originPos=origin or Camera.CFrame.Position
-	local direction=(targetPart.Position-originPos)
+	-- GetPartWorldPos handles vehicle-mounted NPCs whose parts are in local space
+	local targetWorldPos=GetPartWorldPos(targetActor,targetPart)
+	local direction=(targetWorldPos-originPos)
 	local dist=direction.Magnitude
 	if not targetActor.ViewportOnScreen and (dist>100) then
 		VisCache[uid]={result=false,last=now}; return false
@@ -634,17 +653,28 @@ local function IsVisible(targetActor,targetPart,origin,isPriority)
 		local myActor=ReplicatorService.LocalActor
 		if myActor.Seat and myActor.Seat.Model then table.insert(VisFilterTable,myActor.Seat.Model) end
 	end
+	-- Filter the vehicle the target NPC is seated in so it doesn't block visibility
+	if targetActor.Seat and targetActor.Seat.Model then
+		table.insert(VisFilterTable,targetActor.Seat.Model)
+	end
 	VisRayParams.FilterDescendantsInstances=VisFilterTable
 	local isVisible=false
 	local result=Workspace:Raycast(originPos,direction,VisRayParams)
+	-- Check both character descendant and ActorUID attribute (render rig vs collision body)
+	local function hitBelongsToTarget(instance)
+		if instance:IsDescendantOf(character) then return true end
+		local attrUID = instance:GetAttribute("ActorUID")
+		if attrUID and attrUID == uid then return true end
+		return false
+	end
 	if not result then isVisible=true
-	elseif result.Instance:IsDescendantOf(character) then isVisible=true
+	elseif hitBelongsToTarget(result.Instance) then isVisible=true
 	else
 		local penetrations=0; local dirUnit=direction.Unit
 		while penetrations<2 do
 			if not result then isVisible=true; break end
 			local hitPart=result.Instance
-			if hitPart:IsDescendantOf(character) then isVisible=true; break end
+			if hitBelongsToTarget(hitPart) then isVisible=true; break end
 			if IsIgnored(hitPart) then
 				table.insert(VisFilterTable,hitPart)
 				VisRayParams.FilterDescendantsInstances=VisFilterTable
@@ -673,7 +703,10 @@ GetCombatTarget = function(mode)
 			if not dist or dist<=0 then dist=(activeActor.Position-checkOrigin).Magnitude end
 			if dist<=maxDistance then
 				local targetPart=activeActor.Parts and activeActor.Parts[targetPartName]
-				if targetPart and IsVisible(activeActor,targetPart,checkOrigin,true) then return targetPart,activeActor end
+				if targetPart and IsVisible(activeActor,targetPart,checkOrigin,true) then
+					getgenv()._combatTargetWorldPos=GetPartWorldPos(activeActor,targetPart)
+					return targetPart,activeActor
+				end
 			end
 		end
 		ActorManager.SelectedActor_RB=nil; ActorManager.SelectedTarget_RB=nil
@@ -681,8 +714,8 @@ GetCombatTarget = function(mode)
 	local candidates=getgenv()._targetCandidates or table.create(64)
 	table.clear(candidates); getgenv()._targetCandidates=candidates
 	local now=tick(); local ignoredTargets=ActorManager._ignoredTargets
-	local mouse,mouseX,mouseY
-	if useFOV then mouse=UserInputService:GetMouseLocation(); mouseX,mouseY=mouse.X,mouse.Y end
+	local mouseX,mouseY
+	if useFOV then local sc=Camera.ViewportSize/2; mouseX,mouseY=sc.X,sc.Y end
 	local enemyList
 	if mode=="Rage" and ActorManager._sectors and ActorManager._playerSector then
 		enemyList={}
@@ -704,18 +737,17 @@ GetCombatTarget = function(mode)
 		local char=actor.Character; if not char then continue end
 		local dist=actor.LOD_Distance
 		if not dist or dist<=0 then
-			local root=char.PrimaryPart or char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
-			if not root then continue end
-			local delta=root.Position-checkOrigin
+			-- actor.Position is the replicated world position — always correct
+			-- even when the NPC's character is inside a vehicle WorldModel
+			local delta=actor.Position-checkOrigin
 			dist=math.sqrt(delta.X*delta.X+delta.Y*delta.Y+delta.Z*delta.Z)
 		end
 		if dist>maxDistance then continue end
 		local score=dist
 		if useFOV then
 			if not actor.ViewportOnScreen and dist>50 then continue end
-			local root=char.PrimaryPart or char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
-			if not root then continue end
-			local pos,onScreen=Camera:WorldToViewportPoint(root.Position)
+			-- Use actor.Position (world space) not root.Position (may be vehicle-local)
+			local pos,onScreen=Camera:WorldToViewportPoint(actor.Position)
 			if not onScreen then continue end
 			local dx=pos.X-mouseX; local dy=pos.Y-mouseY
 			local screenDistSq=(dx*dx)+(dy*dy)
@@ -731,7 +763,11 @@ GetCombatTarget = function(mode)
 		local part=char:FindFirstChild(targetPartName)
 		if not part then part=char:FindFirstChild("Head") or char:FindFirstChild("UpperTorso") end
 		if part and part.Parent then
-			if IsVisible(actor,part,checkOrigin) then return part,actor end
+			if IsVisible(actor,part,checkOrigin) then
+				-- Cache world pos so every muzzle/discharge hook uses correct coords
+				getgenv()._combatTargetWorldPos=GetPartWorldPos(actor,part)
+				return part,actor
+			end
 			if getgenv().RaycastBudget<=0 then break end
 		end
 	end
@@ -757,7 +793,9 @@ local function HookController(controller)
 			local combatTarget=ActorManager.SelectedTarget_RB or ActorManager.SelectedTarget_SA
 			local targetActor=ActorManager.SelectedActor_RB or ActorManager.SelectedActor_SA
 			if (Config.SilentAim or Config.RageMode) and combatTarget and targetActor then
-				local targetPos=combatTarget.Position; local gravity=32.2; local muzzle_velocity=2000
+				-- Use cached world-space pos; combatTarget.Position is local for vehicle NPCs
+				local targetPos=getgenv()._combatTargetWorldPos or combatTarget.Position
+				local gravity=32.2; local muzzle_velocity=2000
 				if self._firearm and self._firearm.Tune then
 					local caliberName=self._firearm.Tune.Caliber; local barrelLen=self._firearm.Tune.Barrel
 					if BulletService and BulletService.GetInfo then
@@ -766,7 +804,11 @@ local function HookController(controller)
 					end
 				end
 				local targetVelocity=Vector3_new(0,0,0)
-				if targetActor._oldDirection then targetVelocity=targetActor._oldDirection*60
+				if targetActor._oldDirection then
+					targetVelocity=targetActor._oldDirection*60
+				elseif targetActor.Seat and targetActor.Seat.Model and targetActor.Seat.Model.PrimaryPart then
+					-- NPC in vehicle: use vehicle body velocity for lead calculation
+					targetVelocity=targetActor.Seat.Model.PrimaryPart.AssemblyLinearVelocity or Vector3_new(0,0,0)
 				elseif combatTarget.Parent and combatTarget.Parent.PrimaryPart then
 					targetVelocity=combatTarget.Parent.PrimaryPart.AssemblyLinearVelocity or Vector3_new(0,0,0)
 				end
@@ -798,7 +840,8 @@ local function HookController(controller)
 						local tool=self._actor.Character:FindFirstChild("HumanoidRootPart")
 						if tool then muzzlePos=tool.Position end
 					end
-					local targetPos=targetHead.Position; local direction=(targetPos-muzzlePos).Unit
+					local targetPos=getgenv()._combatTargetWorldPos or targetHead.Position
+					local direction=(targetPos-muzzlePos).Unit
 					if self._actor and self._actor.IsLocalPlayer and ReplicatorService and ReplicatorService.LocalActor and ReplicatorService.LocalActor.Character then
 						local root=ReplicatorService.LocalActor.Character.PrimaryPart
 						if root then
@@ -815,13 +858,11 @@ local function HookController(controller)
 	end
 end
 
-local FOVCircle = Drawing.new("Circle")
-FOVCircle.Thickness = 1
-FOVCircle.NumSides = 60
-FOVCircle.Radius = Config.SilentAimFOV
-FOVCircle.Filled = false
-FOVCircle.Visible = false
-FOVCircle.Color = Color3.fromRGB(255, 255, 255)
+local FOVCircle=Drawing.new("Circle")
+FOVCircle.Thickness=1
+pcall(function() FOVCircle.NumSides=60 end)
+FOVCircle.Radius=Config.SilentAimFOV
+FOVCircle.Filled=false; FOVCircle.Visible=false; FOVCircle.Color=Color3.fromRGB(255,255,255)
 
 getgenv().VelocityCache={}
 getgenv().PredictionDot=Drawing.new("Circle")
@@ -1115,7 +1156,7 @@ function SetupHooks()
 		end
 	end
 	else
-		warn("[ESP] Could not find CharacterController.Update to hook!")
+		(warn or print)("[ESP] Could not find CharacterController.Update to hook!")
 	end
 end
 
@@ -1134,7 +1175,7 @@ local function InitializeServices()
 				local targetHead=ActorManager.SelectedTarget_RB or ActorManager.SelectedTarget_SA
 				local targetActor=ActorManager.SelectedActor_RB or ActorManager.SelectedActor_SA
 				if targetHead then
-					local targetPos=targetHead.Position; local muzzle_velocity=2000
+					local targetPos=getgenv()._combatTargetWorldPos or targetHead.Position; local muzzle_velocity=2000
 					if p49==lastUsedCaliber then muzzle_velocity=lastUsedVelocity
 					elseif p49 and BulletService.GetInfo then
 						local vel=BulletService:GetInfo(p49,p50)
@@ -1156,6 +1197,26 @@ local function InitializeServices()
 			return BulletService._originalDischarge(self,originCF,p49,p50,p51,p52,p53,p54,p55,p56,p57)
 		end
 		getgenv()._BulletServiceHooked=true
+	end
+	-- Force Headshot: hook _bulletProcess to redirect any hit part to Head before damage is applied
+	if ReplicatorService and type(ReplicatorService._bulletProcess)=="function" then
+		if not ReplicatorService._originalBulletProcess then
+			ReplicatorService._originalBulletProcess=ReplicatorService._bulletProcess
+			ReplicatorService._bulletProcess=function(self,uid,replicate,position,part,normal,material,elapsed,...)
+				if Config.ForceHeadshot and replicate and part and type(self.GetFromBodyPart)=="function" then
+					local ok,actorUID,actor=pcall(function() return self:GetFromBodyPart(part) end)
+					if ok and actor and actor.Alive and actor.Character and not actor._isTeammate then
+						local head=actor.Parts and actor.Parts.Head
+						if head and head.Parent and head:IsDescendantOf(actor.Character) then
+							part=head
+							-- Use reconstructed world pos for vehicle-mounted NPCs
+							position=GetPartWorldPos(actor,head)
+						end
+					end
+				end
+				return ReplicatorService._originalBulletProcess(self,uid,replicate,position,part,normal,material,elapsed,...)
+			end
+		end
 	end
 	if Recoiler then
 		local rc=Recoiler
@@ -1201,7 +1262,6 @@ local function UpdateCombat(frameId)
 				local chamberCount = (equippedController._item and equippedController._item.MetaData and equippedController._item.MetaData.Chamber) and 1 or 0
 				local totalAmmo = magCapacity + chamberCount
 				local isReloading = equippedController._reloading == true
-				-- Stuck detection: _reloading true > 4s → force reset
 				if isReloading then
 					local reloadStart = getgenv()._autoReloadStart or now_ar
 					getgenv()._autoReloadStart = reloadStart
@@ -1361,13 +1421,11 @@ local function UpdateCombat(frameId)
 			end
 		end
 	end
-	local mouse = UserInputService:GetMouseLocation()
 	if FOVCircle then
-		FOVCircle.Visible = Config.SilentAim and Config.ShowFOV
-		if FOVCircle.Visible then
-			FOVCircle.Position = mouse
-			FOVCircle.Radius = Config.SilentAimFOV
-		end
+		pcall(function() FOVCircle.Radius=Config.SilentAimFOV end)
+		local fovShow=Config.SilentAim and Config.ShowFOV
+		pcall(function() FOVCircle.Visible=fovShow end)
+		if fovShow then local sc=Camera.ViewportSize/2; pcall(function() FOVCircle.Position=Vector2.new(sc.X,sc.Y) end) end
 	end
 	local targetPart=targetPart_SA; local targetActor=ActorManager.SelectedActor_SA
 	if targetPart then
@@ -1383,7 +1441,7 @@ local function UpdateCombat(frameId)
 		local dot=getgenv().PredictionDot
 		if Config.ShowPrediction and targetPart then
 			local muzzlePos=GetMuzzlePosition() or Camera.CFrame.Position
-			local targetPos=targetPart.Position; local targetVel=getgenv()._lastPredVel or Vector3_new(0,0,0)
+			local targetPos=getgenv()._combatTargetWorldPos or targetPart.Position; local targetVel=getgenv()._lastPredVel or Vector3_new(0,0,0)
 			local gravity=32.2; local aimPos,_=SolveLead(muzzlePos,targetPos,targetVel,activeVelocity,gravity)
 			local screenPos,onScreen=Camera:WorldToViewportPoint(aimPos)
 			if onScreen then dot.Position=Vector2_new(screenPos.X,screenPos.Y); dot.Color=cfg.PredictionColor or Color3_fromHSV(0.33,1,1); dot.Visible=true
@@ -1514,14 +1572,24 @@ local function UpdateESPForActor(uid,espData,frameId,cachedCfg,localSquad)
 	if not actor or not actor.Alive then RemoveESP(uid); return end
 	if not ShouldShowEntity(actor,entityType,localSquad) then SetAllVisible(espData.Drawing,espData,false); return end
 	-- Tính distance thực nếu LOD_Distance không có
-	local distance = actor.LOD_Distance or 9999
+	local distance = actor.LOD_Distance
+	if not distance or distance <= 0 then
+		local pos = actor.Position
+		if not pos and actor.Character and actor.Character.PrimaryPart then
+			pos = actor.Character.PrimaryPart.Position
+		end
+		if pos then
+			distance = (Camera.CFrame.Position - pos).Magnitude
+		else
+			distance = 0
+		end
+	end
 	if distance > cachedCfg.MaxDistance then
 		SetAllVisible(espData.Drawing,espData,false)
 		if espData.SimpleESP and espData.SimpleESP.Box then pcall(function() espData.SimpleESP.Box.Visible=false end) end
 		return
 	end
-	if distance > 1500 and (frameId % 4) ~= 0 then return end
-	if distance > 500 and (frameId % 2) ~= 0 then return end
+	if distance > 1500 and (frameId%2) ~= 0 then return end
 	if cachedCfg.SimpleESP then
 		SetAllVisible(espData.Drawing,espData,false)
 		local sESP=espData.SimpleESP
@@ -1535,7 +1603,7 @@ local function UpdateESPForActor(uid,espData,frameId,cachedCfg,localSquad)
 		return
 	end
 	local drawings=espData.Drawing
-	local worldPos = actor.Position or (actor.RootPart and actor.RootPart.Position)
+	local worldPos = actor.Position
 	if not worldPos then
 		if actor.Character then
 			local pp = actor.Character.PrimaryPart or actor.Character:FindFirstChild("Head")
@@ -1544,15 +1612,8 @@ local function UpdateESPForActor(uid,espData,frameId,cachedCfg,localSquad)
 	end
 	if not worldPos then SetAllVisible(drawings,espData,false); return end
 	local screen_point,onScreen=Camera:WorldToViewportPoint(worldPos)
-	local engineVisible = actor.LOD_OnScreen or (distance < 128 and actor.ViewportOnScreen)
-	if not engineVisible then
-		SetAllVisible(drawings, espData, false)
-		return
-	end
-	if not onScreen then
-		SetAllVisible(drawings, espData, false)
-		return
-	end
+	-- Chỉ dùng onScreen — reliable trên PC
+	if not onScreen then SetAllVisible(drawings,espData,false); return end
 	local screenPos=Vector2_new(screen_point.X,screen_point.Y)
 	SetAllVisible(drawings,espData,true)
 	if espData.Highlight then espData.Highlight.FillColor=espData.Color;espData.Highlight.OutlineColor=espData.Color end
@@ -1840,6 +1901,7 @@ S_GunMods:AddToggle({
 })
 S_GunMods:AddToggle({ Name="No Recoil", Flag="Combat_NoRecoil", Default=false, Callback=function(v) Config.NoRecoil=v end })
 S_GunMods:AddToggle({ Name="No Spread", Flag="Combat_NoSpread", Default=false, Callback=function(v) Config.NoSpread=v end })
+S_GunMods:AddToggle({ Name="Force Headshot", Flag="Combat_ForceHeadshot", Default=false, Callback=function(v) Config.ForceHeadshot=v end })
 S_GunMods:AddToggle({ Name="Unlock Firemodes", Flag="Combat_Firemodes", Default=false, Callback=function(v) Config.UnlockFiremodes=v end })
 S_GunMods:AddToggle({ Name="Custom RPM", Flag="Combat_CustomRPM", Default=false, Callback=function(v) Config.CustomRPM=v end })
 S_GunMods:AddSlider({ Name="RPM Value", Min=100, Max=10000, Default=800, Flag="Combat_RPMValue", Callback=function(v) Config.RPMValue=v end })
@@ -2000,8 +2062,8 @@ MenuGroup:AddDropdown({
 MenuGroup:AddDropdown({ Name="DPI Scale", Flag="DPIDropdown", Values={"50%","75%","100%","125%","150%","175%","200%"}, Default="100%", Callback=function(value)
 	value=tostring(value):gsub("%%",""); local DPI=tonumber(value)
 	if DPI and Library.SetDPIScale then Library:SetDPIScale(DPI) end end })
-MenuGroup:AddSlider({ Name="Corner Radius", Flag="UICornerSlider", Default=(Library.CornerRadius or 8), Min=0, Max=20, Rounding=0, Callback=function(value)
-	if Window.SetCornerRadius then Window:SetCornerRadius(value) elseif Window.Raw and Window.Raw.SetCornerRadius then Window.Raw:SetCornerRadius(value) end end })
+MenuGroup:AddSlider({ Name="Corner Radius", Flag="UICornerSlider", Default=Library.CornerRadius or 8, Min=0, Max=20, Rounding=0, Callback=function(value)
+	if Window.Raw and Window.Raw.SetCornerRadius then Window.Raw:SetCornerRadius(value) end end })
 MenuGroup:AddKeybind({ Name="Menu bind", Flag="MenuKeybind", Default="RightShift", NoUI=true, Callback=function()
 	Library.ToggleKeybind=Options.MenuKeybind end })
 MenuGroup:AddButton({ Name="Unload", Callback=function()
@@ -2019,6 +2081,7 @@ ConfigUI:Init()
 -- Main Loop
 local frameCount=0
 local espLoop=RunService.RenderStepped:Connect(function()
+	local ok,err=pcall(function()
 	frameCount=(frameCount+1)%60
 	if ActorManager then
 		ActorManager:Update()
@@ -2032,6 +2095,8 @@ local espLoop=RunService.RenderStepped:Connect(function()
 	UpdateESP()
 	if frameCount%2==0 then UpdateVehicles(frameCount,Config) end
 	UpdateCombat(frameCount)
+	end)
+	if not ok then (warn or print)("[EspLoop] "..tostring(err)) end
 end)
 table.insert(getgenv().Moon_Connections,espLoop)
 
@@ -2072,8 +2137,8 @@ local AutoFarm = {
 	_lastShot = 0,
 	_phase = "seek",          -- seek | shoot | switch | return
 	_enemyIndex = 1,
-	_originCF = nil,          -- vị trí lưu trước khi teleport đến target
-	_returnTimer = 0,         -- timestamp khi bắt đầu phase return
+	_originCF = nil,
+	_returnTimer = 0,
 }
 
 -- Teleport LocalActor đến vị trí gần target
@@ -2146,7 +2211,6 @@ local function AutoFarm_Tick()
 		local target = AutoFarm_NextTarget()
 		if not target then return end
 
-		-- Lưu vị trí hiện tại trước khi teleport — dùng để return về sau
 		if not AutoFarm._originCF then
 			local myActor = ReplicatorService and ReplicatorService.LocalActor
 			if myActor then
@@ -2226,7 +2290,6 @@ local function AutoFarm_Tick()
 
 	-- PHASE: RETURN — teleport về vị trí ban đầu trước khi seek target kế
 	if AutoFarm._phase == "return" then
-		-- Teleport về ngay lập tức mỗi tick (giữ nguyên vị trí nếu bị server push)
 		if AutoFarm._originCF then
 			local myActor = ReplicatorService and ReplicatorService.LocalActor
 			if myActor then
@@ -2237,7 +2300,6 @@ local function AutoFarm_Tick()
 				end)
 			end
 		end
-		-- Chờ 0.5s ổn định rồi mới seek target kế
 		if (now - AutoFarm._returnTimer) >= 0.5 then
 			AutoFarm._originCF = nil
 			AutoFarm._phase = "seek"
@@ -2673,7 +2735,7 @@ local function AF_Hook()
 	end
 
 	if not TargetController then
-		warn("[AntiFall] Controller not found — retry after 2s")
+		(warn or print)("[AntiFall] Controller not found — retry after 2s")
 		task.delay(2, AF_Hook)
 		return
 	end
@@ -2755,6 +2817,7 @@ print("[AntiFall] Loaded")
 
 
 
+-- ==========================================
 -- AURA KILL — Verified từ Flux_client.lua source
 -- Cipher đúng 100%: netEncode verified = RSpy dump match
 -- net:FireServer() = RemoteEvent:FireServer(netEncode(JSONEncode({_code,...}), _key))
@@ -2988,8 +3051,7 @@ S_AK:AddButton({Name="Rescan Network",
 
 print("[AuraKill] Loaded — Cipher verified vs RSpy dump")
 
-
-
+-- ==========================================
 pcall(function()
 -- AUTO FARM
 local AutoFarm = {Enabled=false, OffsetY=-2, _connection=nil, _running=false}
@@ -3076,82 +3138,186 @@ S_AF:AddSlider({Name="Y Offset", Flag="AF_OffsetY", Min=-10, Max=0, Default=-2, 
 print("[AutoFarm] Loaded")
 end)
 
-
-
-
-
--- AUTO LOCKPICK v4
--- InputService._mounts["PickLock"] là callback thật
--- Tìm InputService instance → gọi _mounts["PickLock"](true) mỗi frame
+-- AUTO LOCKPICK — rewrite
+-- Strategy 1 (primary): getloadedmodules → LockpickController class → hook _progress + complete
+-- Strategy 2 (fallback): filtergc → live lockpick state table with _active + _progress
+-- Strategy 3 (fallback): InputService._mounts["PickLock"] called correctly as a mount object
 pcall(function()
 
-local AutoLockpick = {Enabled=false, _connection=nil}
+local AutoLockpick = {
+	Enabled       = false,
+	_connection   = nil,
+	_ctrl         = nil,
+	_nextResolve  = 0,
+	_lastGCScan   = 0,
+	_inputSvc     = nil,
+}
 
-local function ALP_FindInputService()
-    -- InputService: table có _mounts, Binds, Connected, Overrides
-    local ok, gc = pcall(function() return filtergc("table") end)
-    if not ok then ok, gc = pcall(function() return getgc(true) end) end
-    if not ok or not gc then return nil end
-    for _, v in pairs(gc) do
-        if type(v) == "table"
-            and rawget(v, "_mounts") ~= nil
-            and rawget(v, "Binds") ~= nil
-            and rawget(v, "Connected") ~= nil
-            and rawget(v, "Overrides") ~= nil
-        then
-            return v
-        end
-    end
-    return nil
+local function ALP_FindController()
+	if not getloadedmodules then return nil end
+	for _, m in ipairs(getloadedmodules()) do
+		if m.Name == "LockpickController" or m.Name == "Lockpick" or m.Name == "LockPick" then
+			local ok, ctrl = pcall(require, m)
+			if ok and type(ctrl) == "table" then return ctrl end
+		end
+	end
+	return nil
 end
 
-local _inputSvc = nil
-local _lastScan = 0
+local function ALP_FindActiveState()
+	local ok, gc = pcall(function() return filtergc("table") end)
+	if not ok then ok, gc = pcall(function() return getgc(true) end) end
+	if not ok or type(gc) ~= "table" then return nil end
+	for _, v in pairs(gc) do
+		if type(v) == "table" then
+			local prog  = rawget(v, "_progress") or rawget(v, "_pickProgress") or rawget(v, "Progress")
+			local activ = rawget(v, "_active")   or rawget(v, "_pickActive")   or rawget(v, "Active")
+			if type(prog) == "number" and activ == true then return v end
+		end
+	end
+	return nil
+end
 
-local function ALP_Tick()
-    if not AutoLockpick.Enabled then return end
+local function ALP_FindInputService()
+	local ok, gc = pcall(function() return filtergc("table") end)
+	if not ok then ok, gc = pcall(function() return getgc(true) end) end
+	if not ok or type(gc) ~= "table" then return nil end
+	for _, v in pairs(gc) do
+		if type(v) == "table"
+			and rawget(v, "_mounts")   ~= nil
+			and rawget(v, "Binds")     ~= nil
+			and rawget(v, "Connected") ~= nil
+			and rawget(v, "Overrides") ~= nil
+		then return v end
+	end
+	return nil
+end
 
-    -- Rescan InputService mỗi 1s
-    local now = tick()
-    if not _inputSvc or (now - _lastScan > 1) then
-        _lastScan = now
-        _inputSvc = ALP_FindInputService()
-    end
-    if not _inputSvc then return end
+local function ALP_TryComplete(obj)
+	for _, name in ipairs({"_complete","Complete","_onComplete","OnComplete","_finish","Finish","_succeed","Succeed"}) do
+		local fn = rawget(obj, name)
+		if type(fn) == "function" then pcall(fn, obj); return true end
+	end
+	return false
+end
 
-    local mounts = rawget(_inputSvc, "_mounts")
-    if not mounts then return end
+local function ALP_TryMountCall(mount, dt)
+	if type(mount) == "function" then pcall(mount, true); return end
+	if type(mount) ~= "table" then return end
+	for _, key in ipairs({"Update","_update","fire","Fire","Activate","activate"}) do
+		local fn = rawget(mount, key)
+		if type(fn) == "function" then pcall(fn, mount, dt); break end
+	end
+	local mt = getmetatable(mount)
+	if mt and type(rawget(mt, "__call")) == "function" then
+		pcall(mt.__call, mount, mount, true)
+	end
+end
 
-    -- Gọi PickLock callback nếu đang active
-    local pickFn = rawget(mounts, "PickLock")
-    if pickFn and type(pickFn) == "function" then
-        pcall(pickFn, true)
-    end
+local function ALP_Tick(dt)
+	if not AutoLockpick.Enabled then return end
+	local now = tick()
+
+	if not AutoLockpick._ctrl and now > AutoLockpick._nextResolve then
+		AutoLockpick._nextResolve = now + 3
+		AutoLockpick._ctrl = ALP_FindController()
+	end
+
+	if AutoLockpick._ctrl then
+		local ctrl = AutoLockpick._ctrl
+		local isActive = rawget(ctrl, "_active") or rawget(ctrl, "_pickActive") or rawget(ctrl, "Active")
+		if isActive == true then
+			local maxProg = rawget(ctrl, "_maxProgress") or rawget(ctrl, "MaxProgress") or 1
+			if rawget(ctrl, "_progress")      ~= nil then ctrl._progress      = maxProg end
+			if rawget(ctrl, "_pickProgress")  ~= nil then ctrl._pickProgress  = maxProg end
+			if rawget(ctrl, "Progress")       ~= nil then ctrl.Progress       = maxProg end
+			local pins = rawget(ctrl, "_pins") or rawget(ctrl, "Pins")
+			if type(pins) == "table" then
+				for _, pin in pairs(pins) do
+					if type(pin) == "table" then
+						if rawget(pin, "_solved")   ~= nil then pin._solved   = true end
+						if rawget(pin, "_set")      ~= nil then pin._set      = true end
+						if rawget(pin, "Solved")    ~= nil then pin.Solved    = true end
+						if rawget(pin, "_position") ~= nil then pin._position = rawget(pin, "_target") or 1 end
+					end
+				end
+			end
+			ALP_TryComplete(ctrl)
+			return
+		end
+	end
+
+	if now - AutoLockpick._lastGCScan > 0.1 then
+		AutoLockpick._lastGCScan = now
+		local state = ALP_FindActiveState()
+		if state then
+			local maxProg = rawget(state, "_maxProgress") or rawget(state, "MaxProgress") or 1
+			if rawget(state, "_progress")     ~= nil then state._progress     = maxProg end
+			if rawget(state, "_pickProgress") ~= nil then state._pickProgress = maxProg end
+			if rawget(state, "Progress")      ~= nil then state.Progress      = maxProg end
+			local pins = rawget(state, "_pins") or rawget(state, "Pins")
+			if type(pins) == "table" then
+				for _, pin in pairs(pins) do
+					if type(pin) == "table" then
+						if rawget(pin, "_solved")   ~= nil then pin._solved   = true end
+						if rawget(pin, "_set")      ~= nil then pin._set      = true end
+						if rawget(pin, "Solved")    ~= nil then pin.Solved    = true end
+						if rawget(pin, "_position") ~= nil then pin._position = rawget(pin, "_target") or 1 end
+					end
+				end
+			end
+			ALP_TryComplete(state)
+			return
+		end
+	end
+
+	if not AutoLockpick._inputSvc then
+		AutoLockpick._inputSvc = ALP_FindInputService()
+	end
+	if AutoLockpick._inputSvc then
+		local mounts = rawget(AutoLockpick._inputSvc, "_mounts")
+		if mounts then
+			local mount = rawget(mounts, "PickLock") or rawget(mounts, "Lockpick") or rawget(mounts, "lockpick")
+			if mount then ALP_TryMountCall(mount, dt) end
+		end
+	end
 end
 
 function AutoLockpick.Start()
-    if AutoLockpick._connection then return end
-    AutoLockpick._connection = RunService.Heartbeat:Connect(ALP_Tick)
-    table.insert(getgenv().Moon_Connections, AutoLockpick._connection)
-    print("[AutoLockpick] Started")
+	if AutoLockpick._connection then return end
+	AutoLockpick._ctrl     = nil
+	AutoLockpick._inputSvc = nil
+	AutoLockpick._nextResolve = 0
+	AutoLockpick._connection = RunService.Heartbeat:Connect(function(dt)
+		local ok, err = pcall(ALP_Tick, dt)
+		if not ok then
+			(warn or print)("[AutoLockpick] " .. tostring(err))
+			AutoLockpick._ctrl     = nil
+			AutoLockpick._inputSvc = nil
+			AutoLockpick._nextResolve = 0
+		end
+	end)
+	table.insert(getgenv().Moon_Connections, AutoLockpick._connection)
+	print("[AutoLockpick] Started")
 end
 
 function AutoLockpick.Stop()
-    if AutoLockpick._connection then
-        pcall(function() AutoLockpick._connection:Disconnect() end)
-        AutoLockpick._connection = nil
-    end
-    _inputSvc = nil
+	if AutoLockpick._connection then
+		pcall(function() AutoLockpick._connection:Disconnect() end)
+		AutoLockpick._connection = nil
+	end
+	AutoLockpick._ctrl     = nil
+	AutoLockpick._inputSvc = nil
 end
 
 getgenv().AutoLockpick = AutoLockpick
 
 local S_ALP = MiscTab:DrawSection({Name="Auto Lockpick", Position="right"})
 S_ALP:AddToggle({Name="Enable Auto Lockpick", Flag="ALP_Enabled", Default=false,
-    Callback=function(v)
-        AutoLockpick.Enabled = v
-        if v then AutoLockpick.Start() else AutoLockpick.Stop() end
-    end})
+	Callback=function(v)
+		AutoLockpick.Enabled = v
+		if v then AutoLockpick.Start() else AutoLockpick.Stop() end
+	end})
 print("[AutoLockpick] Loaded")
 end)
 
@@ -3211,18 +3377,14 @@ end)
 
 pcall(function()
 -- VEHICLE TELEPORTER
--- ControllerService không được assign trong BulkScan → luôn nil
--- Lấy vehicle qua VehicleService.Vehicles + LocalActor.Seat.UID
 local VehicleTeleport = { _savedCF = nil }
 
 local function VT_GetVehicle()
     local localActor = ReplicatorService and ReplicatorService.LocalActor
     if not localActor then return nil end
-
     local seat = localActor.Seat
     if not seat then return nil end
 
-    -- Method 1: VehicleService.Vehicles lookup theo UID
     local uid = seat.UID
     if uid and VehicleService and VehicleService.Vehicles then
         for _, veh in pairs(VehicleService.Vehicles) do
@@ -3230,7 +3392,6 @@ local function VT_GetVehicle()
         end
     end
 
-    -- Method 2: GC scan — tìm vehicle có Controlling = true + ComponentReplicates
     local ok, gc = pcall(function() return getgc(true) end)
     if not ok or not gc then return nil end
     for _, obj in pairs(gc) do
@@ -3246,7 +3407,6 @@ local function VT_GetVehicle()
 end
 
 local function VT_GetSolver(vehicle)
-    -- Tìm controller có _vehicle match để lấy solver
     local ok, gc = pcall(function() return getgc(true) end)
     if not ok or not gc then return nil end
     for _, obj in pairs(gc) do
@@ -3267,13 +3427,11 @@ local function TeleportVehicle(targetCF)
         return
     end
 
-    -- Step 1: set CFrame
     pcall(function()
         vehicle.CFrame = targetCF
         if vehicle.Hitbox then vehicle.Hitbox.CFrame = targetCF end
     end)
 
-    -- Step 2: reset solver velocity → không drift sau teleport
     pcall(function()
         local solver = VT_GetSolver(vehicle)
         if solver and solver.SetState then
@@ -3281,7 +3439,6 @@ local function TeleportVehicle(targetCF)
         end
     end)
 
-    -- Step 3: SimulatedPosition — cách VehicleFly replicate lên server
     pcall(function()
         if ReplicatorService and ReplicatorService.LocalActor then
             ReplicatorService.LocalActor.SimulatedPosition = targetCF.Position
@@ -3295,7 +3452,6 @@ getgenv().VehicleTeleport = VehicleTeleport
 
 local S_VT = VehicleTab:DrawSection({Name="Vehicle Teleporter", Position="left"})
 
--- Button 1: Lấy toạ độ
 S_VT:AddButton({ Name="Lấy Toạ Độ", Callback=function()
     pcall(function()
         local vehicle = VT_GetVehicle()
@@ -3320,7 +3476,6 @@ S_VT:AddButton({ Name="Lấy Toạ Độ", Callback=function()
     end)
 end})
 
--- Button 2: Teleport phương tiện
 S_VT:AddButton({ Name="Teleport Phương Tiện", Callback=function()
     pcall(function()
         if not VehicleTeleport._savedCF then
@@ -3331,7 +3486,6 @@ S_VT:AddButton({ Name="Teleport Phương Tiện", Callback=function()
     end)
 end})
 
--- Button 3: Xóa toạ độ
 S_VT:AddButton({ Name="Xóa Toạ Độ", Callback=function()
     pcall(function()
         VehicleTeleport._savedCF = nil
