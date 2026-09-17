@@ -20,7 +20,7 @@ local function GetLoadstringSource(Url)
 	end
 	if not body then error("[TokaiHub] HTTP failed: " .. tostring(Url), 2) end
 	if body:match("^429") or body:lower():match("rate limit") then
-		warn("[TokaiHub] Rate limit — cho 10s roi thu lai")
+		(warn or print)("[TokaiHub] Rate limit — cho 10s roi thu lai")
 		task.wait(10)
 		return GetLoadstringSource(Url)
 	end
@@ -240,7 +240,7 @@ local Config = {
 	ShowNames = true, ShowDistance = true, ShowHealth = true, ShowWeaponInfo = true, BoxStyle = "Full",
 	ShowVehicleBox = true, VehicleBoxStyle = "Full", ShowVehicleName = true, ShowVehicleHealth = true, VehicleHealthBarSide = "Bottom",
 	TextScale = 1.20, DynamicTextScaling = true, MaxDistance = 2000,
-	NoRecoil = false, NoSpread = false, UnlockFiremodes = false, CustomRPM = false, RPMValue = 800,
+	NoRecoil = false, NoSpread = false, UnlockFiremodes = false, CustomRPM = false, RPMValue = 800, ForceHeadshot = false,
 	SilentAim = false, SilentAimFOV = 100, SilentAimHitChance = 100, SilentAimTargetPart = "Head",
 	RageMode = false, Rage_LookAt = false, Rage_FOV = 360, Rage_Range = 500, Rage_TargetPart = "Head",
 	ShowFOV = false, Prediction = false, BulletDrop = false, ShowPrediction = false,
@@ -602,6 +602,27 @@ local function IsIgnored(part)
 	return false
 end
 
+-- Resolve correct world-space position of a part on any actor, including
+-- NPCs mounted inside a vehicle whose character lives in a WorldModel.
+-- Parts in a WorldModel are in local (vehicle-relative) space; actor.Position
+-- and actor.CFrame are always world-space replication state.
+local function GetPartWorldPos(actor, part)
+	if not part then return actor.Position end
+	local char = actor.Character
+	if not char then return actor.Position end
+	local root = char.PrimaryPart or char:FindFirstChild("HumanoidRootPart")
+	-- Root in workspace: part.CFrame.Position is already world space.
+	if root and root:IsDescendantOf(Workspace) then
+		return part.CFrame.Position
+	end
+	-- Parked WorldModel rig (NPC seated in a vehicle): reconstruct from
+	-- the replicated actor state, same method MainSource Combat.PartCFrame uses.
+	if not root then return actor.Position end
+	local pose = typeof(actor.CFrame) == "CFrame" and actor.CFrame.Rotation or CFrame.new()
+	local actorFrame = pose + actor.Position
+	return (actorFrame * root.CFrame:ToObjectSpace(part.CFrame)).Position
+end
+
 local function IsVisible(targetActor,targetPart,origin,isPriority)
 	if not targetPart or not targetPart.Parent then return false end
 	local now=tick(); local uid=targetActor.UID
@@ -618,7 +639,9 @@ local function IsVisible(targetActor,targetPart,origin,isPriority)
 	end
 	local character=targetPart.Parent
 	local originPos=origin or Camera.CFrame.Position
-	local direction=(targetPart.Position-originPos)
+	-- GetPartWorldPos handles vehicle-mounted NPCs whose parts are in local space
+	local targetWorldPos=GetPartWorldPos(targetActor,targetPart)
+	local direction=(targetWorldPos-originPos)
 	local dist=direction.Magnitude
 	if not targetActor.ViewportOnScreen and (dist>100) then
 		VisCache[uid]={result=false,last=now}; return false
@@ -630,17 +653,28 @@ local function IsVisible(targetActor,targetPart,origin,isPriority)
 		local myActor=ReplicatorService.LocalActor
 		if myActor.Seat and myActor.Seat.Model then table.insert(VisFilterTable,myActor.Seat.Model) end
 	end
+	-- Filter the vehicle the target NPC is seated in so it doesn't block visibility
+	if targetActor.Seat and targetActor.Seat.Model then
+		table.insert(VisFilterTable,targetActor.Seat.Model)
+	end
 	VisRayParams.FilterDescendantsInstances=VisFilterTable
 	local isVisible=false
 	local result=Workspace:Raycast(originPos,direction,VisRayParams)
+	-- Check both character descendant and ActorUID attribute (render rig vs collision body)
+	local function hitBelongsToTarget(instance)
+		if instance:IsDescendantOf(character) then return true end
+		local attrUID = instance:GetAttribute("ActorUID")
+		if attrUID and attrUID == uid then return true end
+		return false
+	end
 	if not result then isVisible=true
-	elseif result.Instance:IsDescendantOf(character) then isVisible=true
+	elseif hitBelongsToTarget(result.Instance) then isVisible=true
 	else
 		local penetrations=0; local dirUnit=direction.Unit
 		while penetrations<2 do
 			if not result then isVisible=true; break end
 			local hitPart=result.Instance
-			if hitPart:IsDescendantOf(character) then isVisible=true; break end
+			if hitBelongsToTarget(hitPart) then isVisible=true; break end
 			if IsIgnored(hitPart) then
 				table.insert(VisFilterTable,hitPart)
 				VisRayParams.FilterDescendantsInstances=VisFilterTable
@@ -669,7 +703,10 @@ GetCombatTarget = function(mode)
 			if not dist or dist<=0 then dist=(activeActor.Position-checkOrigin).Magnitude end
 			if dist<=maxDistance then
 				local targetPart=activeActor.Parts and activeActor.Parts[targetPartName]
-				if targetPart and IsVisible(activeActor,targetPart,checkOrigin,true) then return targetPart,activeActor end
+				if targetPart and IsVisible(activeActor,targetPart,checkOrigin,true) then
+					getgenv()._combatTargetWorldPos=GetPartWorldPos(activeActor,targetPart)
+					return targetPart,activeActor
+				end
 			end
 		end
 		ActorManager.SelectedActor_RB=nil; ActorManager.SelectedTarget_RB=nil
@@ -700,18 +737,17 @@ GetCombatTarget = function(mode)
 		local char=actor.Character; if not char then continue end
 		local dist=actor.LOD_Distance
 		if not dist or dist<=0 then
-			local root=char.PrimaryPart or char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
-			if not root then continue end
-			local delta=root.Position-checkOrigin
+			-- actor.Position is the replicated world position — always correct
+			-- even when the NPC's character is inside a vehicle WorldModel
+			local delta=actor.Position-checkOrigin
 			dist=math.sqrt(delta.X*delta.X+delta.Y*delta.Y+delta.Z*delta.Z)
 		end
 		if dist>maxDistance then continue end
 		local score=dist
 		if useFOV then
 			if not actor.ViewportOnScreen and dist>50 then continue end
-			local root=char.PrimaryPart or char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
-			if not root then continue end
-			local pos,onScreen=Camera:WorldToViewportPoint(root.Position)
+			-- Use actor.Position (world space) not root.Position (may be vehicle-local)
+			local pos,onScreen=Camera:WorldToViewportPoint(actor.Position)
 			if not onScreen then continue end
 			local dx=pos.X-mouseX; local dy=pos.Y-mouseY
 			local screenDistSq=(dx*dx)+(dy*dy)
@@ -727,7 +763,11 @@ GetCombatTarget = function(mode)
 		local part=char:FindFirstChild(targetPartName)
 		if not part then part=char:FindFirstChild("Head") or char:FindFirstChild("UpperTorso") end
 		if part and part.Parent then
-			if IsVisible(actor,part,checkOrigin) then return part,actor end
+			if IsVisible(actor,part,checkOrigin) then
+				-- Cache world pos so every muzzle/discharge hook uses correct coords
+				getgenv()._combatTargetWorldPos=GetPartWorldPos(actor,part)
+				return part,actor
+			end
 			if getgenv().RaycastBudget<=0 then break end
 		end
 	end
@@ -753,7 +793,9 @@ local function HookController(controller)
 			local combatTarget=ActorManager.SelectedTarget_RB or ActorManager.SelectedTarget_SA
 			local targetActor=ActorManager.SelectedActor_RB or ActorManager.SelectedActor_SA
 			if (Config.SilentAim or Config.RageMode) and combatTarget and targetActor then
-				local targetPos=combatTarget.Position; local gravity=32.2; local muzzle_velocity=2000
+				-- Use cached world-space pos; combatTarget.Position is local for vehicle NPCs
+				local targetPos=getgenv()._combatTargetWorldPos or combatTarget.Position
+				local gravity=32.2; local muzzle_velocity=2000
 				if self._firearm and self._firearm.Tune then
 					local caliberName=self._firearm.Tune.Caliber; local barrelLen=self._firearm.Tune.Barrel
 					if BulletService and BulletService.GetInfo then
@@ -762,7 +804,11 @@ local function HookController(controller)
 					end
 				end
 				local targetVelocity=Vector3_new(0,0,0)
-				if targetActor._oldDirection then targetVelocity=targetActor._oldDirection*60
+				if targetActor._oldDirection then
+					targetVelocity=targetActor._oldDirection*60
+				elseif targetActor.Seat and targetActor.Seat.Model and targetActor.Seat.Model.PrimaryPart then
+					-- NPC in vehicle: use vehicle body velocity for lead calculation
+					targetVelocity=targetActor.Seat.Model.PrimaryPart.AssemblyLinearVelocity or Vector3_new(0,0,0)
 				elseif combatTarget.Parent and combatTarget.Parent.PrimaryPart then
 					targetVelocity=combatTarget.Parent.PrimaryPart.AssemblyLinearVelocity or Vector3_new(0,0,0)
 				end
@@ -794,7 +840,8 @@ local function HookController(controller)
 						local tool=self._actor.Character:FindFirstChild("HumanoidRootPart")
 						if tool then muzzlePos=tool.Position end
 					end
-					local targetPos=targetHead.Position; local direction=(targetPos-muzzlePos).Unit
+					local targetPos=getgenv()._combatTargetWorldPos or targetHead.Position
+					local direction=(targetPos-muzzlePos).Unit
 					if self._actor and self._actor.IsLocalPlayer and ReplicatorService and ReplicatorService.LocalActor and ReplicatorService.LocalActor.Character then
 						local root=ReplicatorService.LocalActor.Character.PrimaryPart
 						if root then
@@ -1109,7 +1156,7 @@ function SetupHooks()
 		end
 	end
 	else
-		warn("[ESP] Could not find CharacterController.Update to hook!")
+		(warn or print)("[ESP] Could not find CharacterController.Update to hook!")
 	end
 end
 
@@ -1128,7 +1175,7 @@ local function InitializeServices()
 				local targetHead=ActorManager.SelectedTarget_RB or ActorManager.SelectedTarget_SA
 				local targetActor=ActorManager.SelectedActor_RB or ActorManager.SelectedActor_SA
 				if targetHead then
-					local targetPos=targetHead.Position; local muzzle_velocity=2000
+					local targetPos=getgenv()._combatTargetWorldPos or targetHead.Position; local muzzle_velocity=2000
 					if p49==lastUsedCaliber then muzzle_velocity=lastUsedVelocity
 					elseif p49 and BulletService.GetInfo then
 						local vel=BulletService:GetInfo(p49,p50)
@@ -1150,6 +1197,26 @@ local function InitializeServices()
 			return BulletService._originalDischarge(self,originCF,p49,p50,p51,p52,p53,p54,p55,p56,p57)
 		end
 		getgenv()._BulletServiceHooked=true
+	end
+	-- Force Headshot: hook _bulletProcess to redirect any hit part to Head before damage is applied
+	if ReplicatorService and type(ReplicatorService._bulletProcess)=="function" then
+		if not ReplicatorService._originalBulletProcess then
+			ReplicatorService._originalBulletProcess=ReplicatorService._bulletProcess
+			ReplicatorService._bulletProcess=function(self,uid,replicate,position,part,normal,material,elapsed,...)
+				if Config.ForceHeadshot and replicate and part and type(self.GetFromBodyPart)=="function" then
+					local ok,actorUID,actor=pcall(function() return self:GetFromBodyPart(part) end)
+					if ok and actor and actor.Alive and actor.Character and not actor._isTeammate then
+						local head=actor.Parts and actor.Parts.Head
+						if head and head.Parent and head:IsDescendantOf(actor.Character) then
+							part=head
+							-- Use reconstructed world pos for vehicle-mounted NPCs
+							position=GetPartWorldPos(actor,head)
+						end
+					end
+				end
+				return ReplicatorService._originalBulletProcess(self,uid,replicate,position,part,normal,material,elapsed,...)
+			end
+		end
 	end
 	if Recoiler then
 		local rc=Recoiler
@@ -1374,7 +1441,7 @@ local function UpdateCombat(frameId)
 		local dot=getgenv().PredictionDot
 		if Config.ShowPrediction and targetPart then
 			local muzzlePos=GetMuzzlePosition() or Camera.CFrame.Position
-			local targetPos=targetPart.Position; local targetVel=getgenv()._lastPredVel or Vector3_new(0,0,0)
+			local targetPos=getgenv()._combatTargetWorldPos or targetPart.Position; local targetVel=getgenv()._lastPredVel or Vector3_new(0,0,0)
 			local gravity=32.2; local aimPos,_=SolveLead(muzzlePos,targetPos,targetVel,activeVelocity,gravity)
 			local screenPos,onScreen=Camera:WorldToViewportPoint(aimPos)
 			if onScreen then dot.Position=Vector2_new(screenPos.X,screenPos.Y); dot.Color=cfg.PredictionColor or Color3_fromHSV(0.33,1,1); dot.Visible=true
@@ -1834,6 +1901,7 @@ S_GunMods:AddToggle({
 })
 S_GunMods:AddToggle({ Name="No Recoil", Flag="Combat_NoRecoil", Default=false, Callback=function(v) Config.NoRecoil=v end })
 S_GunMods:AddToggle({ Name="No Spread", Flag="Combat_NoSpread", Default=false, Callback=function(v) Config.NoSpread=v end })
+S_GunMods:AddToggle({ Name="Force Headshot", Flag="Combat_ForceHeadshot", Default=false, Callback=function(v) Config.ForceHeadshot=v end })
 S_GunMods:AddToggle({ Name="Unlock Firemodes", Flag="Combat_Firemodes", Default=false, Callback=function(v) Config.UnlockFiremodes=v end })
 S_GunMods:AddToggle({ Name="Custom RPM", Flag="Combat_CustomRPM", Default=false, Callback=function(v) Config.CustomRPM=v end })
 S_GunMods:AddSlider({ Name="RPM Value", Min=100, Max=10000, Default=800, Flag="Combat_RPMValue", Callback=function(v) Config.RPMValue=v end })
@@ -2013,6 +2081,7 @@ ConfigUI:Init()
 -- Main Loop
 local frameCount=0
 local espLoop=RunService.RenderStepped:Connect(function()
+	local ok,err=pcall(function()
 	frameCount=(frameCount+1)%60
 	if ActorManager then
 		ActorManager:Update()
@@ -2026,6 +2095,8 @@ local espLoop=RunService.RenderStepped:Connect(function()
 	UpdateESP()
 	if frameCount%2==0 then UpdateVehicles(frameCount,Config) end
 	UpdateCombat(frameCount)
+	end)
+	if not ok then (warn or print)("[EspLoop] "..tostring(err)) end
 end)
 table.insert(getgenv().Moon_Connections,espLoop)
 
@@ -2664,7 +2735,7 @@ local function AF_Hook()
 	end
 
 	if not TargetController then
-		warn("[AntiFall] Controller not found — retry after 2s")
+		(warn or print)("[AntiFall] Controller not found — retry after 2s")
 		task.delay(2, AF_Hook)
 		return
 	end
@@ -3067,78 +3138,186 @@ S_AF:AddSlider({Name="Y Offset", Flag="AF_OffsetY", Min=-10, Max=0, Default=-2, 
 print("[AutoFarm] Loaded")
 end)
 
--- AUTO LOCKPICK v4
--- InputService._mounts["PickLock"] là callback thật
--- Tìm InputService instance → gọi _mounts["PickLock"](true) mỗi frame
+-- AUTO LOCKPICK — rewrite
+-- Strategy 1 (primary): getloadedmodules → LockpickController class → hook _progress + complete
+-- Strategy 2 (fallback): filtergc → live lockpick state table with _active + _progress
+-- Strategy 3 (fallback): InputService._mounts["PickLock"] called correctly as a mount object
 pcall(function()
 
-local AutoLockpick = {Enabled=false, _connection=nil}
+local AutoLockpick = {
+	Enabled       = false,
+	_connection   = nil,
+	_ctrl         = nil,
+	_nextResolve  = 0,
+	_lastGCScan   = 0,
+	_inputSvc     = nil,
+}
 
-local function ALP_FindInputService()
-    -- InputService: table có _mounts, Binds, Connected, Overrides
-    local ok, gc = pcall(function() return filtergc("table") end)
-    if not ok then ok, gc = pcall(function() return getgc(true) end) end
-    if not ok or not gc then return nil end
-    for _, v in pairs(gc) do
-        if type(v) == "table"
-            and rawget(v, "_mounts") ~= nil
-            and rawget(v, "Binds") ~= nil
-            and rawget(v, "Connected") ~= nil
-            and rawget(v, "Overrides") ~= nil
-        then
-            return v
-        end
-    end
-    return nil
+local function ALP_FindController()
+	if not getloadedmodules then return nil end
+	for _, m in ipairs(getloadedmodules()) do
+		if m.Name == "LockpickController" or m.Name == "Lockpick" or m.Name == "LockPick" then
+			local ok, ctrl = pcall(require, m)
+			if ok and type(ctrl) == "table" then return ctrl end
+		end
+	end
+	return nil
 end
 
-local _inputSvc = nil
-local _lastScan = 0
+local function ALP_FindActiveState()
+	local ok, gc = pcall(function() return filtergc("table") end)
+	if not ok then ok, gc = pcall(function() return getgc(true) end) end
+	if not ok or type(gc) ~= "table" then return nil end
+	for _, v in pairs(gc) do
+		if type(v) == "table" then
+			local prog  = rawget(v, "_progress") or rawget(v, "_pickProgress") or rawget(v, "Progress")
+			local activ = rawget(v, "_active")   or rawget(v, "_pickActive")   or rawget(v, "Active")
+			if type(prog) == "number" and activ == true then return v end
+		end
+	end
+	return nil
+end
 
-local function ALP_Tick()
-    if not AutoLockpick.Enabled then return end
+local function ALP_FindInputService()
+	local ok, gc = pcall(function() return filtergc("table") end)
+	if not ok then ok, gc = pcall(function() return getgc(true) end) end
+	if not ok or type(gc) ~= "table" then return nil end
+	for _, v in pairs(gc) do
+		if type(v) == "table"
+			and rawget(v, "_mounts")   ~= nil
+			and rawget(v, "Binds")     ~= nil
+			and rawget(v, "Connected") ~= nil
+			and rawget(v, "Overrides") ~= nil
+		then return v end
+	end
+	return nil
+end
 
-    -- Rescan InputService mỗi 1s
-    local now = tick()
-    if not _inputSvc or (now - _lastScan > 1) then
-        _lastScan = now
-        _inputSvc = ALP_FindInputService()
-    end
-    if not _inputSvc then return end
+local function ALP_TryComplete(obj)
+	for _, name in ipairs({"_complete","Complete","_onComplete","OnComplete","_finish","Finish","_succeed","Succeed"}) do
+		local fn = rawget(obj, name)
+		if type(fn) == "function" then pcall(fn, obj); return true end
+	end
+	return false
+end
 
-    local mounts = rawget(_inputSvc, "_mounts")
-    if not mounts then return end
+local function ALP_TryMountCall(mount, dt)
+	if type(mount) == "function" then pcall(mount, true); return end
+	if type(mount) ~= "table" then return end
+	for _, key in ipairs({"Update","_update","fire","Fire","Activate","activate"}) do
+		local fn = rawget(mount, key)
+		if type(fn) == "function" then pcall(fn, mount, dt); break end
+	end
+	local mt = getmetatable(mount)
+	if mt and type(rawget(mt, "__call")) == "function" then
+		pcall(mt.__call, mount, mount, true)
+	end
+end
 
-    -- Gọi PickLock callback nếu đang active
-    local pickFn = rawget(mounts, "PickLock")
-    if pickFn and type(pickFn) == "function" then
-        pcall(pickFn, true)
-    end
+local function ALP_Tick(dt)
+	if not AutoLockpick.Enabled then return end
+	local now = tick()
+
+	if not AutoLockpick._ctrl and now > AutoLockpick._nextResolve then
+		AutoLockpick._nextResolve = now + 3
+		AutoLockpick._ctrl = ALP_FindController()
+	end
+
+	if AutoLockpick._ctrl then
+		local ctrl = AutoLockpick._ctrl
+		local isActive = rawget(ctrl, "_active") or rawget(ctrl, "_pickActive") or rawget(ctrl, "Active")
+		if isActive == true then
+			local maxProg = rawget(ctrl, "_maxProgress") or rawget(ctrl, "MaxProgress") or 1
+			if rawget(ctrl, "_progress")      ~= nil then ctrl._progress      = maxProg end
+			if rawget(ctrl, "_pickProgress")  ~= nil then ctrl._pickProgress  = maxProg end
+			if rawget(ctrl, "Progress")       ~= nil then ctrl.Progress       = maxProg end
+			local pins = rawget(ctrl, "_pins") or rawget(ctrl, "Pins")
+			if type(pins) == "table" then
+				for _, pin in pairs(pins) do
+					if type(pin) == "table" then
+						if rawget(pin, "_solved")   ~= nil then pin._solved   = true end
+						if rawget(pin, "_set")      ~= nil then pin._set      = true end
+						if rawget(pin, "Solved")    ~= nil then pin.Solved    = true end
+						if rawget(pin, "_position") ~= nil then pin._position = rawget(pin, "_target") or 1 end
+					end
+				end
+			end
+			ALP_TryComplete(ctrl)
+			return
+		end
+	end
+
+	if now - AutoLockpick._lastGCScan > 0.1 then
+		AutoLockpick._lastGCScan = now
+		local state = ALP_FindActiveState()
+		if state then
+			local maxProg = rawget(state, "_maxProgress") or rawget(state, "MaxProgress") or 1
+			if rawget(state, "_progress")     ~= nil then state._progress     = maxProg end
+			if rawget(state, "_pickProgress") ~= nil then state._pickProgress = maxProg end
+			if rawget(state, "Progress")      ~= nil then state.Progress      = maxProg end
+			local pins = rawget(state, "_pins") or rawget(state, "Pins")
+			if type(pins) == "table" then
+				for _, pin in pairs(pins) do
+					if type(pin) == "table" then
+						if rawget(pin, "_solved")   ~= nil then pin._solved   = true end
+						if rawget(pin, "_set")      ~= nil then pin._set      = true end
+						if rawget(pin, "Solved")    ~= nil then pin.Solved    = true end
+						if rawget(pin, "_position") ~= nil then pin._position = rawget(pin, "_target") or 1 end
+					end
+				end
+			end
+			ALP_TryComplete(state)
+			return
+		end
+	end
+
+	if not AutoLockpick._inputSvc then
+		AutoLockpick._inputSvc = ALP_FindInputService()
+	end
+	if AutoLockpick._inputSvc then
+		local mounts = rawget(AutoLockpick._inputSvc, "_mounts")
+		if mounts then
+			local mount = rawget(mounts, "PickLock") or rawget(mounts, "Lockpick") or rawget(mounts, "lockpick")
+			if mount then ALP_TryMountCall(mount, dt) end
+		end
+	end
 end
 
 function AutoLockpick.Start()
-    if AutoLockpick._connection then return end
-    AutoLockpick._connection = RunService.Heartbeat:Connect(ALP_Tick)
-    table.insert(getgenv().Moon_Connections, AutoLockpick._connection)
-    print("[AutoLockpick] Started")
+	if AutoLockpick._connection then return end
+	AutoLockpick._ctrl     = nil
+	AutoLockpick._inputSvc = nil
+	AutoLockpick._nextResolve = 0
+	AutoLockpick._connection = RunService.Heartbeat:Connect(function(dt)
+		local ok, err = pcall(ALP_Tick, dt)
+		if not ok then
+			(warn or print)("[AutoLockpick] " .. tostring(err))
+			AutoLockpick._ctrl     = nil
+			AutoLockpick._inputSvc = nil
+			AutoLockpick._nextResolve = 0
+		end
+	end)
+	table.insert(getgenv().Moon_Connections, AutoLockpick._connection)
+	print("[AutoLockpick] Started")
 end
 
 function AutoLockpick.Stop()
-    if AutoLockpick._connection then
-        pcall(function() AutoLockpick._connection:Disconnect() end)
-        AutoLockpick._connection = nil
-    end
-    _inputSvc = nil
+	if AutoLockpick._connection then
+		pcall(function() AutoLockpick._connection:Disconnect() end)
+		AutoLockpick._connection = nil
+	end
+	AutoLockpick._ctrl     = nil
+	AutoLockpick._inputSvc = nil
 end
 
 getgenv().AutoLockpick = AutoLockpick
 
 local S_ALP = MiscTab:DrawSection({Name="Auto Lockpick", Position="right"})
 S_ALP:AddToggle({Name="Enable Auto Lockpick", Flag="ALP_Enabled", Default=false,
-    Callback=function(v)
-        AutoLockpick.Enabled = v
-        if v then AutoLockpick.Start() else AutoLockpick.Stop() end
-    end})
+	Callback=function(v)
+		AutoLockpick.Enabled = v
+		if v then AutoLockpick.Start() else AutoLockpick.Stop() end
+	end})
 print("[AutoLockpick] Loaded")
 end)
 
