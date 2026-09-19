@@ -40,14 +40,16 @@ local Toggles, Options = getgenv().Toggles, getgenv().Options
 local ThemeManager = loadstring(game:HttpGet(repo .. 'addons/ThemeManager.lua'))()
 local SaveManager = loadstring(game:HttpGet(repo .. 'addons/SaveManager.lua'))()
 
-ThemeManager.BuiltInThemes.Clean = { 0, {
-    FontColor = 'E8E8E8', MainColor = '1D1D1D', BackgroundColor = '141414',
-    AccentColor = 'BEBEBE', OutlineColor = '383838'
-} }
-ThemeManager.DefaultTheme = 'Clean'
+pcall(function()
+    ThemeManager.BuiltInThemes.Clean = { 0, {
+        FontColor = 'E8E8E8', MainColor = '1D1D1D', BackgroundColor = '141414',
+        AccentColor = 'BEBEBE', OutlineColor = '383838'
+    } }
+    ThemeManager.DefaultTheme = 'Clean'
+end)
 
 local Fonts: {[string]: any} = {
-    UIName = 'Code', Face = Font.fromEnum(Library.Font), Cache = {}, Version = 0,
+    UIName = 'Code', Face = Font.fromEnum(Enum.Font.Code), Cache = {}, Version = 0,
     Names = { 'Code', 'Arial', 'Gotham', 'Source Sans', 'Roboto Mono', 'Ubuntu', 'Tahoma', 'Minecraftia', 'Verdana', 'Proggy Clean', 'Builder Sans', 'Arimo', 'Roboto', 'Roboto Condensed', 'Gotham Medium', 'Gotham Bold', 'Nunito', 'Oswald', 'Source Sans Semibold' },
     Builtins = { Code = Enum.Font.Code, Arial = Enum.Font.Arial, Gotham = Enum.Font.Gotham,
         ['Source Sans'] = Enum.Font.SourceSans, ['Roboto Mono'] = Enum.Font.RobotoMono, Ubuntu = Enum.Font.Ubuntu,
@@ -99,14 +101,16 @@ function Fonts.SetUI(name)
     local face = Fonts.Resolve(name)
     if Library.Unloaded then return end
     Fonts.UIName = name; Fonts.Face = face; Fonts.Version += 1
-    Library.Font = Fonts.Builtins[name] or Enum.Font.Code
+    if Library.Font ~= nil then Library.Font = Fonts.Builtins[name] or Enum.Font.Code end
     for _, instance in ipairs(Fonts.Root:GetDescendants()) do Fonts.Apply(instance) end
 end
-local createWithDefaultFont = Library.Create
-Library.Create = function(self, class, properties)
-    local instance = createWithDefaultFont(self, class, properties)
-    Fonts.Apply(instance)
-    return instance
+if type(Library.Create) == 'function' then
+    local createWithDefaultFont = Library.Create
+    Library.Create = function(self, class, properties)
+        local instance = createWithDefaultFont(self, class, properties)
+        Fonts.Apply(instance)
+        return instance
+    end
 end
 
 local Window = Library:CreateWindow({
@@ -118,7 +122,7 @@ local Window = Library:CreateWindow({
     MenuFadeTime = 0.16
 })
 
-Fonts.Root = Window.Holder:FindFirstAncestorWhichIsA('ScreenGui')
+Fonts.Root = (pcall(function() return Window.Holder:FindFirstAncestorWhichIsA('ScreenGui') end) and Window.Holder:FindFirstAncestorWhichIsA('ScreenGui')) or Window.Holder
 Library:GiveSignal(Fonts.Root.DescendantAdded:Connect(function(instance)
     Fonts.Apply(instance)
 end))
@@ -499,7 +503,7 @@ function Combat.Frame(dt)
         Combat.retryAt=os.clock()+2
         Combat.Install()
     end
-    local menuOpen=Window.Holder.Visible
+    local menuOpen = (Window.Holder and Window.Holder.Visible) or false
     local blocked=menuOpen or Library:IsTyping()
     Combat.silentActive=Combat.KeyActive(SilentKeyPicker,keyStates.silent)
     local triggerActive=Combat.KeyActive(TriggerKeyPicker,keyStates.trigger)
