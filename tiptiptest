@@ -61,12 +61,12 @@ local Window = Library:CreateWindow({
 })
 
 local Tabs = {
-    Main            = Window:AddTab("Main",         "crosshair"),
-    Ragebot         = Window:AddTab("Ragebot",      "target"),
-    Visuals         = Window:AddTab("Visuals",       "eye"),
-    Movement        = Window:AddTab("Movement",      "move"),
-    Mods            = Window:AddTab("Mods",          "wrench"),
-    ["UI Settings"] = Window:AddTab("UI Settings",  "settings"),
+    Main            = Window:AddTab({Name = "Main", Icon = "crosshair"}),
+    Ragebot         = Window:AddTab({Name = "Ragebot", Icon = "target"}),
+    Visuals         = Window:AddTab({Name = "Visuals", Icon = "eye"}),
+    Movement        = Window:AddTab({Name = "Movement", Icon = "move"}),
+    Mods            = Window:AddTab({Name = "Mods", Icon = "wrench"}),
+    ["UI Settings"] = Window:AddTab({Name = "UI Settings", Icon = "settings"}),
 }
 
 local previousCombat = getgenv().TokaiHubCombat
@@ -4313,8 +4313,8 @@ end
 table.insert(Combat.connections, AimRunService.RenderStepped:Connect(Combat.Frame))
 
 -- ── Watermark ─────────────────────────────────────────────────────────────────
-Library:SetWatermarkVisibility(true)
-Library:SetWatermark("TokaiHub | -- fps | -- ms")
+pcall(function() Library:SetWatermarkVisibility(true) end)
+pcall(function() Library:SetWatermark("TokaiHub | -- fps | -- ms") end)
 local elapsed, frames = 0, 0
 local stats = game:GetService("Stats")
 local WatermarkConnection = AimRunService.RenderStepped:Connect(function(dt)
@@ -4324,31 +4324,32 @@ local WatermarkConnection = AimRunService.RenderStepped:Connect(function(dt)
     elapsed = 0; frames = 0
     local ok, ping = pcall(function() return stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
     local pingText = ok and type(ping) == "number" and string.format("%d", math.floor(ping + .5)) or "--"
-    Library:SetWatermark(string.format("TokaiHub | %d fps | %s ms", fps, pingText))
+    pcall(function() Library:SetWatermark(string.format("TokaiHub | %d fps | %s ms", fps, pingText)) end)
 end)
 
-Library:OnUnload(function()
+if type(Library.OnUnload) == "function" then Library:OnUnload(function()
     WatermarkConnection:Disconnect()
     Combat.Destroy()
     Library.Unloaded = true
     print("[TokaiHub] Unloaded.")
 end)
+end
 
 -- ── UI Settings Tab ───────────────────────────────────────────────────────────
 local MenuGroup = Tabs["UI Settings"]:AddLeftGroupbox("Menu")
 MenuGroup:AddToggle("ui_watermark_visible", { Text = "Watermark", Default = true }):OnChanged(function(v)
-    Library:SetWatermarkVisibility(v)
+    pcall(function() Library:SetWatermarkVisibility(v) end)
 end)
 MenuGroup:AddToggle("ui_keybinds_visible", { Text = "Keybinds", Default = true }):OnChanged(function(v)
-    if Library.KeybindFrame then Library.KeybindFrame.Visible = v end
+    pcall(function() if Library.KeybindFrame then Library.KeybindFrame.Visible = v end end)
 end)
 MenuGroup:AddButton("Unload", function() Library:Unload() end)
 MenuGroup:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind", { Default = "None", NoUI = true, Text = "Menu keybind" })
-Library.ToggleKeybind = Options.MenuKeybind
+pcall(function() Library.ToggleKeybind = Options.MenuKeybind end)
 
 -- ── SaveManager / ThemeManager ────────────────────────────────────────────────
-ThemeManager:SetLibrary(Library)
-SaveManager:SetLibrary(Library)
+pcall(function() ThemeManager:SetLibrary(Library) end)
+pcall(function() SaveManager:SetLibrary(Library) end)
 SaveManager:IgnoreThemeSettings()
 SaveManager:SetIgnoreIndexes({ "MenuKeybind" })
 ThemeManager:SetFolder("TokaiHub")
