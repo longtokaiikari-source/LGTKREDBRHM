@@ -1,35 +1,72 @@
-local TKrepo = 'https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/'
+-- TokaiHub | BRM5
+-- UI Library: longhazem/TKBLACKLIB
 
-local LibrarySource = game:HttpGet(TKrepo .. 'Library.lua')
+local Repository = "https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/"
 
+local function GetLoadstringSource(Url)
+	local function tryRequest(fn, args)
+		if not fn then return nil end
+		local ok, r = pcall(fn, args)
+		if ok and r and r.Body and typeof(r.Body) == "string" then return r.Body end
+	end
+	local body = tryRequest(request, {Url=Url,Method="GET"})
+		or tryRequest(http_request, {Url=Url,Method="GET"})
+		or tryRequest(syn and syn.request, {Url=Url,Method="GET"})
+		or tryRequest(fluxus and fluxus.request, {Url=Url,Method="GET"})
+	if not body then
+		local ok, r = pcall(function() return game:HttpGet(Url) end)
+		if ok and typeof(r) == "string" then body = r end
+	end
+	if not body then error("[TokaiHub] HTTP failed: " .. tostring(Url), 2) end
+	if body:match("^429") or body:lower():match("rate limit") then
+		(warn or print)("[TokaiHub] Rate limit — retry in 10s")
+		task.wait(10)
+		return GetLoadstringSource(Url)
+	end
+	if body:match("^<!DOCTYPE") or body:match("^<html") then
+		error("[TokaiHub] Server returned HTML — bad URL or repo error", 2)
+	end
+	return body
+end
+
+local function LoadRemote(Url)
+	local Source = GetLoadstringSource(Url)
+	local Chunk, LoadError = loadstring(Source)
+	if not Chunk then error("loadstring failed for " .. tostring(Url) .. ": " .. tostring(LoadError), 2) end
+	return Chunk()
+end
+
+local Library     = LoadRemote(Repository .. "Library.lua")
+local ThemeManager = LoadRemote(Repository .. "addons/ThemeManager.lua")
+local SaveManager  = LoadRemote(Repository .. "addons/SaveManager.lua")
 
 local previousLibrary = getgenv().TokaiHubMenuLibrary
-if previousLibrary and not previousLibrary.Unloaded then previousLibrary:Unload() end
-local Library = loadstring(LibrarySource)()
+if previousLibrary and not previousLibrary.Unloaded then
+    pcall(function() previousLibrary:Unload() end)
+end
 getgenv().TokaiHubMenuLibrary = Library
--- [TokaiHub] IsTyping handled by TKBLACKLIB natively
+
 local Toggles = Library.Toggles
 local Options  = Library.Options
 
 local Window = Library:CreateWindow({
-    Title             = 'TokaiHub | BRM5',
-    Footer            = 'BRM5 Edition',
+    Title             = "TokaiHub | BRM5",
+    Footer            = "BRM5 Edition",
     ToggleKeybind     = Enum.KeyCode.RightShift,
     Center            = true,
     AutoShow          = true,
     ShowCustomCursor  = true,
-    NotifySide        = 'Right',
-    MobileButtonsSide = 'Left',
+    NotifySide        = "Right",
+    MobileButtonsSide = "Left",
 })
 
-
 local Tabs = {
-    Main            = Window:AddTab('Main',         'crosshair'),
-    Ragebot         = Window:AddTab('Ragebot',      'target'),
-    Visuals         = Window:AddTab('Visuals',       'eye'),
-    Movement        = Window:AddTab('Movement',      'move'),
-    Mods            = Window:AddTab('Mods',          'wrench'),
-    ['UI Settings'] = Window:AddTab('UI Settings',  'settings'),
+    Main            = Window:AddTab("Main",         "crosshair"),
+    Ragebot         = Window:AddTab("Ragebot",      "target"),
+    Visuals         = Window:AddTab("Visuals",       "eye"),
+    Movement        = Window:AddTab("Movement",      "move"),
+    Mods            = Window:AddTab("Mods",          "wrench"),
+    ["UI Settings"] = Window:AddTab("UI Settings",  "settings"),
 }
 
 local previousCombat = getgenv().TokaiHubCombat
@@ -399,7 +436,7 @@ function Combat.Frame(dt)
         Combat.retryAt=os.clock()+2
         Combat.Install()
     end
-    local menuOpen = (Window.Holder and Window.Holder.Visible) or false
+    local menuOpen = (Window and Window.Holder and Window.Holder.Visible) or false
     local blocked=menuOpen or Library:IsTyping()
     Combat.silentActive=Combat.KeyActive(SilentKeyPicker,keyStates.silent)
     local triggerActive=Combat.KeyActive(TriggerKeyPicker,keyStates.trigger)
@@ -661,7 +698,7 @@ table.insert(Combat.connections, AimRunService.RenderStepped:Connect(function(dt
 end))
 
 
--- ── Helpers (same API — TKBLACKLIB is Linoria-compatible) ────────────────────
+-- ── UI Helpers ────────────────────────────────────────────────────────────────
 local function addToggle(group, id, text, settings, field)
     local control = group:AddToggle(id, { Text = text, Default = settings[field] })
     control:OnChanged(function()
@@ -674,24 +711,24 @@ end
 local function addSlider(group, id, text, settings, field, minimum, maximum, decimals, suffix)
     local control = group:AddSlider(id, {
         Text = text, Default = settings[field], Min = minimum, Max = maximum,
-        Rounding = decimals or 0, Suffix = suffix or '',
+        Rounding = decimals or 0, Suffix = suffix or "",
     })
     control:OnChanged(function(value) settings[field] = value end)
     return control
 end
 
 local function addTargets(group, id, settings)
-    local kinds = { NPC = 'NPCs', Zombie = 'Zombies', Player = 'Players' }
+    local kinds = { NPC = "NPCs", Zombie = "Zombies", Player = "Players" }
     local defaults = {}
-    for _, name in ipairs({ 'NPC', 'Zombie', 'Player' }) do
+    for _, name in ipairs({ "NPC", "Zombie", "Player" }) do
         if settings.Targets[kinds[name]] then table.insert(defaults, name) end
     end
     group:AddDropdown(id, {
-        Text = 'Target Selection', Values = { 'NPC', 'Zombie', 'Player' },
+        Text = "Target Selection", Values = { "NPC", "Zombie", "Player" },
         Multi = true, Default = defaults,
     }):OnChanged(function(selected)
         local values = {}
-        for _, name in ipairs({ 'NPC', 'Zombie', 'Player' }) do
+        for _, name in ipairs({ "NPC", "Zombie", "Player" }) do
             if selected[name] then table.insert(values, kinds[name]) end
         end
         Combat.SetTargets(settings, values)
@@ -699,90 +736,88 @@ local function addTargets(group, id, settings)
 end
 
 -- ── MAIN TAB ──────────────────────────────────────────────────────────────────
-local SilentGroup = Tabs.Main:AddLeftGroupbox('Silent Aim')
-local EnabledControl = addToggle(SilentGroup, 'silent_enabled', 'Enabled', Silent, 'Enabled')
-EnabledControl:AddKeyPicker('silent_key', {
-    Default = 'None', Mode = 'Hold', Modes = { 'Always', 'Hold', 'Toggle' },
-    Text = 'Silent Aim', SyncToggleState = false,
+local SilentGroup = Tabs.Main:AddLeftGroupbox("Silent Aim")
+local EnabledControl = addToggle(SilentGroup, "silent_enabled", "Enabled", Silent, "Enabled")
+EnabledControl:AddKeyPicker("silent_key", {
+    Default = "None", Mode = "Hold", Modes = { "Always", "Hold", "Toggle" },
+    Text = "Silent Aim", SyncToggleState = false,
 })
 SilentKeyPicker = Options.silent_key
 
-local ShowControl = addToggle(SilentGroup, 'silent_fov_show', 'Show FOV', Silent, 'ShowFOV')
-ShowControl:AddColorPicker('silent_fov_color', { Default = Silent.FOVColor, Title = 'FOV Color' })
+local ShowControl = addToggle(SilentGroup, "silent_fov_show", "Show FOV", Silent, "ShowFOV")
+ShowControl:AddColorPicker("silent_fov_color", { Default = Silent.FOVColor, Title = "FOV Color" })
 Options.silent_fov_color:OnChanged(function(color) Silent.FOVColor = color end)
 
-local FillControl = addToggle(SilentGroup, 'silent_fov_fill', 'Fill', Silent, 'FillFOV')
-FillControl:AddColorPicker('silent_fov_fill_color', {
-    Default = Silent.FOVFillColor, Transparency = 1 - Silent.FOVFillTransparency, Title = 'Fill Color',
+local FillControl = addToggle(SilentGroup, "silent_fov_fill", "Fill", Silent, "FillFOV")
+FillControl:AddColorPicker("silent_fov_fill_color", {
+    Default = Silent.FOVFillColor, Transparency = 1 - Silent.FOVFillTransparency, Title = "Fill Color",
 })
 Options.silent_fov_fill_color:OnChanged(function(color)
     Silent.FOVFillColor = color
     Silent.FOVFillTransparency = 1 - Options.silent_fov_fill_color.Transparency
 end)
 
-local GradientControl = addToggle(SilentGroup, 'silent_fov_gradient', 'Gradient FOV', Silent, 'GradientFOV')
-GradientControl:AddColorPicker('silent_fov_gradient_a', { Default = Silent.GradientColorA, Title = 'Gradient A' })
-GradientControl:AddColorPicker('silent_fov_gradient_b', { Default = Silent.GradientColorB, Title = 'Gradient B' })
+local GradientControl = addToggle(SilentGroup, "silent_fov_gradient", "Gradient FOV", Silent, "GradientFOV")
+GradientControl:AddColorPicker("silent_fov_gradient_a", { Default = Silent.GradientColorA, Title = "Gradient A" })
+GradientControl:AddColorPicker("silent_fov_gradient_b", { Default = Silent.GradientColorB, Title = "Gradient B" })
 Options.silent_fov_gradient_a:OnChanged(function(c) Silent.GradientColorA = c end)
 Options.silent_fov_gradient_b:OnChanged(function(c) Silent.GradientColorB = c end)
-
-addToggle(SilentGroup, 'silent_fov_spin', 'Spin Gradient', Silent, 'GradientSpin')
-addSlider(SilentGroup, 'silent_fov_spin_speed', 'Spin Speed', Silent, 'GradientSpinSpeed', 0.1, 3, 1, ' rev/s')
-addTargets(SilentGroup, 'silent_targets', Silent)
-SilentGroup:AddDropdown('silent_hitpart', {
-    Text = 'Hit Part', Values = HitPartOptions, Default = Silent.HitPart,
+addToggle(SilentGroup, "silent_fov_spin", "Spin Gradient", Silent, "GradientSpin")
+addSlider(SilentGroup, "silent_fov_spin_speed", "Spin Speed", Silent, "GradientSpinSpeed", 0.1, 3, 1, " rev/s")
+addTargets(SilentGroup, "silent_targets", Silent)
+SilentGroup:AddDropdown("silent_hitpart", {
+    Text = "Hit Part", Values = HitPartOptions, Default = Silent.HitPart,
 }):OnChanged(function(value) Silent.HitPart = value; Combat.sticky = nil end)
-addSlider(SilentGroup, 'silent_fov',       'FOV Radius',   Silent, 'FOV',         10,   500, 0, 'px')
-addSlider(SilentGroup, 'silent_hitchance', 'Hit Chance',   Silent, 'HitChance',    0,   100, 0, '%')
-addSlider(SilentGroup, 'silent_distance',  'Max Distance', Silent, 'MaxDistance', 50,  5000, 0, ' studs')
-addToggle(SilentGroup, 'silent_fov_enabled',  'FOV Check',    Silent, 'FOVEnabled')
-addToggle(SilentGroup, 'silent_sticky',        'Sticky Aim',   Silent, 'StickyAim')
+addSlider(SilentGroup, "silent_fov",       "FOV Radius",   Silent, "FOV",         10,   500, 0, "px")
+addSlider(SilentGroup, "silent_hitchance", "Hit Chance",   Silent, "HitChance",    0,   100, 0, "%")
+addSlider(SilentGroup, "silent_distance",  "Max Distance", Silent, "MaxDistance", 50,  5000, 0, " studs")
+addToggle(SilentGroup, "silent_fov_enabled",  "FOV Check",  Silent, "FOVEnabled")
+addToggle(SilentGroup, "silent_sticky",        "Sticky Aim", Silent, "StickyAim")
 
-local PredictionGroup = Tabs.Main:AddRightGroupbox('Prediction')
-addToggle(PredictionGroup, 'silent_auto_prediction',          'Auto Prediction',         Silent, 'AutoPrediction')
-addToggle(PredictionGroup, 'silent_bullet_drop_compensation', 'Bullet Drop Compensation',Silent, 'BulletDropCompensation')
+local PredictionGroup = Tabs.Main:AddRightGroupbox("Prediction")
+addToggle(PredictionGroup, "silent_auto_prediction",          "Auto Prediction",         Silent, "AutoPrediction")
+addToggle(PredictionGroup, "silent_bullet_drop_compensation", "Bullet Drop Compensation",Silent, "BulletDropCompensation")
 
-local ChecksGroup = Tabs.Main:AddRightGroupbox('Checks')
-addToggle(ChecksGroup, 'silent_teamcheck',   'Team Check', Silent, 'TeamCheck')
-addToggle(ChecksGroup, 'silent_visiblecheck','Wallcheck',  Silent, 'VisibleCheck')
-addToggle(ChecksGroup, 'silent_hitscan',     'Hitscan',    Silent, 'Hitscan')
+local ChecksGroup = Tabs.Main:AddRightGroupbox("Checks")
+addToggle(ChecksGroup, "silent_teamcheck",   "Team Check", Silent, "TeamCheck")
+addToggle(ChecksGroup, "silent_visiblecheck","Wallcheck",  Silent, "VisibleCheck")
+addToggle(ChecksGroup, "silent_hitscan",     "Hitscan",    Silent, "Hitscan")
 
-local TriggerGroup = Tabs.Main:AddLeftGroupbox('Triggerbot')
-local TriggerControl = addToggle(TriggerGroup, 'trigger_enabled', 'Enabled', TriggerBotSettings, 'Enabled')
-TriggerControl:AddKeyPicker('trigger_key', {
-    Default = 'None', Mode = 'Hold', Modes = { 'Always', 'Hold', 'Toggle' },
-    Text = 'Triggerbot', SyncToggleState = false,
+local TriggerGroup = Tabs.Main:AddLeftGroupbox("Triggerbot")
+local TriggerControl = addToggle(TriggerGroup, "trigger_enabled", "Enabled", TriggerBotSettings, "Enabled")
+TriggerControl:AddKeyPicker("trigger_key", {
+    Default = "None", Mode = "Hold", Modes = { "Always", "Hold", "Toggle" },
+    Text = "Triggerbot", SyncToggleState = false,
 })
 TriggerKeyPicker = Options.trigger_key
-addSlider(TriggerGroup, 'trigger_reaction', 'Reaction Time', TriggerBotSettings, 'ReactionTime', 0, 500, 0, ' ms')
-addSlider(TriggerGroup, 'trigger_shoot',    'Shoot Time',    TriggerBotSettings, 'ShootTime',    0,1000, 0, ' ms')
-addTargets(TriggerGroup, 'trigger_targets', TriggerBotSettings)
-addToggle(TriggerGroup, 'trigger_teamcheck',   'Team Check',    TriggerBotSettings, 'TeamCheck')
-addToggle(TriggerGroup, 'trigger_visiblecheck','Wallcheck',     TriggerBotSettings, 'VisibleCheck')
-addToggle(TriggerGroup, 'trigger_magnetic',    'Magnetic',      TriggerBotSettings, 'Magnetic')
-addSlider(TriggerGroup, 'trigger_distance', 'Max Distance', TriggerBotSettings, 'MaxDistance', 50, 5000, 0, ' studs')
+addSlider(TriggerGroup, "trigger_reaction", "Reaction Time", TriggerBotSettings, "ReactionTime", 0, 500, 0, " ms")
+addSlider(TriggerGroup, "trigger_shoot",    "Shoot Time",    TriggerBotSettings, "ShootTime",    0,1000, 0, " ms")
+addTargets(TriggerGroup, "trigger_targets", TriggerBotSettings)
+addToggle(TriggerGroup, "trigger_teamcheck",   "Team Check",    TriggerBotSettings, "TeamCheck")
+addToggle(TriggerGroup, "trigger_visiblecheck","Wallcheck",     TriggerBotSettings, "VisibleCheck")
+addToggle(TriggerGroup, "trigger_magnetic",    "Magnetic",      TriggerBotSettings, "Magnetic")
+addSlider(TriggerGroup, "trigger_distance", "Max Distance", TriggerBotSettings, "MaxDistance", 50, 5000, 0, " studs")
 
 -- ── RAGEBOT TAB ───────────────────────────────────────────────────────────────
-local RageGroup = Tabs.Ragebot:AddLeftGroupbox('Ragebot')
-local RageControl = addToggle(RageGroup, 'rage_enabled', 'Enabled', Rage, 'Enabled')
-RageControl:AddKeyPicker('rage_key', {
-    Default = 'None', Mode = 'Hold', Modes = { 'Always', 'Hold', 'Toggle' },
-    Text = 'Ragebot', SyncToggleState = false,
+local RageGroup = Tabs.Ragebot:AddLeftGroupbox("Ragebot")
+local RageControl = addToggle(RageGroup, "rage_enabled", "Enabled", Rage, "Enabled")
+RageControl:AddKeyPicker("rage_key", {
+    Default = "None", Mode = "Hold", Modes = { "Always", "Hold", "Toggle" },
+    Text = "Ragebot", SyncToggleState = false,
 })
 RageKeyPicker = Options.rage_key
-RageGroup:AddDropdown('rage_hitpart', {
-    Text = 'Hit Part',
-    Values = { 'Head','HumanoidRootPart','UpperTorso','LowerTorso','LeftUpperArm','RightUpperArm','LeftUpperLeg','RightUpperLeg' },
+RageGroup:AddDropdown("rage_hitpart", {
+    Text = "Hit Part",
+    Values = { "Head","HumanoidRootPart","UpperTorso","LowerTorso","LeftUpperArm","RightUpperArm","LeftUpperLeg","RightUpperLeg" },
     Default = Rage.HitPart,
 }):OnChanged(function(value) Rage.HitPart = value end)
-addTargets(RageGroup, 'rage_targets', Rage)
-
-local RageChecks = Tabs.Ragebot:AddLeftGroupbox('Checks')
-addToggle(RageChecks, 'rage_visiblecheck',  'Wallcheck',      Rage, 'VisibleCheck')
-addToggle(RageChecks, 'rage_teamcheck',     'Team Check',     Rage, 'TeamCheck')
-addToggle(RageChecks, 'rage_hitscan',       'Hitscan',        Rage, 'Hitscan')
-addToggle(RageChecks, 'rage_distancecheck', 'Distance Check', Rage, 'DistanceCheck')
-addSlider(RageChecks, 'rage_distance', 'Max Distance', Rage, 'MaxDistance', 1, 5000, 0, ' studs')
+addTargets(RageGroup, "rage_targets", Rage)
+local RageChecks = Tabs.Ragebot:AddLeftGroupbox("Checks")
+addToggle(RageChecks, "rage_visiblecheck",  "Wallcheck",      Rage, "VisibleCheck")
+addToggle(RageChecks, "rage_teamcheck",     "Team Check",     Rage, "TeamCheck")
+addToggle(RageChecks, "rage_hitscan",       "Hitscan",        Rage, "Hitscan")
+addToggle(RageChecks, "rage_distancecheck", "Distance Check", Rage, "DistanceCheck")
+addSlider(RageChecks, "rage_distance", "Max Distance", Rage, "MaxDistance", 1, 5000, 0, " studs")
 
     local E: {[string]: any} = {
         _hasLoaded = false, objects = {}, errors = {}, scanAt = 0,
@@ -4274,65 +4309,63 @@ addSubtabs('Movement', movementPages)
 addSubtabs('Mods', modPages)
 end
 
-
 -- ── Combat frame ──────────────────────────────────────────────────────────────
 table.insert(Combat.connections, AimRunService.RenderStepped:Connect(Combat.Frame))
 
 -- ── Watermark ─────────────────────────────────────────────────────────────────
 Library:SetWatermarkVisibility(true)
-Library:SetWatermark('TokaiHub | -- fps | -- ms')
+Library:SetWatermark("TokaiHub | -- fps | -- ms")
 local elapsed, frames = 0, 0
-local stats = game:GetService('Stats')
+local stats = game:GetService("Stats")
 local WatermarkConnection = AimRunService.RenderStepped:Connect(function(dt)
     elapsed += dt; frames += 1
     if elapsed < .5 then return end
     local fps = math.floor(frames / math.max(elapsed, .001) + .5)
     elapsed = 0; frames = 0
-    local ok, ping = pcall(function() return stats.Network.ServerStatsItem['Data Ping']:GetValue() end)
-    local pingText = ok and type(ping) == 'number' and string.format('%d', math.floor(ping + .5)) or '--'
-    Library:SetWatermark(string.format('TokaiHub | %d fps | %s ms', fps, pingText))
+    local ok, ping = pcall(function() return stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
+    local pingText = ok and type(ping) == "number" and string.format("%d", math.floor(ping + .5)) or "--"
+    Library:SetWatermark(string.format("TokaiHub | %d fps | %s ms", fps, pingText))
 end)
 
 Library:OnUnload(function()
     WatermarkConnection:Disconnect()
     Combat.Destroy()
     Library.Unloaded = true
-    print('[TokaiHub] Unloaded.')
+    print("[TokaiHub] Unloaded.")
 end)
 
 -- ── UI Settings Tab ───────────────────────────────────────────────────────────
-local MenuGroup = Tabs['UI Settings']:AddLeftGroupbox('Menu')
-MenuGroup:AddToggle('ui_watermark_visible', { Text = 'Watermark', Default = true }):OnChanged(function(v)
+local MenuGroup = Tabs["UI Settings"]:AddLeftGroupbox("Menu")
+MenuGroup:AddToggle("ui_watermark_visible", { Text = "Watermark", Default = true }):OnChanged(function(v)
     Library:SetWatermarkVisibility(v)
 end)
-MenuGroup:AddButton('Unload', function() Library:Unload() end)
-MenuGroup:AddLabel('Menu bind'):AddKeyPicker('MenuKeybind', { Default = 'None', NoUI = true, Text = 'Menu keybind' })
+MenuGroup:AddToggle("ui_keybinds_visible", { Text = "Keybinds", Default = true }):OnChanged(function(v)
+    if Library.KeybindFrame then Library.KeybindFrame.Visible = v end
+end)
+MenuGroup:AddButton("Unload", function() Library:Unload() end)
+MenuGroup:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind", { Default = "None", NoUI = true, Text = "Menu keybind" })
 Library.ToggleKeybind = Options.MenuKeybind
 
 -- ── SaveManager / ThemeManager ────────────────────────────────────────────────
-local ThemeManager = loadstring(game:HttpGet(TKrepo .. 'addons/ThemeManager.lua'))()
-local SaveManager  = loadstring(game:HttpGet(TKrepo .. 'addons/SaveManager.lua'))()
-
 ThemeManager:SetLibrary(Library)
 SaveManager:SetLibrary(Library)
 SaveManager:IgnoreThemeSettings()
-SaveManager:SetIgnoreIndexes({ 'MenuKeybind' })
-ThemeManager:SetFolder('TokaiHub')
-SaveManager:SetFolder('TokaiHub/BRM5')
-SaveManager:BuildConfigSection(Tabs['UI Settings'])
-ThemeManager:ApplyToTab(Tabs['UI Settings'])
+SaveManager:SetIgnoreIndexes({ "MenuKeybind" })
+ThemeManager:SetFolder("TokaiHub")
+SaveManager:SetFolder("TokaiHub/BRM5")
+SaveManager:BuildConfigSection(Tabs["UI Settings"])
+ThemeManager:ApplyToTab(Tabs["UI Settings"])
 
--- Migrate legacy keybind defaults
-for _, id in ipairs({ 'silent_key', 'trigger_key', 'rage_key' }) do
+for _, id in ipairs({ "silent_key", "trigger_key", "rage_key" }) do
     local picker = Options[id]
-    if picker and picker.Value == 'MB2' then picker:SetValue({ 'None', picker.Mode }) end
+    if picker and picker.Value == "MB2" then picker:SetValue({ "None", picker.Mode }) end
 end
 
 SaveManager:LoadAutoloadConfig()
 Combat.ESP.Load()
 
 Library:Notify({
-    Title       = 'TokaiHub Loaded',
-    Description = 'BRM5 Edition — Press RightShift to toggle.',
+    Title       = "TokaiHub Loaded",
+    Description = "BRM5 Edition — Press RightShift to toggle.",
     Time        = 4,
 })
