@@ -109,12 +109,15 @@ Library.Create = function(self, class, properties)
 end
 
 local Window = Library:CreateWindow({
-    Title = 'TokaiHub | BRM5',
-    Center = true,
-    AutoShow = true,
-    Size = UDim2.fromOffset(568, 660),
-    TabPadding = 6,
-    MenuFadeTime = 0.16
+    Title             = 'TokaiHub | BRM5',
+    Footer            = 'BRM5 Edition',
+    Center            = true,
+    AutoShow          = true,
+    ToggleKeybind     = Enum.KeyCode.RightShift,
+    ShowCustomCursor  = true,
+    NotifySide        = 'Right',
+    Resizable         = true,
+    MobileButtonsSide = 'Left',
 })
 
 Fonts.Root = Window.Holder:FindFirstAncestorWhichIsA('ScreenGui')
@@ -123,12 +126,12 @@ Library:GiveSignal(Fonts.Root.DescendantAdded:Connect(function(instance)
 end))
 
 local Tabs = {
-    Main = Window:AddTab('Main'),
-    Ragebot = Window:AddTab('Ragebot'),
-    Visuals = Window:AddTab('Visuals'),
-    Movement = Window:AddTab('Movement'),
-    Mods = Window:AddTab('Mods'),
-    ['UI Settings'] = Window:AddTab('UI Settings'),
+    Main = Window:AddTab('Main', 'crosshair'),
+    Ragebot = Window:AddTab('Ragebot', 'target'),
+    Visuals = Window:AddTab('Visuals', 'eye'),
+    Movement = Window:AddTab('Movement', 'move'),
+    Mods = Window:AddTab('Mods', 'wrench'),
+    ['UI Settings'] = Window:AddTab('UI Settings', 'settings'),
 }
 
 local previousCombat = getgenv().TokaiHubCombat
