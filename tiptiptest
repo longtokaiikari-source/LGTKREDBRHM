@@ -18,7 +18,6 @@ if previousLibrary and not previousLibrary.Unloaded then
 end
 getgenv().TokaiHubMenuLibrary = TokaiHub
 
--- alias so internal code still works
 local Library = TokaiHub
 
 local Window = TokaiHub:CreateWindow({
@@ -32,6 +31,15 @@ local Window = TokaiHub:CreateWindow({
     Resizable         = true,
     MobileButtonsSide = "Left",
 })
+
+local Tabs = {
+    Main            = Window:AddTab("Main",         "crosshair"),
+    Ragebot         = Window:AddTab("Ragebot",      "target"),
+    Visuals         = Window:AddTab("Visuals",       "eye"),
+    Movement        = Window:AddTab("Movement",      "move"),
+    Mods            = Window:AddTab("Mods",          "wrench"),
+    ["UI Settings"] = Window:AddTab("UI Settings",  "settings"),
+}
 
 local previousCombat = getgenv().TokaiHubCombat
 if previousCombat and previousCombat.Destroy then previousCombat.Destroy() end
