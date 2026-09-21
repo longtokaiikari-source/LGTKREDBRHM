@@ -46,7 +46,7 @@ ThemeManager.BuiltInThemes.Clean = { 0, {
 ThemeManager.DefaultTheme = 'Clean'
 
 local Fonts: {[string]: any} = {
-    UIName = 'Code', Face = Font.fromEnum(Library.Font), Cache = {}, Version = 0,
+    UIName = 'Code', Face = Font.fromEnum(Enum.Font.Code), Cache = {}, Version = 0,
     Names = { 'Code', 'Arial', 'Gotham', 'Source Sans', 'Roboto Mono', 'Ubuntu', 'Tahoma', 'Minecraftia', 'Verdana', 'Proggy Clean', 'Builder Sans', 'Arimo', 'Roboto', 'Roboto Condensed', 'Gotham Medium', 'Gotham Bold', 'Nunito', 'Oswald', 'Source Sans Semibold' },
     Builtins = { Code = Enum.Font.Code, Arial = Enum.Font.Arial, Gotham = Enum.Font.Gotham,
         ['Source Sans'] = Enum.Font.SourceSans, ['Roboto Mono'] = Enum.Font.RobotoMono, Ubuntu = Enum.Font.Ubuntu,
@@ -98,7 +98,7 @@ function Fonts.SetUI(name)
     local face = Fonts.Resolve(name)
     if Library.Unloaded then return end
     Fonts.UIName = name; Fonts.Face = face; Fonts.Version += 1
-    Library.Font = Fonts.Builtins[name] or Enum.Font.Code
+    -- Library.Font not in TKBLACKLIB: Fonts.Builtins[name] or Enum.Font.Code
     for _, instance in ipairs(Fonts.Root:GetDescendants()) do Fonts.Apply(instance) end
 end
 local createWithDefaultFont = Library.Create
