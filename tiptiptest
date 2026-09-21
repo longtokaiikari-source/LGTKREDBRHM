@@ -1,138 +1,39 @@
-local repo = 'https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/'
+-- TokaiHub | BRM5
 
-local LibrarySourceUrl = 'https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/Library.lua'
-local LibrarySource = game:HttpGet(LibrarySourceUrl)
+local TokaiHub = loadstring(game:HttpGet(
+    "https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/Library.lua"
+))()
 
+local SaveManager = loadstring(game:HttpGet(
+    "https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/addons/SaveManager.lua"
+))()
+
+local ThemeManager = loadstring(game:HttpGet(
+    "https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/addons/ThemeManager.lua"
+))()
 
 local previousLibrary = getgenv().TokaiHubMenuLibrary
-if previousLibrary and not previousLibrary.Unloaded then previousLibrary:Unload() end
-local Library = assert(loadstring(LibrarySource, 'LinoriaLib.luau'))()
-getgenv().TokaiHubMenuLibrary = Library
-do
-    local InputService=game:GetService("UserInputService")
-function Library:IsTyping()
-    if InputService:GetFocusedTextBox() or self.FocusedTextBox or os.clock() < (self.TypingUntil or 0) then return true end
-    local ok, focused = pcall(function()
-        return game:GetService("TextChatService").ChatInputBarConfiguration.IsFocused
-    end)
-    return ok and focused == true
+if previousLibrary and not previousLibrary.Unloaded then
+    pcall(function() previousLibrary:Unload() end)
 end
-table.insert(Library.Signals, InputService.TextBoxFocused:Connect(function(box)
-    Library.FocusedTextBox = box
-end))
-table.insert(Library.Signals, InputService.TextBoxFocusReleased:Connect(function(box)
-    if Library.FocusedTextBox == box then Library.FocusedTextBox = nil end
-    Library.TypingUntil = os.clock() + .15
-end))
+getgenv().TokaiHubMenuLibrary = TokaiHub
 
-    local originalToggle=Library.Toggle
-    Library.Toggle=function(...)
-        if Library:IsTyping() then return end
-        return originalToggle(...)
-    end
-end
-local reloadState = getfenv().STATE
-if type(reloadState)=="table" and type(reloadState.onCleanup)=="function" then
-    reloadState.onCleanup(function() if not Library.Unloaded then Library:Unload() end end)
-end
-local Toggles, Options = getgenv().Toggles, getgenv().Options
-local ThemeManager = loadstring(game:HttpGet('https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/addons/ThemeManager.lua'))()
-local SaveManager = loadstring(game:HttpGet('https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/addons/SaveManager.lua'))()
+-- TokaiHub is the Library object (same as Linoria's Library)
+local Library = TokaiHub
+local Toggles = Library.Toggles
+local Options  = Library.Options
 
-ThemeManager.BuiltInThemes.Clean = { 0, {
-    FontColor = 'E8E8E8', MainColor = '1D1D1D', BackgroundColor = '141414',
-    AccentColor = 'BEBEBE', OutlineColor = '383838'
-} }
-ThemeManager.DefaultTheme = 'Clean'
-
-local Fonts: {[string]: any} = {
-    UIName = 'Code', Face = Font.fromEnum(Enum.Font.Code), Cache = {}, Version = 0,
-    Names = { 'Code', 'Arial', 'Gotham', 'Source Sans', 'Roboto Mono', 'Ubuntu', 'Tahoma', 'Minecraftia', 'Verdana', 'Proggy Clean', 'Builder Sans', 'Arimo', 'Roboto', 'Roboto Condensed', 'Gotham Medium', 'Gotham Bold', 'Nunito', 'Oswald', 'Source Sans Semibold' },
-    Builtins = { Code = Enum.Font.Code, Arial = Enum.Font.Arial, Gotham = Enum.Font.Gotham,
-        ['Source Sans'] = Enum.Font.SourceSans, ['Roboto Mono'] = Enum.Font.RobotoMono, Ubuntu = Enum.Font.Ubuntu,
-        ['Builder Sans']=Enum.Font.BuilderSans, Arimo=Enum.Font.Arimo, Roboto=Enum.Font.Roboto,
-        ['Roboto Condensed']=Enum.Font.RobotoCondensed, ['Gotham Medium']=Enum.Font.GothamMedium,
-        ['Gotham Bold']=Enum.Font.GothamBold, Nunito=Enum.Font.Nunito, Oswald=Enum.Font.Oswald,
-        ['Source Sans Semibold']=Enum.Font.SourceSansSemibold },
-    Files = { Tahoma = 'Tahoma-Modern.ttf', Minecraftia = 'Minecraftia-Regular.ttf',
-        Verdana = 'Verdana-Font.ttf', ['Proggy Clean'] = 'ProggyClean.ttf' },
-}
-function Fonts.Resolve(name)
-    if Fonts.Cache[name] then return Fonts.Cache[name] end
-    local enum = Fonts.Builtins[name]
-    local face
-    if enum then
-        face = Font.fromEnum(enum)
-    else
-        local filename = assert(Fonts.Files[name], 'Unknown font: ' .. tostring(name))
-        assert(getcustomasset and writefile and isfile and makefolder and isfolder, 'Custom font loading is unavailable')
-        local folder = 'LinoriaFonts'
-        if not isfolder(folder) then makefolder(folder) end
-        local path = folder .. '/' .. filename
-        if not isfile(path) then
-            local data = game:HttpGet('https://raw.githubusercontent.com/i77lhm/storage/f58e45bdfab788c545200318d764474cc7cc99a5/fonts/' .. filename)
-            assert(#data > 1024, 'Font download is incomplete')
-            writefile(path, data)
-        end
-        local manifest = folder .. '/' .. filename .. '.json'
-        writefile(manifest, game:GetService('HttpService'):JSONEncode({
-            name = name, faces = { { name = 'Regular', weight = 400, style = 'normal', assetId = getcustomasset(path) } },
-        }))
-        face = Font.new(getcustomasset(manifest))
-    end
-    local params = Instance.new('GetTextBoundsParams')
-    params.Font = face; params.Text = 'Font'; params.Size = 14; params.Width = 200
-    local textService: any = game:GetService('TextService')
-    local ok, result = pcall(function() return textService:GetTextBoundsAsync(params) end)
-    params:Destroy()
-    assert(ok, tostring(result))
-    Fonts.Cache[name] = face
-    return face
-end
-function Fonts.Apply(instance)
-    if instance:IsA('TextLabel') or instance:IsA('TextButton') or instance:IsA('TextBox') then
-        instance.FontFace = Fonts.Face
-    end
-end
-function Fonts.SetUI(name)
-    local face = Fonts.Resolve(name)
-    if Library.Unloaded then return end
-    Fonts.UIName = name; Fonts.Face = face; Fonts.Version += 1
-    -- Library.Font not in TKBLACKLIB: Fonts.Builtins[name] or Enum.Font.Code
-    for _, instance in ipairs(Fonts.Root:GetDescendants()) do Fonts.Apply(instance) end
-end
-local createWithDefaultFont = Library.Create
-Library.Create = function(self, class, properties)
-    local instance = createWithDefaultFont(self, class, properties)
-    Fonts.Apply(instance)
-    return instance
-end
-
-local Window = Library:CreateWindow({
-    Title             = 'TokaiHub | BRM5',
-    Footer            = 'BRM5 Edition',
+local Window = TokaiHub:CreateWindow({
+    Title             = "TokaiHub | BRM5",
+    Footer            = "BRM5 Edition",
+    ToggleKeybind     = Enum.KeyCode.RightShift,
     Center            = true,
     AutoShow          = true,
-    ToggleKeybind     = Enum.KeyCode.RightShift,
     ShowCustomCursor  = true,
-    NotifySide        = 'Right',
+    NotifySide        = "Right",
     Resizable         = true,
-    MobileButtonsSide = 'Left',
+    MobileButtonsSide = "Left",
 })
-
-Fonts.Root = Window.Holder:FindFirstAncestorWhichIsA('ScreenGui')
-Library:GiveSignal(Fonts.Root.DescendantAdded:Connect(function(instance)
-    Fonts.Apply(instance)
-end))
-
-local Tabs = {
-    Main = Window:AddTab('Main', 'crosshair'),
-    Ragebot = Window:AddTab('Ragebot', 'target'),
-    Visuals = Window:AddTab('Visuals', 'eye'),
-    Movement = Window:AddTab('Movement', 'move'),
-    Mods = Window:AddTab('Mods', 'wrench'),
-    ['UI Settings'] = Window:AddTab('UI Settings', 'settings'),
-}
 
 local previousCombat = getgenv().TokaiHubCombat
 if previousCombat and previousCombat.Destroy then previousCombat.Destroy() end
@@ -501,7 +402,7 @@ function Combat.Frame(dt)
         Combat.retryAt=os.clock()+2
         Combat.Install()
     end
-    local menuOpen=Window.Holder.Visible
+    local menuOpen = Window and Window.Holder and Window.Holder.Visible or false
     local blocked=menuOpen or Library:IsTyping()
     Combat.silentActive=Combat.KeyActive(SilentKeyPicker,keyStates.silent)
     local triggerActive=Combat.KeyActive(TriggerKeyPicker,keyStates.trigger)
@@ -761,6 +662,7 @@ table.insert(Combat.connections, AimRunService.RenderStepped:Connect(function(dt
         end
     end
 end))
+
 
 -- Bind controls to the existing BRM5 combat state.
 local function addToggle(group, id, text, settings, field)
@@ -1500,7 +1402,7 @@ local Sense = (function()
             end
         end
         if not anchor then
-            anchor=Instance.new("Part");anchor.Name="TokaiHubNPCOverlayAnchor"
+            anchor=Instance.new("Part");anchor.Name="LeanNPCOverlayAnchor"
             anchor.Size=Vector3.new(.01,.01,.01);anchor.CFrame=CFrame.identity
             anchor.Transparency=1;anchor.Anchored=true;anchor.CanCollide=false
             anchor.CanTouch=false;anchor.CanQuery=false;anchor.CastShadow=false
@@ -1513,7 +1415,7 @@ local Sense = (function()
                 local alpha=clear and cfg.visibleIntensity or cfg.occludedIntensity
                 local ad=o.adornments[i]
                 if not ad then
-                    ad=Instance.new("BoxHandleAdornment");ad.Name="TokaiHubNPCChams"
+                    ad=Instance.new("BoxHandleAdornment");ad.Name="LeanNPCChams"
                     ad.Adornee=anchor;ad.AlwaysOnTop=true;ad.ZIndex=3;ad.Parent=anchor
                     o.adornments[i]=ad
                 end
@@ -3354,7 +3256,7 @@ function Gun.DrawTracer(from,to)
     local paths=Gun.TracerPoints(from,to,Gun.TracerStyle,Random.new())
     if #paths==0 or not workspace.CurrentCamera then return end
     if not Gun.tracerFolder then
-        Gun.tracerFolder=Instance.new("Folder");Gun.tracerFolder.Name="TokaiHubGunTracers"
+        Gun.tracerFolder=Instance.new("Folder");Gun.tracerFolder.Name="LeanGunTracers"
     end
     Gun.tracerFolder.Parent=workspace.CurrentCamera
     local existing=Gun.tracerFolder:GetChildren()
@@ -3949,7 +3851,7 @@ do
         else A.target=nil;A.targetActor=nil end
         if Gun.Debug then
             if not X.hud then
-                local gui=Instance.new("ScreenGui");gui.Name="TokaiHubGunDebug";gui.ResetOnSpawn=false;gui.Parent=AimLocalPlayer:WaitForChild("PlayerGui")
+                local gui=Instance.new("ScreenGui");gui.Name="LeanGunDebug";gui.ResetOnSpawn=false;gui.Parent=AimLocalPlayer:WaitForChild("PlayerGui")
                 local label=Instance.new("TextLabel");label.Size=UDim2.fromOffset(340,112);label.Position=UDim2.new(0,16,1,-140)
                 label.BackgroundColor3=Color3.fromRGB(15,15,15);label.BackgroundTransparency=.2;label.TextColor3=Color3.new(1,1,1)
                 label.TextSize=14;label.Font=Enum.Font.Code;label.TextXAlignment=Enum.TextXAlignment.Left;label.Parent=gui
@@ -4489,6 +4391,7 @@ addSubtabs('Movement', movementPages)
 addSubtabs('Mods', modPages)
 end
 
+
 table.insert(Combat.connections, AimRunService.RenderStepped:Connect(Combat.Frame))
 
 -- Keep overlay visibility independent from text and performance updates.
@@ -4548,7 +4451,7 @@ end
 table.insert(Combat.connections,label:GetPropertyChangedSignal("TextBounds"):Connect(resizeWatermark))
 local elapsed,frames=0,0
 local stats: any=game:GetService("Stats")
-Library:SetWatermark("TokaiHub | -- fps | -- ms")
+Library:SetWatermark("Lean | -- fps | -- ms")
 local WatermarkConnection=AimRunService.RenderStepped:Connect(function(dt)
     elapsed+=dt;frames+=1
     if elapsed<.5 then return end
@@ -4556,7 +4459,7 @@ local WatermarkConnection=AimRunService.RenderStepped:Connect(function(dt)
     elapsed=0;frames=0
     local ok,ping=pcall(function() return stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
     local pingText=ok and type(ping)=="number" and string.format("%d",math.floor(ping+.5)) or "--"
-    Library:SetWatermark(string.format("TokaiHub | %d fps | %s ms",fps,pingText))
+    Library:SetWatermark(string.format("Lean | %d fps | %s ms",fps,pingText))
 end)
 
 Library:OnUnload(function()
@@ -4599,8 +4502,8 @@ Library.ToggleKeybind = Options.MenuKeybind -- Allows you to have a custom keybi
 -- ThemeManager (Allows you to have a menu theme system)
 
 -- Hand the library over to our managers
-ThemeManager:SetLibrary(Library)
-SaveManager:SetLibrary(Library)
+ThemeManager:SetLibrary(TokaiHub)
+SaveManager:SetLibrary(TokaiHub)
 
 -- Ignore keys that are used by ThemeManager.
 -- (we dont want configs to save themes, do we?)
