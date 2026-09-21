@@ -18,10 +18,8 @@ if previousLibrary and not previousLibrary.Unloaded then
 end
 getgenv().TokaiHubMenuLibrary = TokaiHub
 
--- TokaiHub is the Library object (same as Linoria's Library)
+-- alias so internal code still works
 local Library = TokaiHub
-local Toggles = Library.Toggles
-local Options  = Library.Options
 
 local Window = TokaiHub:CreateWindow({
     Title             = "TokaiHub | BRM5",
