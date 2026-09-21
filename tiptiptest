@@ -1,72 +1,134 @@
--- TokaiHub | BRM5
--- UI Library: longhazem/TKBLACKLIB
+local repo = 'https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/'
 
-local Repository = "https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/"
+local LibrarySourceUrl = 'https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/Library.lua'
+local LibrarySource = game:HttpGet(LibrarySourceUrl)
 
-local function GetLoadstringSource(Url)
-	local function tryRequest(fn, args)
-		if not fn then return nil end
-		local ok, r = pcall(fn, args)
-		if ok and r and r.Body and typeof(r.Body) == "string" then return r.Body end
-	end
-	local body = tryRequest(request, {Url=Url,Method="GET"})
-		or tryRequest(http_request, {Url=Url,Method="GET"})
-		or tryRequest(syn and syn.request, {Url=Url,Method="GET"})
-		or tryRequest(fluxus and fluxus.request, {Url=Url,Method="GET"})
-	if not body then
-		local ok, r = pcall(function() return game:HttpGet(Url) end)
-		if ok and typeof(r) == "string" then body = r end
-	end
-	if not body then error("[TokaiHub] HTTP failed: " .. tostring(Url), 2) end
-	if body:match("^429") or body:lower():match("rate limit") then
-		(warn or print)("[TokaiHub] Rate limit — retry in 10s")
-		task.wait(10)
-		return GetLoadstringSource(Url)
-	end
-	if body:match("^<!DOCTYPE") or body:match("^<html") then
-		error("[TokaiHub] Server returned HTML — bad URL or repo error", 2)
-	end
-	return body
-end
-
-local function LoadRemote(Url)
-	local Source = GetLoadstringSource(Url)
-	local Chunk, LoadError = loadstring(Source)
-	if not Chunk then error("loadstring failed for " .. tostring(Url) .. ": " .. tostring(LoadError), 2) end
-	return Chunk()
-end
-
-local Library     = LoadRemote(Repository .. "Library.lua")
-local ThemeManager = LoadRemote(Repository .. "addons/ThemeManager.lua")
-local SaveManager  = LoadRemote(Repository .. "addons/SaveManager.lua")
 
 local previousLibrary = getgenv().TokaiHubMenuLibrary
-if previousLibrary and not previousLibrary.Unloaded then
-    pcall(function() previousLibrary:Unload() end)
-end
+if previousLibrary and not previousLibrary.Unloaded then previousLibrary:Unload() end
+local Library = assert(loadstring(LibrarySource, 'LinoriaLib.luau'))()
 getgenv().TokaiHubMenuLibrary = Library
+do
+    local InputService=game:GetService("UserInputService")
+function Library:IsTyping()
+    if InputService:GetFocusedTextBox() or self.FocusedTextBox or os.clock() < (self.TypingUntil or 0) then return true end
+    local ok, focused = pcall(function()
+        return game:GetService("TextChatService").ChatInputBarConfiguration.IsFocused
+    end)
+    return ok and focused == true
+end
+table.insert(Library.Signals, InputService.TextBoxFocused:Connect(function(box)
+    Library.FocusedTextBox = box
+end))
+table.insert(Library.Signals, InputService.TextBoxFocusReleased:Connect(function(box)
+    if Library.FocusedTextBox == box then Library.FocusedTextBox = nil end
+    Library.TypingUntil = os.clock() + .15
+end))
 
-local Toggles = Library.Toggles
-local Options  = Library.Options
+    local originalToggle=Library.Toggle
+    Library.Toggle=function(...)
+        if Library:IsTyping() then return end
+        return originalToggle(...)
+    end
+end
+local reloadState = getfenv().STATE
+if type(reloadState)=="table" and type(reloadState.onCleanup)=="function" then
+    reloadState.onCleanup(function() if not Library.Unloaded then Library:Unload() end end)
+end
+local Toggles, Options = getgenv().Toggles, getgenv().Options
+local ThemeManager = loadstring(game:HttpGet('https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/addons/ThemeManager.lua'))()
+local SaveManager = loadstring(game:HttpGet('https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/addons/SaveManager.lua'))()
+
+ThemeManager.BuiltInThemes.Clean = { 0, {
+    FontColor = 'E8E8E8', MainColor = '1D1D1D', BackgroundColor = '141414',
+    AccentColor = 'BEBEBE', OutlineColor = '383838'
+} }
+ThemeManager.DefaultTheme = 'Clean'
+
+local Fonts: {[string]: any} = {
+    UIName = 'Code', Face = Font.fromEnum(Library.Font), Cache = {}, Version = 0,
+    Names = { 'Code', 'Arial', 'Gotham', 'Source Sans', 'Roboto Mono', 'Ubuntu', 'Tahoma', 'Minecraftia', 'Verdana', 'Proggy Clean', 'Builder Sans', 'Arimo', 'Roboto', 'Roboto Condensed', 'Gotham Medium', 'Gotham Bold', 'Nunito', 'Oswald', 'Source Sans Semibold' },
+    Builtins = { Code = Enum.Font.Code, Arial = Enum.Font.Arial, Gotham = Enum.Font.Gotham,
+        ['Source Sans'] = Enum.Font.SourceSans, ['Roboto Mono'] = Enum.Font.RobotoMono, Ubuntu = Enum.Font.Ubuntu,
+        ['Builder Sans']=Enum.Font.BuilderSans, Arimo=Enum.Font.Arimo, Roboto=Enum.Font.Roboto,
+        ['Roboto Condensed']=Enum.Font.RobotoCondensed, ['Gotham Medium']=Enum.Font.GothamMedium,
+        ['Gotham Bold']=Enum.Font.GothamBold, Nunito=Enum.Font.Nunito, Oswald=Enum.Font.Oswald,
+        ['Source Sans Semibold']=Enum.Font.SourceSansSemibold },
+    Files = { Tahoma = 'Tahoma-Modern.ttf', Minecraftia = 'Minecraftia-Regular.ttf',
+        Verdana = 'Verdana-Font.ttf', ['Proggy Clean'] = 'ProggyClean.ttf' },
+}
+function Fonts.Resolve(name)
+    if Fonts.Cache[name] then return Fonts.Cache[name] end
+    local enum = Fonts.Builtins[name]
+    local face
+    if enum then
+        face = Font.fromEnum(enum)
+    else
+        local filename = assert(Fonts.Files[name], 'Unknown font: ' .. tostring(name))
+        assert(getcustomasset and writefile and isfile and makefolder and isfolder, 'Custom font loading is unavailable')
+        local folder = 'LinoriaFonts'
+        if not isfolder(folder) then makefolder(folder) end
+        local path = folder .. '/' .. filename
+        if not isfile(path) then
+            local data = game:HttpGet('https://raw.githubusercontent.com/i77lhm/storage/f58e45bdfab788c545200318d764474cc7cc99a5/fonts/' .. filename)
+            assert(#data > 1024, 'Font download is incomplete')
+            writefile(path, data)
+        end
+        local manifest = folder .. '/' .. filename .. '.json'
+        writefile(manifest, game:GetService('HttpService'):JSONEncode({
+            name = name, faces = { { name = 'Regular', weight = 400, style = 'normal', assetId = getcustomasset(path) } },
+        }))
+        face = Font.new(getcustomasset(manifest))
+    end
+    local params = Instance.new('GetTextBoundsParams')
+    params.Font = face; params.Text = 'Font'; params.Size = 14; params.Width = 200
+    local textService: any = game:GetService('TextService')
+    local ok, result = pcall(function() return textService:GetTextBoundsAsync(params) end)
+    params:Destroy()
+    assert(ok, tostring(result))
+    Fonts.Cache[name] = face
+    return face
+end
+function Fonts.Apply(instance)
+    if instance:IsA('TextLabel') or instance:IsA('TextButton') or instance:IsA('TextBox') then
+        instance.FontFace = Fonts.Face
+    end
+end
+function Fonts.SetUI(name)
+    local face = Fonts.Resolve(name)
+    if Library.Unloaded then return end
+    Fonts.UIName = name; Fonts.Face = face; Fonts.Version += 1
+    Library.Font = Fonts.Builtins[name] or Enum.Font.Code
+    for _, instance in ipairs(Fonts.Root:GetDescendants()) do Fonts.Apply(instance) end
+end
+local createWithDefaultFont = Library.Create
+Library.Create = function(self, class, properties)
+    local instance = createWithDefaultFont(self, class, properties)
+    Fonts.Apply(instance)
+    return instance
+end
 
 local Window = Library:CreateWindow({
-    Title             = "TokaiHub | BRM5",
-    Footer            = "BRM5 Edition",
-    ToggleKeybind     = Enum.KeyCode.RightShift,
-    Center            = true,
-    AutoShow          = true,
-    ShowCustomCursor  = true,
-    NotifySide        = "Right",
-    MobileButtonsSide = "Left",
+    Title = 'TokaiHub | BRM5',
+    Center = true,
+    AutoShow = true,
+    Size = UDim2.fromOffset(568, 660),
+    TabPadding = 6,
+    MenuFadeTime = 0.16
 })
 
+Fonts.Root = Window.Holder:FindFirstAncestorWhichIsA('ScreenGui')
+Library:GiveSignal(Fonts.Root.DescendantAdded:Connect(function(instance)
+    Fonts.Apply(instance)
+end))
+
 local Tabs = {
-    Main            = Window:AddTab({Name = "Main", Icon = "crosshair"}),
-    Ragebot         = Window:AddTab({Name = "Ragebot", Icon = "target"}),
-    Visuals         = Window:AddTab({Name = "Visuals", Icon = "eye"}),
-    Movement        = Window:AddTab({Name = "Movement", Icon = "move"}),
-    Mods            = Window:AddTab({Name = "Mods", Icon = "wrench"}),
-    ["UI Settings"] = Window:AddTab({Name = "UI Settings", Icon = "settings"}),
+    Main = Window:AddTab('Main'),
+    Ragebot = Window:AddTab('Ragebot'),
+    Visuals = Window:AddTab('Visuals'),
+    Movement = Window:AddTab('Movement'),
+    Mods = Window:AddTab('Mods'),
+    ['UI Settings'] = Window:AddTab('UI Settings'),
 }
 
 local previousCombat = getgenv().TokaiHubCombat
@@ -436,7 +498,7 @@ function Combat.Frame(dt)
         Combat.retryAt=os.clock()+2
         Combat.Install()
     end
-    local menuOpen = (Window and Window.Holder and Window.Holder.Visible) or false
+    local menuOpen=Window.Holder.Visible
     local blocked=menuOpen or Library:IsTyping()
     Combat.silentActive=Combat.KeyActive(SilentKeyPicker,keyStates.silent)
     local triggerActive=Combat.KeyActive(TriggerKeyPicker,keyStates.trigger)
@@ -697,13 +759,13 @@ table.insert(Combat.connections, AimRunService.RenderStepped:Connect(function(dt
     end
 end))
 
-
--- ── UI Helpers ────────────────────────────────────────────────────────────────
+-- Bind controls to the existing BRM5 combat state.
 local function addToggle(group, id, text, settings, field)
     local control = group:AddToggle(id, { Text = text, Default = settings[field] })
     control:OnChanged(function()
-        settings[field] = Toggles[id].Value
-        Combat.target = nil; Combat.sticky = nil
+        settings[field] = control.Value
+        Combat.target = nil
+        Combat.sticky = nil
     end)
     return control
 end
@@ -711,114 +773,229 @@ end
 local function addSlider(group, id, text, settings, field, minimum, maximum, decimals, suffix)
     local control = group:AddSlider(id, {
         Text = text, Default = settings[field], Min = minimum, Max = maximum,
-        Rounding = decimals or 0, Suffix = suffix or "",
+        Rounding = decimals or 0, Suffix = suffix or '',
     })
     control:OnChanged(function(value) settings[field] = value end)
     return control
 end
 
 local function addTargets(group, id, settings)
-    local kinds = { NPC = "NPCs", Zombie = "Zombies", Player = "Players" }
+    local kinds = { NPC = 'NPCs', Zombie = 'Zombies', Player = 'Players' }
     local defaults = {}
-    for _, name in ipairs({ "NPC", "Zombie", "Player" }) do
+    for _, name in ipairs({ 'NPC', 'Zombie', 'Player' }) do
         if settings.Targets[kinds[name]] then table.insert(defaults, name) end
     end
     group:AddDropdown(id, {
-        Text = "Target Selection", Values = { "NPC", "Zombie", "Player" },
+        Text = 'Target Selection', Values = { 'NPC', 'Zombie', 'Player' },
         Multi = true, Default = defaults,
     }):OnChanged(function(selected)
         local values = {}
-        for _, name in ipairs({ "NPC", "Zombie", "Player" }) do
+        for _, name in ipairs({ 'NPC', 'Zombie', 'Player' }) do
             if selected[name] then table.insert(values, kinds[name]) end
         end
         Combat.SetTargets(settings, values)
     end)
 end
 
--- ── MAIN TAB ──────────────────────────────────────────────────────────────────
-local SilentGroup = Tabs.Main:AddLeftGroupbox("Silent Aim")
-local EnabledControl = addToggle(SilentGroup, "silent_enabled", "Enabled", Silent, "Enabled")
-EnabledControl:AddKeyPicker("silent_key", {
-    Default = "None", Mode = "Hold", Modes = { "Always", "Hold", "Toggle" },
-    Text = "Silent Aim", SyncToggleState = false,
+local SilentGroup = Tabs.Main:AddLeftGroupbox('Silent Aim')
+local EnabledControl = addToggle(SilentGroup, 'silent_enabled', 'Enabled', Silent, 'Enabled')
+EnabledControl:AddKeyPicker('silent_key', {
+    Default = 'None', Mode = 'Hold', Modes = { 'Always', 'Hold', 'Toggle' },
+    Text = 'Silent Aim', SyncToggleState = false,
 })
 SilentKeyPicker = Options.silent_key
 
-local ShowControl = addToggle(SilentGroup, "silent_fov_show", "Show FOV", Silent, "ShowFOV")
-ShowControl:AddColorPicker("silent_fov_color", { Default = Silent.FOVColor, Title = "FOV Color" })
+local ShowControl = addToggle(SilentGroup, 'silent_fov_show', 'Show FOV', Silent, 'ShowFOV')
+ShowControl:AddColorPicker('silent_fov_color', { Default = Silent.FOVColor, Title = 'FOV Color' })
 Options.silent_fov_color:OnChanged(function(color) Silent.FOVColor = color end)
 
-local FillControl = addToggle(SilentGroup, "silent_fov_fill", "Fill", Silent, "FillFOV")
-FillControl:AddColorPicker("silent_fov_fill_color", {
-    Default = Silent.FOVFillColor, Transparency = 1 - Silent.FOVFillTransparency, Title = "Fill Color",
+local FillControl = addToggle(SilentGroup, 'silent_fov_fill', 'Fill', Silent, 'FillFOV')
+FillControl:AddColorPicker('silent_fov_fill_color', {
+    Default = Silent.FOVFillColor, Transparency = 1 - Silent.FOVFillTransparency, Title = 'Fill Color',
 })
 Options.silent_fov_fill_color:OnChanged(function(color)
     Silent.FOVFillColor = color
     Silent.FOVFillTransparency = 1 - Options.silent_fov_fill_color.Transparency
 end)
 
-local GradientControl = addToggle(SilentGroup, "silent_fov_gradient", "Gradient FOV", Silent, "GradientFOV")
-GradientControl:AddColorPicker("silent_fov_gradient_a", { Default = Silent.GradientColorA, Title = "Gradient A" })
-GradientControl:AddColorPicker("silent_fov_gradient_b", { Default = Silent.GradientColorB, Title = "Gradient B" })
-Options.silent_fov_gradient_a:OnChanged(function(c) Silent.GradientColorA = c end)
-Options.silent_fov_gradient_b:OnChanged(function(c) Silent.GradientColorB = c end)
-addToggle(SilentGroup, "silent_fov_spin", "Spin Gradient", Silent, "GradientSpin")
-addSlider(SilentGroup, "silent_fov_spin_speed", "Spin Speed", Silent, "GradientSpinSpeed", 0.1, 3, 1, " rev/s")
-addTargets(SilentGroup, "silent_targets", Silent)
-SilentGroup:AddDropdown("silent_hitpart", {
-    Text = "Hit Part", Values = HitPartOptions, Default = Silent.HitPart,
+local GradientControl = addToggle(SilentGroup, 'silent_fov_gradient', 'Gradient', Silent, 'GradientFOV')
+GradientControl:AddColorPicker('silent_fov_gradient_a', { Default = Silent.GradientColorA, Title = 'Gradient Color A' })
+GradientControl:AddColorPicker('silent_fov_gradient_b', { Default = Silent.GradientColorB, Title = 'Gradient Color B' })
+Options.silent_fov_gradient_a:OnChanged(function(color) Silent.GradientColorA = color end)
+Options.silent_fov_gradient_b:OnChanged(function(color) Silent.GradientColorB = color end)
+
+local GradientOptions = SilentGroup:AddDependencyBox()
+addToggle(GradientOptions, 'silent_fov_spin', 'Spin', Silent, 'GradientSpin')
+local SpinOptions = GradientOptions:AddDependencyBox()
+addSlider(SpinOptions, 'silent_fov_spin_speed', 'Spin Speed', Silent, 'GradientSpinSpeed', 0.1, 3, 1, ' rev/s')
+SpinOptions:SetupDependencies({ { Toggles.silent_fov_spin, true } })
+GradientOptions:SetupDependencies({ { Toggles.silent_fov_gradient, true } })
+
+addTargets(SilentGroup, 'silent_targets', Silent)
+SilentGroup:AddDropdown('silent_hitpart', {
+    Text = 'Hit Part', Values = HitPartOptions, Default = Silent.HitPart,
 }):OnChanged(function(value) Silent.HitPart = value; Combat.sticky = nil end)
-addSlider(SilentGroup, "silent_fov",       "FOV Radius",   Silent, "FOV",         10,   500, 0, "px")
-addSlider(SilentGroup, "silent_hitchance", "Hit Chance",   Silent, "HitChance",    0,   100, 0, "%")
-addSlider(SilentGroup, "silent_distance",  "Max Distance", Silent, "MaxDistance", 50,  5000, 0, " studs")
-addToggle(SilentGroup, "silent_fov_enabled",  "FOV Check",  Silent, "FOVEnabled")
-addToggle(SilentGroup, "silent_sticky",        "Sticky Aim", Silent, "StickyAim")
+addSlider(SilentGroup, 'silent_fov', 'FOV Radius', Silent, 'FOV', 10, 500, 0, 'px')
+addSlider(SilentGroup, 'silent_hitchance', 'Hit Chance', Silent, 'HitChance', 0, 100, 0, '%')
+addSlider(SilentGroup, 'silent_distance', 'Max Distance', Silent, 'MaxDistance', 50, 5000, 0, ' studs')
+addToggle(SilentGroup, 'silent_fov_enabled', 'FOV Check', Silent, 'FOVEnabled')
+addToggle(SilentGroup, 'silent_sticky', 'Sticky Aim', Silent, 'StickyAim')
 
-local PredictionGroup = Tabs.Main:AddRightGroupbox("Prediction")
-addToggle(PredictionGroup, "silent_auto_prediction",          "Auto Prediction",         Silent, "AutoPrediction")
-addToggle(PredictionGroup, "silent_bullet_drop_compensation", "Bullet Drop Compensation",Silent, "BulletDropCompensation")
+local PredictionGroup = Tabs.Main:AddRightGroupbox('Prediction')
+addToggle(PredictionGroup, 'silent_auto_prediction', 'Auto Prediction', Silent, 'AutoPrediction')
+addToggle(PredictionGroup, 'silent_bullet_drop_compensation', 'Bullet Drop Compensation', Silent, 'BulletDropCompensation')
 
-local ChecksGroup = Tabs.Main:AddRightGroupbox("Checks")
-addToggle(ChecksGroup, "silent_teamcheck",   "Team Check", Silent, "TeamCheck")
-addToggle(ChecksGroup, "silent_visiblecheck","Wallcheck",  Silent, "VisibleCheck")
-addToggle(ChecksGroup, "silent_hitscan",     "Hitscan",    Silent, "Hitscan")
+local ChecksGroup = Tabs.Main:AddRightGroupbox('Checks')
+addToggle(ChecksGroup, 'silent_teamcheck', 'Team Check', Silent, 'TeamCheck')
+addToggle(ChecksGroup, 'silent_visiblecheck', 'Wallcheck', Silent, 'VisibleCheck')
+addToggle(ChecksGroup, 'silent_hitscan', 'Hitscan', Silent, 'Hitscan')
 
-local TriggerGroup = Tabs.Main:AddLeftGroupbox("Triggerbot")
-local TriggerControl = addToggle(TriggerGroup, "trigger_enabled", "Enabled", TriggerBotSettings, "Enabled")
-TriggerControl:AddKeyPicker("trigger_key", {
-    Default = "None", Mode = "Hold", Modes = { "Always", "Hold", "Toggle" },
-    Text = "Triggerbot", SyncToggleState = false,
+local TriggerGroup = Tabs.Main:AddLeftGroupbox('Triggerbot')
+local TriggerControl = addToggle(TriggerGroup, 'trigger_enabled', 'Enabled', TriggerBotSettings, 'Enabled')
+TriggerControl:AddKeyPicker('trigger_key', {
+    Default = 'None', Mode = 'Hold', Modes = { 'Always', 'Hold', 'Toggle' },
+    Text = 'Triggerbot', SyncToggleState = false,
 })
 TriggerKeyPicker = Options.trigger_key
-addSlider(TriggerGroup, "trigger_reaction", "Reaction Time", TriggerBotSettings, "ReactionTime", 0, 500, 0, " ms")
-addSlider(TriggerGroup, "trigger_shoot",    "Shoot Time",    TriggerBotSettings, "ShootTime",    0,1000, 0, " ms")
-addTargets(TriggerGroup, "trigger_targets", TriggerBotSettings)
-addToggle(TriggerGroup, "trigger_teamcheck",   "Team Check",    TriggerBotSettings, "TeamCheck")
-addToggle(TriggerGroup, "trigger_visiblecheck","Wallcheck",     TriggerBotSettings, "VisibleCheck")
-addToggle(TriggerGroup, "trigger_magnetic",    "Magnetic",      TriggerBotSettings, "Magnetic")
-addSlider(TriggerGroup, "trigger_distance", "Max Distance", TriggerBotSettings, "MaxDistance", 50, 5000, 0, " studs")
+addSlider(TriggerGroup, 'trigger_reaction', 'Reaction Time', TriggerBotSettings, 'ReactionTime', 0, 500, 0, ' ms')
+addSlider(TriggerGroup, 'trigger_shoot', 'Shoot Time', TriggerBotSettings, 'ShootTime', 0, 1000, 0, ' ms')
+addTargets(TriggerGroup, 'trigger_targets', TriggerBotSettings)
+addToggle(TriggerGroup, 'trigger_teamcheck', 'Team Check', TriggerBotSettings, 'TeamCheck')
+addToggle(TriggerGroup, 'trigger_visiblecheck', 'Wallcheck', TriggerBotSettings, 'VisibleCheck')
+addToggle(TriggerGroup, 'trigger_magnetic', 'Magnetic Trigger', TriggerBotSettings, 'Magnetic')
+addSlider(TriggerGroup, 'trigger_distance', 'Max Distance', TriggerBotSettings, 'MaxDistance', 50, 5000, 0, ' studs')
 
--- ── RAGEBOT TAB ───────────────────────────────────────────────────────────────
-local RageGroup = Tabs.Ragebot:AddLeftGroupbox("Ragebot")
-local RageControl = addToggle(RageGroup, "rage_enabled", "Enabled", Rage, "Enabled")
-RageControl:AddKeyPicker("rage_key", {
-    Default = "None", Mode = "Hold", Modes = { "Always", "Hold", "Toggle" },
-    Text = "Ragebot", SyncToggleState = false,
+-- Keep precise wheel adjustment without changing the library's slider implementation.
+for _, id in ipairs({ 'trigger_reaction', 'trigger_shoot' }) do
+    local slider = Options[id]
+    local text = id == 'trigger_reaction' and 'Reaction Time' or 'Shoot Time'
+    local label
+    for _, child in ipairs(TriggerGroup.Container:GetChildren()) do
+        if child:IsA('TextLabel') and child.Text == text then label = child; break end
+    end
+    if label then
+        label.Active = true
+        table.insert(Combat.connections, label.InputChanged:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseWheel and input.Position.Z ~= 0
+                and not Library:MouseIsOverOpenedFrame() then
+                slider:SetValue(math.clamp(slider.Value + math.sign(input.Position.Z), slider.Min, slider.Max))
+                Library:AttemptSave()
+            end
+        end))
+    end
+end
+
+-- Each primary tab owns a horizontal subnavigation row and its control pages.
+local function addSubtabs(name, pages)
+    local function groupFrame(group)
+        return group.Container.Parent.Parent
+    end
+    local firstFrame = groupFrame(pages[1].Groups[1])
+    local mainFrame = firstFrame.Parent.Parent
+    local bar = Library:Create('Frame', {
+        Name = name .. 'Subtabs', BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(7, 4), Size = UDim2.new(1, -14, 0, 28),
+        ZIndex = 3, Parent = mainFrame,
+    })
+    Library:Create('UIListLayout', {
+        FillDirection = Enum.FillDirection.Horizontal,
+        SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4),
+        Parent = bar,
+    })
+    local divider = Library:Create('Frame', {
+        Name = 'SubtabDivider', BackgroundColor3 = Library.OutlineColor,
+        BorderSizePixel = 0, Position = UDim2.fromOffset(7, 32),
+        Size = UDim2.new(1, -14, 0, 1), ZIndex = 3, Parent = mainFrame,
+    })
+    Library:AddToRegistry(divider, { BackgroundColor3 = 'OutlineColor' })
+    for _, side in ipairs(mainFrame:GetChildren()) do
+        if side:IsA('ScrollingFrame') then
+            side.Position = side.Position + UDim2.fromOffset(0, 36)
+            side.Size = side.Size - UDim2.fromOffset(0, 36)
+        end
+    end
+    local function selectPage(selected)
+        for _, page in ipairs(pages) do
+            local active = page == selected
+            page.Active = active
+            page.Indicator.Visible = active
+            page.Button.BackgroundTransparency = active and 0 or 1
+            page.Button.TextTransparency = active and 0 or 0.18
+            for _, group in ipairs(page.Groups) do
+                groupFrame(group).Visible = active
+            end
+            local background = active and 'MainColor' or 'BackgroundColor'
+            local foreground = active and 'AccentColor' or 'FontColor'
+            page.Button.BackgroundColor3 = Library[background]
+            page.Button.TextColor3 = Library[foreground]
+            Library.RegistryMap[page.Button].Properties.BackgroundColor3 = background
+            Library.RegistryMap[page.Button].Properties.TextColor3 = foreground
+        end
+    end
+    for index, page in ipairs(pages) do
+        page.Button = Library:Create('TextButton', {
+            Text = page.Name, Font = Library.Font, TextSize = 14,
+            AutoButtonColor = false, BackgroundColor3 = Library.BackgroundColor,
+            TextColor3 = Library.FontColor, BorderSizePixel = 0,
+            Size = UDim2.fromOffset(math.max(58, Library:GetTextBounds(page.Name, Library.Font, 14) + 18), 28), LayoutOrder = index,
+            ZIndex = 4, Parent = bar,
+        })
+        Library:AddToRegistry(page.Button, {
+            BackgroundColor3 = 'BackgroundColor', TextColor3 = 'FontColor',
+        })
+        Library:Create('UICorner', {CornerRadius=UDim.new(0,2),Parent=page.Button})
+        page.Indicator = Library:Create('Frame', {
+            Name = 'ActiveIndicator', BackgroundColor3 = Library.AccentColor,
+            BorderSizePixel = 0, AnchorPoint = Vector2.new(0, 1),
+            Position = UDim2.new(0,6,1,0), Size = UDim2.new(1,-12,0,2),
+            Visible = false, ZIndex = 5, Parent = page.Button,
+        })
+        Library:AddToRegistry(page.Indicator, { BackgroundColor3 = 'AccentColor' })
+        Library:GiveSignal(page.Button.MouseEnter:Connect(function()
+            if not page.Active then page.Button.TextTransparency = 0 end
+        end))
+        Library:GiveSignal(page.Button.MouseLeave:Connect(function()
+            if not page.Active then page.Button.TextTransparency = 0.18 end
+        end))
+        Library:GiveSignal(page.Button.MouseButton1Click:Connect(function()
+            if not Library:MouseIsOverOpenedFrame() then selectPage(page) end
+        end))
+    end
+    selectPage(pages[1])
+end
+
+local RageGroup = Tabs.Ragebot:AddLeftGroupbox('Ragebot')
+local RageControl = addToggle(RageGroup, 'rage_enabled', 'Enabled', Rage, 'Enabled')
+RageControl:AddKeyPicker('rage_key', {
+    Default = 'None', Mode = 'Hold', Modes = { 'Always', 'Hold', 'Toggle' },
+    Text = 'Ragebot', SyncToggleState = false,
 })
 RageKeyPicker = Options.rage_key
-RageGroup:AddDropdown("rage_hitpart", {
-    Text = "Hit Part",
-    Values = { "Head","HumanoidRootPart","UpperTorso","LowerTorso","LeftUpperArm","RightUpperArm","LeftUpperLeg","RightUpperLeg" },
-    Default = Rage.HitPart,
+RageGroup:AddDropdown('rage_hitpart', {
+    Text = 'Hit Part', Values = {
+        'Head', 'HumanoidRootPart', 'UpperTorso', 'LowerTorso',
+        'LeftUpperArm', 'RightUpperArm', 'LeftUpperLeg', 'RightUpperLeg',
+    }, Default = Rage.HitPart,
 }):OnChanged(function(value) Rage.HitPart = value end)
-addTargets(RageGroup, "rage_targets", Rage)
-local RageChecks = Tabs.Ragebot:AddLeftGroupbox("Checks")
-addToggle(RageChecks, "rage_visiblecheck",  "Wallcheck",      Rage, "VisibleCheck")
-addToggle(RageChecks, "rage_teamcheck",     "Team Check",     Rage, "TeamCheck")
-addToggle(RageChecks, "rage_hitscan",       "Hitscan",        Rage, "Hitscan")
-addToggle(RageChecks, "rage_distancecheck", "Distance Check", Rage, "DistanceCheck")
-addSlider(RageChecks, "rage_distance", "Max Distance", Rage, "MaxDistance", 1, 5000, 0, " studs")
+addTargets(RageGroup, 'rage_targets', Rage)
+local RageChecks = Tabs.Ragebot:AddLeftGroupbox('Checks')
+addToggle(RageChecks, 'rage_visiblecheck', 'Wallcheck', Rage, 'VisibleCheck')
+addToggle(RageChecks, 'rage_teamcheck', 'Team Check', Rage, 'TeamCheck')
+addToggle(RageChecks, 'rage_hitscan', 'Hitscan', Rage, 'Hitscan')
+addToggle(RageChecks, 'rage_distancecheck', 'Distance Check', Rage, 'DistanceCheck')
+addSlider(RageChecks, 'rage_distance', 'Max Distance', Rage, 'MaxDistance', 1, 5000, 0, ' studs')
 
+addSubtabs('Main', {
+    { Name = 'Silent Aim', Groups = { SilentGroup, PredictionGroup, ChecksGroup } },
+    { Name = 'Triggerbot', Groups = { TriggerGroup } },
+})
+addSubtabs('Ragebot', {
+    { Name = 'General', Groups = { RageGroup } },
+    { Name = 'Checks', Groups = { RageChecks } },
+})
+
+do
+local Sense = (function()
     local E: {[string]: any} = {
         _hasLoaded = false, objects = {}, errors = {}, scanAt = 0,
         sharedSettings = {textSize=13, textFont=2,
@@ -1182,7 +1359,7 @@ addSlider(RageChecks, "rage_distance", "Max Distance", Rage, "MaxDistance", 1, 5
         if E.sharedSettings.textFace and not o.preview then
             if not E.textGui then
                 E.textGui = Instance.new('ScreenGui')
-                E.textGui.Name = 'LinoriaESPText'; E.textGui.IgnoreGuiInset = true
+                E.textGui.Name = 'TokaiHubESPText'; E.textGui.IgnoreGuiInset = true
                 E.textGui.ResetOnSpawn = false; E.textGui.DisplayOrder = 0
                 E.textGui.Parent = (gethui and gethui()) or game:GetService('CoreGui')
             end
@@ -1320,7 +1497,7 @@ addSlider(RageChecks, "rage_distance", "Max Distance", Rage, "MaxDistance", 1, 5
             end
         end
         if not anchor then
-            anchor=Instance.new("Part");anchor.Name="LeanNPCOverlayAnchor"
+            anchor=Instance.new("Part");anchor.Name="TokaiHubNPCOverlayAnchor"
             anchor.Size=Vector3.new(.01,.01,.01);anchor.CFrame=CFrame.identity
             anchor.Transparency=1;anchor.Anchored=true;anchor.CanCollide=false
             anchor.CanTouch=false;anchor.CanQuery=false;anchor.CastShadow=false
@@ -1333,7 +1510,7 @@ addSlider(RageChecks, "rage_distance", "Max Distance", Rage, "MaxDistance", 1, 5
                 local alpha=clear and cfg.visibleIntensity or cfg.occludedIntensity
                 local ad=o.adornments[i]
                 if not ad then
-                    ad=Instance.new("BoxHandleAdornment");ad.Name="LeanNPCChams"
+                    ad=Instance.new("BoxHandleAdornment");ad.Name="TokaiHubNPCChams"
                     ad.Adornee=anchor;ad.AlwaysOnTop=true;ad.ZIndex=3;ad.Parent=anchor
                     o.adornments[i]=ad
                 end
@@ -3174,7 +3351,7 @@ function Gun.DrawTracer(from,to)
     local paths=Gun.TracerPoints(from,to,Gun.TracerStyle,Random.new())
     if #paths==0 or not workspace.CurrentCamera then return end
     if not Gun.tracerFolder then
-        Gun.tracerFolder=Instance.new("Folder");Gun.tracerFolder.Name="LeanGunTracers"
+        Gun.tracerFolder=Instance.new("Folder");Gun.tracerFolder.Name="TokaiHubGunTracers"
     end
     Gun.tracerFolder.Parent=workspace.CurrentCamera
     local existing=Gun.tracerFolder:GetChildren()
@@ -3769,7 +3946,7 @@ do
         else A.target=nil;A.targetActor=nil end
         if Gun.Debug then
             if not X.hud then
-                local gui=Instance.new("ScreenGui");gui.Name="LeanGunDebug";gui.ResetOnSpawn=false;gui.Parent=AimLocalPlayer:WaitForChild("PlayerGui")
+                local gui=Instance.new("ScreenGui");gui.Name="TokaiHubGunDebug";gui.ResetOnSpawn=false;gui.Parent=AimLocalPlayer:WaitForChild("PlayerGui")
                 local label=Instance.new("TextLabel");label.Size=UDim2.fromOffset(340,112);label.Position=UDim2.new(0,16,1,-140)
                 label.BackgroundColor3=Color3.fromRGB(15,15,15);label.BackgroundTransparency=.2;label.TextColor3=Color3.new(1,1,1)
                 label.TextSize=14;label.Font=Enum.Font.Code;label.TextXAlignment=Enum.TextXAlignment.Left;label.Parent=gui
@@ -4309,64 +4486,214 @@ addSubtabs('Movement', movementPages)
 addSubtabs('Mods', modPages)
 end
 
--- ── Combat frame ──────────────────────────────────────────────────────────────
 table.insert(Combat.connections, AimRunService.RenderStepped:Connect(Combat.Frame))
 
--- ── Watermark ─────────────────────────────────────────────────────────────────
-pcall(function() Library:SetWatermarkVisibility(true) end)
-pcall(function() Library:SetWatermark("TokaiHub | -- fps | -- ms") end)
-local elapsed, frames = 0, 0
-local stats = game:GetService("Stats")
-local WatermarkConnection = AimRunService.RenderStepped:Connect(function(dt)
-    elapsed += dt; frames += 1
-    if elapsed < .5 then return end
-    local fps = math.floor(frames / math.max(elapsed, .001) + .5)
-    elapsed = 0; frames = 0
-    local ok, ping = pcall(function() return stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
-    local pingText = ok and type(ping) == "number" and string.format("%d", math.floor(ping + .5)) or "--"
-    pcall(function() Library:SetWatermark(string.format("TokaiHub | %d fps | %s ms", fps, pingText)) end)
+-- Keep overlay visibility independent from text and performance updates.
+local OverlaySettings={Watermark=true,Keybinds=true}
+local watermark,label=Library.Watermark,Library.WatermarkText
+local function refineOverlay(frame)
+    frame.BorderSizePixel=0
+    frame.BackgroundColor3=Library.MainColor
+    Library:AddToRegistry(frame,{BackgroundColor3="MainColor"},true)
+    local corner=frame:FindFirstChildOfClass("UICorner") or Instance.new("UICorner")
+    corner.CornerRadius=UDim.new(0,3);corner.Parent=frame
+    local stroke=frame:FindFirstChildOfClass("UIStroke") or Instance.new("UIStroke")
+    stroke.Color=Library.OutlineColor;stroke.Thickness=1;stroke.Transparency=.1;stroke.Parent=frame
+    Library:AddToRegistry(stroke,{Color="OutlineColor"},true)
+    for _,child in ipairs(frame:GetChildren()) do
+        if child:IsA("Frame") then
+            child.BorderSizePixel=0
+            child.BackgroundColor3=Library.MainColor
+            Library:AddToRegistry(child,{BackgroundColor3="MainColor"},true)
+            local innerCorner=child:FindFirstChildOfClass("UICorner") or Instance.new("UICorner")
+            innerCorner.CornerRadius=UDim.new(0,2);innerCorner.Parent=child
+        end
+    end
+end
+refineOverlay(watermark)
+watermark.Size=UDim2.fromOffset(220,28)
+label.Position=UDim2.fromOffset(12,0)
+label.Size=UDim2.new(1,-24,1,0)
+label.TextSize=15
+label.TextScaled=false
+label.TextWrapped=false
+label.TextStrokeTransparency=1
+label.TextYAlignment=Enum.TextYAlignment.Center
+for _,child in ipairs(watermark:GetDescendants()) do
+    if child:IsA("UIGradient") then
+        child.Enabled=false
+        local background=child.Parent
+        if background:IsA("Frame") then
+            background.BackgroundColor3=Library.MainColor
+            Library:AddToRegistry(background,{BackgroundColor3="MainColor"})
+        end
+    end
+end
+local watermarkAccent=Library:Create("Frame",{Name="WatermarkAccent",BorderSizePixel=0,
+    Position=UDim2.fromOffset(12,0),Size=UDim2.fromOffset(24,2),
+    BackgroundColor3=Library.AccentColor,ZIndex=label.ZIndex+1,Parent=watermark})
+Library:AddToRegistry(watermarkAccent,{BackgroundColor3="AccentColor"},true)
+local function resizeWatermark()
+    watermark.Size=UDim2.fromOffset(math.max(120,math.ceil(label.TextBounds.X)+28),28)
+end
+Library:SetWatermarkVisibility(true)
+Library.KeybindFrame.Visible=true
+Library.SetWatermark=function(_,text)
+    if label.Text~=text then label.Text=text end
+    resizeWatermark()
+end
+table.insert(Combat.connections,label:GetPropertyChangedSignal("TextBounds"):Connect(resizeWatermark))
+local elapsed,frames=0,0
+local stats: any=game:GetService("Stats")
+Library:SetWatermark("TokaiHub | -- fps | -- ms")
+local WatermarkConnection=AimRunService.RenderStepped:Connect(function(dt)
+    elapsed+=dt;frames+=1
+    if elapsed<.5 then return end
+    local fps=math.floor(frames/math.max(elapsed,.001)+.5)
+    elapsed=0;frames=0
+    local ok,ping=pcall(function() return stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
+    local pingText=ok and type(ping)=="number" and string.format("%d",math.floor(ping+.5)) or "--"
+    Library:SetWatermark(string.format("TokaiHub | %d fps | %s ms",fps,pingText))
 end)
 
-if type(Library.OnUnload) == "function" then Library:OnUnload(function()
+Library:OnUnload(function()
     WatermarkConnection:Disconnect()
     Combat.Destroy()
+
+    print('[TokaiHub] Unloaded.')
     Library.Unloaded = true
-    print("[TokaiHub] Unloaded.")
 end)
-end
 
--- ── UI Settings Tab ───────────────────────────────────────────────────────────
-local MenuGroup = Tabs["UI Settings"]:AddLeftGroupbox("Menu")
-MenuGroup:AddToggle("ui_watermark_visible", { Text = "Watermark", Default = true }):OnChanged(function(v)
-    pcall(function() Library:SetWatermarkVisibility(v) end)
+-- UI Settings
+local FontGroup = Tabs['UI Settings']:AddLeftGroupbox('Fonts')
+FontGroup:AddDropdown('ui_font', { Text = 'UI Font', Values = Fonts.Names, Default = 'Code' }):OnChanged(function(name)
+    local ok, err = pcall(Fonts.SetUI, name)
+    if not ok then
+        Library:Notify('Font could not be loaded: ' .. tostring(name))
+        warn('[Fonts] ' .. tostring(err))
+        if Options.ui_font.Value ~= Fonts.UIName then Options.ui_font:SetValue(Fonts.UIName) end
+    end
 end)
-MenuGroup:AddToggle("ui_keybinds_visible", { Text = "Keybinds", Default = true }):OnChanged(function(v)
-    pcall(function() if Library.KeybindFrame then Library.KeybindFrame.Visible = v end end)
-end)
-MenuGroup:AddButton("Unload", function() Library:Unload() end)
-MenuGroup:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind", { Default = "None", NoUI = true, Text = "Menu keybind" })
-pcall(function() Library.ToggleKeybind = Options.MenuKeybind end)
 
--- ── SaveManager / ThemeManager ────────────────────────────────────────────────
-pcall(function() ThemeManager:SetLibrary(Library) end)
-pcall(function() SaveManager:SetLibrary(Library) end)
+local MenuGroup = Tabs['UI Settings']:AddLeftGroupbox('Menu')
+MenuGroup:AddToggle('ui_keybinds_visible',{Text='Keybinds',Default=true}):OnChanged(function(v)
+    OverlaySettings.Keybinds=v
+    Library.KeybindFrame.Visible=v
+end)
+MenuGroup:AddToggle('ui_watermark_visible',{Text='Watermark',Default=true}):OnChanged(function(v)
+    OverlaySettings.Watermark=v
+    Library:SetWatermarkVisibility(v)
+end)
+
+-- I set NoUI so it does not show up in the keybinds menu
+MenuGroup:AddButton('Unload', function() Library:Unload() end)
+MenuGroup:AddLabel('Menu bind'):AddKeyPicker('MenuKeybind', { Default = 'None', NoUI = true, Text = 'Menu keybind' })
+
+Library.ToggleKeybind = Options.MenuKeybind -- Allows you to have a custom keybind for the menu
+
+-- Addons:
+-- SaveManager (Allows you to have a configuration system)
+-- ThemeManager (Allows you to have a menu theme system)
+
+-- Hand the library over to our managers
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+
+-- Ignore keys that are used by ThemeManager.
+-- (we dont want configs to save themes, do we?)
 SaveManager:IgnoreThemeSettings()
-SaveManager:SetIgnoreIndexes({ "MenuKeybind" })
-ThemeManager:SetFolder("TokaiHub")
-SaveManager:SetFolder("TokaiHub/BRM5")
-SaveManager:BuildConfigSection(Tabs["UI Settings"])
-ThemeManager:ApplyToTab(Tabs["UI Settings"])
 
-for _, id in ipairs({ "silent_key", "trigger_key", "rage_key" }) do
-    local picker = Options[id]
-    if picker and picker.Value == "MB2" then picker:SetValue({ "None", picker.Mode }) end
+-- Adds our MenuKeybind to the ignore list
+-- (do you want each config to have a different menu key? probably not.)
+SaveManager:SetIgnoreIndexes({ 'MenuKeybind' })
+
+-- use case for doing it this way:
+-- a script hub could have themes in a global folder
+-- and game configs in a separate folder per game
+ThemeManager:SetFolder('TokaiHub')
+SaveManager:SetFolder('TokaiHub/BRM5')
+
+-- Builds our config menu on the right side of our tab
+SaveManager:BuildConfigSection(Tabs['UI Settings'])
+
+-- Builds our theme menu (with plenty of built in themes) on the left side
+-- NOTE: you can also call ThemeManager:ApplyToGroupbox to add it to a specific groupbox
+ThemeManager:ApplyToTab(Tabs['UI Settings'])
+
+-- Retain Linoria's keybind rows while giving the overlay consistent padding.
+local keybindFrame,keybindContainer=Library.KeybindFrame,Library.KeybindContainer
+refineOverlay(keybindFrame)
+local keybindInner=keybindContainer.Parent
+for _,child in ipairs(keybindInner:GetChildren()) do
+    if child:IsA("TextLabel") then
+        child.Position=UDim2.fromOffset(10,3)
+        child.Size=UDim2.new(1,-20,0,22)
+        child.TextSize=14;child.TextStrokeTransparency=1
+        child.TextYAlignment=Enum.TextYAlignment.Center
+    elseif child:IsA("Frame") and child~=keybindContainer and child.Size.Y.Offset==2 then
+        child.Position=UDim2.fromOffset(10,0)
+        child.Size=UDim2.fromOffset(24,2)
+    end
 end
+keybindContainer.Position=UDim2.fromOffset(0,29)
+keybindContainer.Size=UDim2.new(1,0,1,-35)
+local keybindPadding=keybindContainer:FindFirstChildOfClass("UIPadding") or Instance.new("UIPadding")
+keybindPadding.PaddingLeft=UDim.new(0,10);keybindPadding.PaddingRight=UDim.new(0,10)
+keybindPadding.Parent=keybindContainer
+local function resizeKeybinds()
+    local height,width=0,190
+    for _,row in ipairs(keybindContainer:GetChildren()) do
+        if row:IsA("TextLabel") and row.Visible then
+            height+=20;width=math.max(width,math.ceil(row.TextBounds.X)+24)
+        end
+    end
+    keybindFrame.Size=UDim2.fromOffset(width,math.max(36,height+35))
+end
+local function styleKeybindRow(row)
+    if not row:IsA("TextLabel") then return end
+    row.Size=UDim2.new(1,0,0,20);row.TextSize=13
+    row.TextWrapped=false;row.TextScaled=false;row.TextStrokeTransparency=1
+    row.TextYAlignment=Enum.TextYAlignment.Center
+    Library:GiveSignal(row:GetPropertyChangedSignal("TextBounds"):Connect(resizeKeybinds))
+    Library:GiveSignal(row:GetPropertyChangedSignal("Visible"):Connect(resizeKeybinds))
+end
+for _,row in ipairs(keybindContainer:GetChildren()) do styleKeybindRow(row) end
+Library:GiveSignal(keybindContainer.ChildAdded:Connect(function(row)
+    styleKeybindRow(row);resizeKeybinds()
+end))
+for _,picker in pairs(Options) do
+    if picker.Type=="KeyPicker" then
+        local update=picker.Update
+        picker.Update=function(self,...)
+            local result=table.pack(update(self,...))
+            resizeKeybinds()
+            return table.unpack(result,1,result.n)
+        end
+    end
+end
+resizeKeybinds()
 
+-- You can use SaveManager:LoadAutoloadConfig() to load a config
+-- which has been marked to be one that auto loads!
+for _,picker in pairs(Options) do
+    if picker.Type=="KeyPicker" then
+        local getState=picker.GetState
+        picker.GetState=function(self)
+            return not Library:IsTyping() and getState(self)
+        end
+        if picker.DoClick then
+            local click=picker.DoClick
+            picker.DoClick=function(self,...)
+                if Library:IsTyping() then self.Toggled=not self.Toggled;return end
+                return click(self,...)
+            end
+        end
+    end
+end
 SaveManager:LoadAutoloadConfig()
+-- Migrate the previous mouse defaults when loading an older configuration.
+for _, id in ipairs({ 'silent_key', 'trigger_key', 'rage_key' }) do
+    local picker = Options[id]
+    if picker.Value == 'MB2' then picker:SetValue({ 'None', picker.Mode }) end
+end
 Combat.ESP.Load()
-
-Library:Notify({
-    Title       = "TokaiHub Loaded",
-    Description = "BRM5 Edition — Press RightShift to toggle.",
-    Time        = 4,
-})
