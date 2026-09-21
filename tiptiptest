@@ -670,6 +670,7 @@ table.insert(Combat.connections, AimRunService.RenderStepped:Connect(function(dt
 end))
 
 
+
 -- Bind controls to the existing BRM5 combat state.
 local function addToggle(group, id, text, settings, field)
     local control = group:AddToggle(id, { Text = text, Default = settings[field] })
@@ -708,7 +709,9 @@ local function addTargets(group, id, settings)
     end)
 end
 
-local SilentGroup = Tabs.Main:AddLeftGroupbox('Silent Aim')
+local MainTabbox = Tabs.Main:AddLeftTabbox()
+local _SilentTab = MainTabbox:AddTab('Silent Aim')
+local SilentGroup = _SilentTab:AddLeftGroupbox('Silent Aim')
 local EnabledControl = addToggle(SilentGroup, 'silent_enabled', 'Enabled', Silent, 'Enabled')
 EnabledControl:AddKeyPicker('silent_key', {
     Default = 'None', Mode = 'Hold', Modes = { 'Always', 'Hold', 'Toggle' },
@@ -752,16 +755,17 @@ addSlider(SilentGroup, 'silent_distance', 'Max Distance', Silent, 'MaxDistance',
 addToggle(SilentGroup, 'silent_fov_enabled', 'FOV Check', Silent, 'FOVEnabled')
 addToggle(SilentGroup, 'silent_sticky', 'Sticky Aim', Silent, 'StickyAim')
 
-local PredictionGroup = Tabs.Main:AddRightGroupbox('Prediction')
+local PredictionGroup = _SilentTab:AddRightGroupbox('Prediction')
 addToggle(PredictionGroup, 'silent_auto_prediction', 'Auto Prediction', Silent, 'AutoPrediction')
 addToggle(PredictionGroup, 'silent_bullet_drop_compensation', 'Bullet Drop Compensation', Silent, 'BulletDropCompensation')
 
-local ChecksGroup = Tabs.Main:AddRightGroupbox('Checks')
+local ChecksGroup = _SilentTab:AddRightGroupbox('Checks')
 addToggle(ChecksGroup, 'silent_teamcheck', 'Team Check', Silent, 'TeamCheck')
 addToggle(ChecksGroup, 'silent_visiblecheck', 'Wallcheck', Silent, 'VisibleCheck')
 addToggle(ChecksGroup, 'silent_hitscan', 'Hitscan', Silent, 'Hitscan')
 
-local TriggerGroup = Tabs.Main:AddLeftGroupbox('Triggerbot')
+local _TriggerTab = MainTabbox:AddTab('Triggerbot')
+local TriggerGroup = _TriggerTab:AddLeftGroupbox('Triggerbot')
 local TriggerControl = addToggle(TriggerGroup, 'trigger_enabled', 'Enabled', TriggerBotSettings, 'Enabled')
 TriggerControl:AddKeyPicker('trigger_key', {
     Default = 'None', Mode = 'Hold', Modes = { 'Always', 'Hold', 'Toggle' },
@@ -797,85 +801,21 @@ for _, id in ipairs({ 'trigger_reaction', 'trigger_shoot' }) do
 end
 
 -- Each primary tab owns a horizontal subnavigation row and its control pages.
+local _subtabBoxCache = {}
 local function addSubtabs(name, pages)
-    local function groupFrame(group)
-        return group.Container.Parent.Parent
+    local tab = Tabs[name]
+    if not tab then return end
+    if not _subtabBoxCache[name] then
+        _subtabBoxCache[name] = tab:AddLeftTabbox()
     end
-    local firstFrame = groupFrame(pages[1].Groups[1])
-    local mainFrame = firstFrame.Parent.Parent
-    local bar = Library:Create('Frame', {
-        Name = name .. 'Subtabs', BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(7, 4), Size = UDim2.new(1, -14, 0, 28),
-        ZIndex = 3, Parent = mainFrame,
-    })
-    Library:Create('UIListLayout', {
-        FillDirection = Enum.FillDirection.Horizontal,
-        SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4),
-        Parent = bar,
-    })
-    local divider = Library:Create('Frame', {
-        Name = 'SubtabDivider', BackgroundColor3 = Library.OutlineColor,
-        BorderSizePixel = 0, Position = UDim2.fromOffset(7, 32),
-        Size = UDim2.new(1, -14, 0, 1), ZIndex = 3, Parent = mainFrame,
-    })
-    Library:AddToRegistry(divider, { BackgroundColor3 = 'OutlineColor' })
-    for _, side in ipairs(mainFrame:GetChildren()) do
-        if side:IsA('ScrollingFrame') then
-            side.Position = side.Position + UDim2.fromOffset(0, 36)
-            side.Size = side.Size - UDim2.fromOffset(0, 36)
-        end
+    local box = _subtabBoxCache[name]
+    for _, page in ipairs(pages) do
+        local subTab = box:AddTab(page.Name)
+        if page.build then pcall(page.build, subTab) end
     end
-    local function selectPage(selected)
-        for _, page in ipairs(pages) do
-            local active = page == selected
-            page.Active = active
-            page.Indicator.Visible = active
-            page.Button.BackgroundTransparency = active and 0 or 1
-            page.Button.TextTransparency = active and 0 or 0.18
-            for _, group in ipairs(page.Groups) do
-                groupFrame(group).Visible = active
-            end
-            local background = active and 'MainColor' or 'BackgroundColor'
-            local foreground = active and 'AccentColor' or 'FontColor'
-            page.Button.BackgroundColor3 = Library[background]
-            page.Button.TextColor3 = Library[foreground]
-            Library.RegistryMap[page.Button].Properties.BackgroundColor3 = background
-            Library.RegistryMap[page.Button].Properties.TextColor3 = foreground
-        end
-    end
-    for index, page in ipairs(pages) do
-        page.Button = Library:Create('TextButton', {
-            Text = page.Name, Font = Library.Font, TextSize = 14,
-            AutoButtonColor = false, BackgroundColor3 = Library.BackgroundColor,
-            TextColor3 = Library.FontColor, BorderSizePixel = 0,
-            Size = UDim2.fromOffset(math.max(58, Library:GetTextBounds(page.Name, Library.Font, 14) + 18), 28), LayoutOrder = index,
-            ZIndex = 4, Parent = bar,
-        })
-        Library:AddToRegistry(page.Button, {
-            BackgroundColor3 = 'BackgroundColor', TextColor3 = 'FontColor',
-        })
-        Library:Create('UICorner', {CornerRadius=UDim.new(0,2),Parent=page.Button})
-        page.Indicator = Library:Create('Frame', {
-            Name = 'ActiveIndicator', BackgroundColor3 = Library.AccentColor,
-            BorderSizePixel = 0, AnchorPoint = Vector2.new(0, 1),
-            Position = UDim2.new(0,6,1,0), Size = UDim2.new(1,-12,0,2),
-            Visible = false, ZIndex = 5, Parent = page.Button,
-        })
-        Library:AddToRegistry(page.Indicator, { BackgroundColor3 = 'AccentColor' })
-        Library:GiveSignal(page.Button.MouseEnter:Connect(function()
-            if not page.Active then page.Button.TextTransparency = 0 end
-        end))
-        Library:GiveSignal(page.Button.MouseLeave:Connect(function()
-            if not page.Active then page.Button.TextTransparency = 0.18 end
-        end))
-        Library:GiveSignal(page.Button.MouseButton1Click:Connect(function()
-            if not Library:MouseIsOverOpenedFrame() then selectPage(page) end
-        end))
-    end
-    selectPage(pages[1])
 end
 
-local RageGroup = Tabs.Ragebot:AddLeftGroupbox('Ragebot')
+local RageGroup = _RageTab:AddLeftGroupbox('Ragebot')
 local RageControl = addToggle(RageGroup, 'rage_enabled', 'Enabled', Rage, 'Enabled')
 RageControl:AddKeyPicker('rage_key', {
     Default = 'None', Mode = 'Hold', Modes = { 'Always', 'Hold', 'Toggle' },
@@ -889,21 +829,14 @@ RageGroup:AddDropdown('rage_hitpart', {
     }, Default = Rage.HitPart,
 }):OnChanged(function(value) Rage.HitPart = value end)
 addTargets(RageGroup, 'rage_targets', Rage)
-local RageChecks = Tabs.Ragebot:AddLeftGroupbox('Checks')
+local _RageChecksTab = RageBotTabbox:AddTab('Checks')
+local RageChecks = _RageChecksTab:AddLeftGroupbox('Checks')
 addToggle(RageChecks, 'rage_visiblecheck', 'Wallcheck', Rage, 'VisibleCheck')
 addToggle(RageChecks, 'rage_teamcheck', 'Team Check', Rage, 'TeamCheck')
 addToggle(RageChecks, 'rage_hitscan', 'Hitscan', Rage, 'Hitscan')
 addToggle(RageChecks, 'rage_distancecheck', 'Distance Check', Rage, 'DistanceCheck')
 addSlider(RageChecks, 'rage_distance', 'Max Distance', Rage, 'MaxDistance', 1, 5000, 0, ' studs')
 
-addSubtabs('Main', {
-    { Name = 'Silent Aim', Groups = { SilentGroup, PredictionGroup, ChecksGroup } },
-    { Name = 'Triggerbot', Groups = { TriggerGroup } },
-})
-addSubtabs('Ragebot', {
-    { Name = 'General', Groups = { RageGroup } },
-    { Name = 'Checks', Groups = { RageChecks } },
-})
 
 do
 local Sense = (function()
@@ -4396,6 +4329,7 @@ end
 addSubtabs('Movement', movementPages)
 addSubtabs('Mods', modPages)
 end
+
 
 
 table.insert(Combat.connections, AimRunService.RenderStepped:Connect(Combat.Frame))
