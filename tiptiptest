@@ -32,7 +32,6 @@ local Window = TokaiHub:CreateWindow({
     MobileButtonsSide = "Left",
 })
 
-
 local Tabs = {
     Main            = Window:AddTab("Main",         "crosshair"),
     Ragebot         = Window:AddTab("Ragebot",      "target"),
@@ -672,7 +671,6 @@ end))
 
 
 
-
 -- Bind controls to the existing BRM5 combat state.
 local function addToggle(group, id, text, settings, field)
     local control = group:AddToggle(id, { Text = text, Default = settings[field] })
@@ -711,9 +709,7 @@ local function addTargets(group, id, settings)
     end)
 end
 
-local _MainBox = Tabs.Main:AddLeftTabbox()
-local _SilentSubTab = _MainBox:AddTab('Silent Aim')
-local SilentGroup = _SilentSubTab:AddLeftGroupbox('Silent Aim')
+local SilentGroup = Tabs.Main:AddLeftGroupbox('Silent Aim')
 local EnabledControl = addToggle(SilentGroup, 'silent_enabled', 'Enabled', Silent, 'Enabled')
 EnabledControl:AddKeyPicker('silent_key', {
     Default = 'None', Mode = 'Hold', Modes = { 'Always', 'Hold', 'Toggle' },
@@ -757,17 +753,16 @@ addSlider(SilentGroup, 'silent_distance', 'Max Distance', Silent, 'MaxDistance',
 addToggle(SilentGroup, 'silent_fov_enabled', 'FOV Check', Silent, 'FOVEnabled')
 addToggle(SilentGroup, 'silent_sticky', 'Sticky Aim', Silent, 'StickyAim')
 
-local PredictionGroup = _SilentSubTab:AddRightGroupbox('Prediction')
+local PredictionGroup = Tabs.Main:AddRightGroupbox('Prediction')
 addToggle(PredictionGroup, 'silent_auto_prediction', 'Auto Prediction', Silent, 'AutoPrediction')
 addToggle(PredictionGroup, 'silent_bullet_drop_compensation', 'Bullet Drop Compensation', Silent, 'BulletDropCompensation')
 
-local ChecksGroup = _SilentSubTab:AddRightGroupbox('Checks')
+local ChecksGroup = Tabs.Main:AddRightGroupbox('Checks')
 addToggle(ChecksGroup, 'silent_teamcheck', 'Team Check', Silent, 'TeamCheck')
 addToggle(ChecksGroup, 'silent_visiblecheck', 'Wallcheck', Silent, 'VisibleCheck')
 addToggle(ChecksGroup, 'silent_hitscan', 'Hitscan', Silent, 'Hitscan')
 
-local _TriggerSubTab = _MainBox:AddTab('Triggerbot')
-local TriggerGroup = _TriggerSubTab:AddLeftGroupbox('Triggerbot')
+local TriggerGroup = Tabs.Main:AddLeftGroupbox('Triggerbot')
 local TriggerControl = addToggle(TriggerGroup, 'trigger_enabled', 'Enabled', TriggerBotSettings, 'Enabled')
 TriggerControl:AddKeyPicker('trigger_key', {
     Default = 'None', Mode = 'Hold', Modes = { 'Always', 'Hold', 'Toggle' },
@@ -803,22 +798,9 @@ for _, id in ipairs({ 'trigger_reaction', 'trigger_shoot' }) do
 end
 
 -- Each primary tab owns a horizontal subnavigation row and its control pages.
-local _tabboxCache = {}
-local function addSubtabs(name, pages)
-    local tab = Tabs[name]
-    if not tab then return end
-    if not _tabboxCache[name] then
-        _tabboxCache[name] = tab:AddLeftTabbox()
-    end
-    local box = _tabboxCache[name]
-    for _, page in ipairs(pages) do
-        box:AddTab(page.Name)
-    end
-end
+local function addSubtabs(name, pages) end
 
-local _RageBox = Tabs.Ragebot:AddLeftTabbox()
-local _RageGenTab = _RageBox:AddTab('General')
-local RageGroup = _RageGenTab:AddLeftGroupbox('Ragebot')
+local RageGroup = Tabs.Ragebot:AddLeftGroupbox('Ragebot')
 local RageControl = addToggle(RageGroup, 'rage_enabled', 'Enabled', Rage, 'Enabled')
 RageControl:AddKeyPicker('rage_key', {
     Default = 'None', Mode = 'Hold', Modes = { 'Always', 'Hold', 'Toggle' },
@@ -832,14 +814,21 @@ RageGroup:AddDropdown('rage_hitpart', {
     }, Default = Rage.HitPart,
 }):OnChanged(function(value) Rage.HitPart = value end)
 addTargets(RageGroup, 'rage_targets', Rage)
-local _RageChkTab = _RageBox:AddTab('Checks')
-local RageChecks = _RageChkTab:AddLeftGroupbox('Checks')
+local RageChecks = Tabs.Ragebot:AddLeftGroupbox('Checks')
 addToggle(RageChecks, 'rage_visiblecheck', 'Wallcheck', Rage, 'VisibleCheck')
 addToggle(RageChecks, 'rage_teamcheck', 'Team Check', Rage, 'TeamCheck')
 addToggle(RageChecks, 'rage_hitscan', 'Hitscan', Rage, 'Hitscan')
 addToggle(RageChecks, 'rage_distancecheck', 'Distance Check', Rage, 'DistanceCheck')
 addSlider(RageChecks, 'rage_distance', 'Max Distance', Rage, 'MaxDistance', 1, 5000, 0, ' studs')
 
+addSubtabs('Main', {
+    { Name = 'Silent Aim', Groups = { SilentGroup, PredictionGroup, ChecksGroup } },
+    { Name = 'Triggerbot', Groups = { TriggerGroup } },
+})
+addSubtabs('Ragebot', {
+    { Name = 'General', Groups = { RageGroup } },
+    { Name = 'Checks', Groups = { RageChecks } },
+})
 
 do
 local Sense = (function()
