@@ -1,13 +1,18 @@
 local function GetLoadstringSource(Url)
 	local function tryRequest(fn, args)
-		if not fn then return nil end
+		if type(fn) ~= "function" then return nil end
 		local ok, r = pcall(fn, args)
-		if ok and r and r.Body and typeof(r.Body) == "string" then return r.Body end
+		if ok and r and type(r) == "table" and type(r.Body) == "string" then return r.Body end
 	end
-	local body = tryRequest(request, {Url=Url,Method="GET"})
-		or tryRequest(http_request, {Url=Url,Method="GET"})
-		or tryRequest(syn and syn.request, {Url=Url,Method="GET"})
-		or tryRequest(fluxus and fluxus.request, {Url=Url,Method="GET"})
+	local function safeGlobal(name)
+		local ok, v = pcall(function() return getgenv()[name] end)
+		if ok and type(v) == "function" then return v end
+		return nil
+	end
+	local body = tryRequest(safeGlobal("request"), {Url=Url,Method="GET"})
+		or tryRequest(safeGlobal("http_request"), {Url=Url,Method="GET"})
+		or tryRequest(safeGlobal("syn") and type(getgenv().syn)=="table" and getgenv().syn.request or nil, {Url=Url,Method="GET"})
+		or tryRequest(safeGlobal("fluxus") and type(getgenv().fluxus)=="table" and getgenv().fluxus.request or nil, {Url=Url,Method="GET"})
 	if not body then
 		local ok, r = pcall(function() return game:HttpGet(Url) end)
 		if ok and typeof(r) == "string" then body = r
