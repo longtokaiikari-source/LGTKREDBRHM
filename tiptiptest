@@ -798,7 +798,23 @@ for _, id in ipairs({ 'trigger_reaction', 'trigger_shoot' }) do
 end
 
 -- Each primary tab owns a horizontal subnavigation row and its control pages.
-local function addSubtabs(name, pages) end
+local function addSubtabs(name, pages)
+    local tab = Tabs[name]
+    if not tab then return end
+    local box = tab:AddLeftTabbox()
+    for _, page in ipairs(pages) do
+        local subTab = box:AddTab(page.Name)
+        for _, group in ipairs(page.Groups or {}) do
+            pcall(function()
+                -- Move group's frame into the subtab container
+                local frame = group.GroupFrame or group.Frame or group.Container
+                if frame and subTab.Container then
+                    frame.Parent = subTab.Container
+                end
+            end)
+        end
+    end
+end
 
 local RageGroup = Tabs.Ragebot:AddLeftGroupbox('Ragebot')
 local RageControl = addToggle(RageGroup, 'rage_enabled', 'Enabled', Rage, 'Enabled')
