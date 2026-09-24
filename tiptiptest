@@ -28,22 +28,16 @@ local function GetLoadstringSource(Url)
 	return body
 end
 
-local function safeLoad(url, label)
-    local src = GetLoadstringSource(url)
-    local fn, err = loadstring(src)
-    if not fn then
-        error("[BRM5] loadstring failed for " .. label .. ": " .. tostring(err), 2)
-    end
-    local ok, result = pcall(fn)
-    if not ok then
-        error("[BRM5] exec failed for " .. label .. ": " .. tostring(result), 2)
-    end
-    return result
+local function LoadRemote(Url)
+    local Source = GetLoadstringSource(Url)
+    local Chunk, LoadError = loadstring(Source)
+    if not Chunk then error("loadstring failed for " .. tostring(Url) .. ": " .. tostring(LoadError), 2) end
+    return Chunk()
 end
 
-local TokaiHub     = safeLoad("https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/Library.lua",          "TokaiHub")
-local SaveManager  = safeLoad("https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/addons/SaveManager.lua",  "SaveManager")
-local ThemeManager = safeLoad("https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/addons/ThemeManager.lua", "ThemeManager")
+local TokaiHub     = LoadRemote("https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/Library.lua")
+local SaveManager  = LoadRemote("https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/addons/SaveManager.lua")
+local ThemeManager = LoadRemote("https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/addons/ThemeManager.lua")
 
 local Combat
 local _ok, _err = pcall(function()
