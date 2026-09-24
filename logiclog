@@ -1,0 +1,1219 @@
+-- ============================================================
+--  BRM5 × TokaiHub
+--  Logic: brm5_logic.lua  |  UI: TKBLACKLIB
+-- ============================================================
+
+local TokaiHub = loadstring(game:HttpGet(
+    "https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/Library.lua"
+))()
+
+local SaveManager  = loadstring(game:HttpGet(
+    "https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/addons/SaveManager.lua"
+))()
+
+local ThemeManager = loadstring(game:HttpGet(
+    "https://raw.githubusercontent.com/longhazem/TKBLACKLIB/refs/heads/main/addons/ThemeManager.lua"
+))()
+
+-- ============================================================
+--  Bootstrap logic module
+--  brm5_logic.lua must be loadstrung/required AFTER this block
+--  so that getgenv().Toggles / Options exist when it runs.
+--  We use a proxy table so UI callbacks write directly into the
+--  same table the logic reads — zero overhead, zero delay.
+-- ============================================================
+
+getgenv().Toggles = getgenv().Toggles or {}
+getgenv().Options  = getgenv().Options  or {}
+
+-- Minimal Library shim — logic only calls Library:IsTyping()
+getgenv().Library = {
+    IsTyping = function()
+        local uis = game:GetService("UserInputService")
+        return uis:GetFocusedTextBox() ~= nil
+    end,
+    Unloaded = false,
+}
+
+-- ============================================================
+--  Load the stripped logic
+--  Replace the HttpGet URL with wherever you host brm5_logic.lua
+-- ============================================================
+
+local LogicUrl = "YOUR_RAW_LOGIC_URL_HERE" -- << paste raw URL of brm5_logic.lua
+loadstring(game:HttpGet(LogicUrl))()
+
+-- After this point Combat, Combat.ESP, Combat.Movement etc. are live.
+-- We grab references for UI callbacks:
+local Silent           = Combat and rawget(Combat, "Silent")     -- not exposed directly;
+-- Direct table refs (the logic exposes them via upvalues, not Combat fields).
+-- We drive them through getgenv() shims set up below instead.
+
+-- ============================================================
+--  Window
+-- ============================================================
+
+local Window = TokaiHub:CreateWindow({
+    Title             = "BRM5 Hub",
+    Footer            = "v1.0",
+    ToggleKeybind     = Enum.KeyCode.RightControl,
+    Center            = true,
+    AutoShow          = true,
+    ShowCustomCursor  = true,
+    NotifySide        = "Right",
+    Resizable         = true,
+    MobileButtonsSide = "Left",
+})
+
+-- ============================================================
+--  Tabs
+-- ============================================================
+
+local Tabs = {
+    SilentAim  = Window:AddTab("Silent Aim",  "crosshair"),
+    Trigger    = Window:AddTab("Triggerbot",  "zap"),
+    Ragebot    = Window:AddTab("Ragebot",     "flame"),
+    ESP        = Window:AddTab("ESP",         "eye"),
+    Movement   = Window:AddTab("Movement",    "wind"),
+    Gun        = Window:AddTab("Gun",         "target"),
+    Misc       = Window:AddTab("Misc",        "settings"),
+    Config     = Window:AddTab("Config",      "save"),
+}
+
+-- ============================================================
+--  Helper — grabs the logic's upvalue tables after loadstring
+--  The logic stores tables in upvalues; Combat exposes some.
+--  We access them through the known global Combat table.
+-- ============================================================
+
+local function getLogic()
+    -- Combat is set as a global by the logic module
+    local C = getgenv().LinoriaCombat or {}
+    return {
+        Silent    = C.Silent,
+        Trigger   = C.Trigger,     -- TriggerBotSettings
+        Rage      = C.Rage,
+        Movement  = C.Movement,    -- M
+        Gun       = C.Gun,
+        Vehicle   = C.Vehicle,     -- V
+        Melee     = C.Melee,       -- A
+        Turret    = C.Turret,      -- T
+        World     = C.World,       -- WM
+        ESP       = C.ESP,         -- Sense E
+    }
+end
+
+-- ============================================================
+--  [Silent Aim]
+-- ============================================================
+
+local SALeft  = Tabs.SilentAim:AddLeftGroupbox("Silent Aim")
+local SARight = Tabs.SilentAim:AddRightGroupbox("FOV & Prediction")
+
+SALeft:AddToggle("SA_Enabled", {
+    Text     = "Enabled",
+    Default  = false,
+    Risky    = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Silent then L.Silent.Enabled = v end
+    end,
+})
+
+SALeft:AddDropdown("SA_HitPart", {
+    Text     = "Target Part",
+    Values   = { "Head", "UpperTorso", "LowerTorso", "LeftArm", "RightArm" },
+    Default  = 1,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Silent then L.Silent.HitPart = v end
+    end,
+})
+
+SALeft:AddSlider("SA_HitChance", {
+    Text     = "Hit Chance",
+    Default  = 100,
+    Min      = 1,
+    Max      = 100,
+    Rounding = 0,
+    Suffix   = "%",
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Silent then L.Silent.HitChance = v end
+    end,
+})
+
+SALeft:AddSlider("SA_MaxDistance", {
+    Text     = "Max Distance",
+    Default  = 1000,
+    Min      = 50,
+    Max      = 5000,
+    Rounding = 0,
+    Suffix   = " st",
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Silent then L.Silent.MaxDistance = v end
+    end,
+})
+
+SALeft:AddDivider()
+
+local SATargets = SALeft:AddLeftTabbox("Targets")
+local SANpc     = SATargets:AddTab("NPC")
+local SAPlayer  = SATargets:AddTab("Player")
+
+SANpc:AddToggle("SA_TargetNPC", {
+    Text     = "NPCs",
+    Default  = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Silent then L.Silent.Targets.NPCs = v end
+    end,
+})
+
+SAPlayer:AddToggle("SA_TargetPlayer", {
+    Text     = "Players",
+    Default  = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Silent then L.Silent.Targets.Players = v end
+    end,
+})
+
+-- Right side
+SARight:AddToggle("SA_FOVEnabled", {
+    Text     = "Show FOV Circle",
+    Default  = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Silent then L.Silent.ShowFOV = v end
+    end,
+})
+
+SARight:AddSlider("SA_FOV", {
+    Text     = "FOV Radius",
+    Default  = 120,
+    Min      = 10,
+    Max      = 800,
+    Rounding = 0,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Silent then L.Silent.FOV = v end
+    end,
+})
+
+SARight:AddColorPicker("SA_FOVColor", {
+    Default      = Color3.fromRGB(224, 224, 224),
+    Title        = "FOV Color",
+    Transparency = 0,
+    Callback     = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Silent then L.Silent.FOVColor = v end
+    end,
+})
+
+SARight:AddToggle("SA_FillFOV", {
+    Text     = "Fill FOV",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Silent then L.Silent.FillFOV = v end
+    end,
+})
+
+SARight:AddToggle("SA_GradientFOV", {
+    Text     = "Gradient FOV",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Silent then L.Silent.GradientFOV = v end
+    end,
+})
+
+SARight:AddDivider()
+
+SARight:AddToggle("SA_AutoPred", {
+    Text     = "Auto Prediction",
+    Default  = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Silent then L.Silent.AutoPrediction = v end
+    end,
+})
+
+SARight:AddToggle("SA_BDC", {
+    Text     = "Bullet Drop Compensation",
+    Default  = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Silent then L.Silent.BulletDropCompensation = v end
+    end,
+})
+
+SARight:AddToggle("SA_StickyAim", {
+    Text     = "Sticky Aim",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Silent then L.Silent.StickyAim = v end
+    end,
+})
+
+SARight:AddToggle("SA_VisCheck", {
+    Text     = "Visible Check",
+    Default  = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Silent then L.Silent.VisibleCheck = v end
+    end,
+})
+
+SARight:AddToggle("SA_TeamCheck", {
+    Text     = "Team Check",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Silent then L.Silent.TeamCheck = v end
+    end,
+})
+
+-- ============================================================
+--  [Triggerbot]
+-- ============================================================
+
+local TBLeft  = Tabs.Trigger:AddLeftGroupbox("Triggerbot")
+local TBRight = Tabs.Trigger:AddRightGroupbox("Settings")
+
+TBLeft:AddToggle("TB_Enabled", {
+    Text     = "Enabled",
+    Default  = false,
+    Risky    = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Trigger then L.Trigger.Enabled = v end
+    end,
+})
+
+TBLeft:AddToggle("TB_Magnetic", {
+    Text     = "Magnetic",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Trigger then L.Trigger.Magnetic = v end
+    end,
+})
+
+TBLeft:AddToggle("TB_VisCheck", {
+    Text     = "Visible Check",
+    Default  = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Trigger then L.Trigger.VisibleCheck = v end
+    end,
+})
+
+TBLeft:AddToggle("TB_TeamCheck", {
+    Text     = "Team Check",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Trigger then L.Trigger.TeamCheck = v end
+    end,
+})
+
+TBRight:AddSlider("TB_MaxDist", {
+    Text     = "Max Distance",
+    Default  = 1000,
+    Min      = 50,
+    Max      = 5000,
+    Rounding = 0,
+    Suffix   = " st",
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Trigger then L.Trigger.MaxDistance = v end
+    end,
+})
+
+TBRight:AddSlider("TB_ReactionTime", {
+    Text     = "Reaction Time",
+    Default  = 50,
+    Min      = 0,
+    Max      = 500,
+    Rounding = 0,
+    Suffix   = " ms",
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Trigger then L.Trigger.ReactionTime = v end
+    end,
+})
+
+TBRight:AddSlider("TB_ShootTime", {
+    Text     = "Shoot Interval",
+    Default  = 100,
+    Min      = 0,
+    Max      = 1000,
+    Rounding = 0,
+    Suffix   = " ms",
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Trigger then L.Trigger.ShootTime = v end
+    end,
+})
+
+-- ============================================================
+--  [Ragebot]
+-- ============================================================
+
+local RBLeft  = Tabs.Ragebot:AddLeftGroupbox("Ragebot")
+local RBRight = Tabs.Ragebot:AddRightGroupbox("Settings")
+
+RBLeft:AddToggle("RB_Enabled", {
+    Text     = "Enabled",
+    Default  = false,
+    Risky    = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Rage then L.Rage.Enabled = v end
+    end,
+})
+
+RBLeft:AddDropdown("RB_HitPart", {
+    Text     = "Target Part",
+    Values   = { "Head", "UpperTorso", "LowerTorso", "LeftArm", "RightArm" },
+    Default  = 1,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Rage then L.Rage.HitPart = v end
+    end,
+})
+
+RBLeft:AddToggle("RB_Hitscan", {
+    Text     = "Hitscan",
+    Default  = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Rage then L.Rage.Hitscan = v end
+    end,
+})
+
+RBLeft:AddToggle("RB_FullCircle", {
+    Text     = "Full Circle",
+    Default  = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Rage then L.Rage.FullCircle = v end
+    end,
+})
+
+RBRight:AddToggle("RB_AutoPred", {
+    Text     = "Auto Prediction",
+    Default  = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Rage then L.Rage.AutoPrediction = v end
+    end,
+})
+
+RBRight:AddToggle("RB_BDC", {
+    Text     = "Bullet Drop Compensation",
+    Default  = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Rage then L.Rage.BulletDropCompensation = v end
+    end,
+})
+
+RBRight:AddToggle("RB_VisCheck", {
+    Text     = "Visible Check",
+    Default  = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Rage then L.Rage.VisibleCheck = v end
+    end,
+})
+
+RBRight:AddToggle("RB_TeamCheck", {
+    Text     = "Team Check",
+    Default  = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Rage then L.Rage.TeamCheck = v end
+    end,
+})
+
+RBRight:AddToggle("RB_DistCheck", {
+    Text     = "Distance Check",
+    Default  = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Rage then L.Rage.DistanceCheck = v end
+    end,
+})
+
+RBRight:AddSlider("RB_MaxDist", {
+    Text     = "Max Distance",
+    Default  = 1000,
+    Min      = 50,
+    Max      = 5000,
+    Rounding = 0,
+    Suffix   = " st",
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Rage then L.Rage.MaxDistance = v end
+    end,
+})
+
+-- ============================================================
+--  [ESP]
+-- ============================================================
+
+local ESPTabbox   = Tabs.ESP:AddLeftTabbox("Category")
+local ESPNPCTab   = ESPTabbox:AddTab("NPCs")
+local ESPPlayTab  = ESPTabbox:AddTab("Players")
+local ESPZombTab  = ESPTabbox:AddTab("Zombies")
+local ESPRight    = Tabs.ESP:AddRightGroupbox("Shared")
+
+local function espCat(tab, kind)
+    tab:AddToggle("ESP_"..kind.."_En", {
+        Text     = "Enabled",
+        Default  = kind == "npc",
+        Callback = function(v)
+            local L = getgenv().LinoriaCombat
+            if L and L.ESP and L.ESP.teamSettings and L.ESP.teamSettings[kind] then
+                L.ESP.teamSettings[kind].enabled = v
+            end
+        end,
+    })
+    tab:AddToggle("ESP_"..kind.."_Box", {
+        Text     = "Box",
+        Default  = false,
+        Callback = function(v)
+            local L = getgenv().LinoriaCombat
+            if L and L.ESP and L.ESP.teamSettings and L.ESP.teamSettings[kind] then
+                L.ESP.teamSettings[kind].box = v
+            end
+        end,
+    })
+    tab:AddToggle("ESP_"..kind.."_Name", {
+        Text     = "Name",
+        Default  = false,
+        Callback = function(v)
+            local L = getgenv().LinoriaCombat
+            if L and L.ESP and L.ESP.teamSettings and L.ESP.teamSettings[kind] then
+                L.ESP.teamSettings[kind].name = v
+            end
+        end,
+    })
+    tab:AddToggle("ESP_"..kind.."_HP", {
+        Text     = "Health Bar",
+        Default  = false,
+        Callback = function(v)
+            local L = getgenv().LinoriaCombat
+            if L and L.ESP and L.ESP.teamSettings and L.ESP.teamSettings[kind] then
+                L.ESP.teamSettings[kind].healthBar = v
+            end
+        end,
+    })
+    tab:AddToggle("ESP_"..kind.."_Dist", {
+        Text     = "Distance",
+        Default  = false,
+        Callback = function(v)
+            local L = getgenv().LinoriaCombat
+            if L and L.ESP and L.ESP.teamSettings and L.ESP.teamSettings[kind] then
+                L.ESP.teamSettings[kind].distance = v
+            end
+        end,
+    })
+    tab:AddToggle("ESP_"..kind.."_Tracer", {
+        Text     = "Tracer",
+        Default  = false,
+        Callback = function(v)
+            local L = getgenv().LinoriaCombat
+            if L and L.ESP and L.ESP.teamSettings and L.ESP.teamSettings[kind] then
+                L.ESP.teamSettings[kind].tracer = v
+            end
+        end,
+    })
+    tab:AddSlider("ESP_"..kind.."_MaxDist", {
+        Text     = "Max Distance",
+        Default  = 1000,
+        Min      = 50,
+        Max      = 5000,
+        Rounding = 0,
+        Suffix   = " st",
+        Callback = function(v)
+            local L = getgenv().LinoriaCombat
+            if L and L.ESP and L.ESP.teamSettings and L.ESP.teamSettings[kind] then
+                L.ESP.teamSettings[kind].maxDistance = v
+                L.ESP.teamSettings[kind].limitDistance = true
+            end
+        end,
+    })
+    tab:AddToggle("ESP_"..kind.."_Chams", {
+        Text     = "Chams",
+        Default  = false,
+        Callback = function(v)
+            local L = getgenv().LinoriaCombat
+            if L and L.ESP and L.ESP.chams and L.ESP.chams[kind] then
+                L.ESP.chams[kind].enabled = v
+            end
+        end,
+    })
+    tab:AddColorPicker("ESP_"..kind.."_ChamsVis", {
+        Default      = Color3.fromRGB(0, 255, 100),
+        Title        = "Chams Visible Color",
+        Transparency = 0.15,
+        Callback     = function(v)
+            local L = getgenv().LinoriaCombat
+            if L and L.ESP and L.ESP.chams and L.ESP.chams[kind] then
+                L.ESP.chams[kind].visibleColor = v
+            end
+        end,
+    })
+    tab:AddToggle("ESP_"..kind.."_Skeleton", {
+        Text     = "Skeleton",
+        Default  = false,
+        Callback = function(v)
+            local L = getgenv().LinoriaCombat
+            if L and L.ESP and L.ESP.advanced and L.ESP.advanced[kind] then
+                L.ESP.advanced[kind].skeleton = v
+            end
+        end,
+    })
+end
+
+espCat(ESPNPCTab,  "npc")
+espCat(ESPPlayTab, "players")
+espCat(ESPZombTab, "zombies")
+
+-- Shared settings (right side)
+ESPRight:AddSlider("ESP_TextSize", {
+    Text     = "Text Size",
+    Default  = 13,
+    Min      = 8,
+    Max      = 24,
+    Rounding = 0,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.ESP and L.ESP.sharedSettings then
+            L.ESP.sharedSettings.textSize = v
+        end
+    end,
+})
+
+ESPRight:AddToggle("ESP_TeamColor", {
+    Text     = "Team-Based Colors",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.ESP and L.ESP.sharedSettings then
+            L.ESP.sharedSettings.teamBasedColor = v
+        end
+    end,
+})
+
+ESPRight:AddColorPicker("ESP_NeutralColor", {
+    Default      = Color3.fromRGB(100, 220, 150),
+    Title        = "Neutral Color",
+    Transparency = 0,
+    Callback     = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.ESP and L.ESP.sharedSettings then
+            L.ESP.sharedSettings.neutralColor = v
+        end
+    end,
+})
+
+-- ============================================================
+--  [Movement]
+-- ============================================================
+
+local MLeft  = Tabs.Movement:AddLeftGroupbox("Speed & Flight")
+local MRight = Tabs.Movement:AddRightGroupbox("Misc")
+
+MLeft:AddToggle("MV_Speed", {
+    Text     = "Speed Hack",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Movement then L.Movement.Speed = v end
+    end,
+})
+
+MLeft:AddSlider("MV_SpeedValue", {
+    Text     = "Speed",
+    Default  = 24,
+    Min      = 8,
+    Max      = 300,
+    Rounding = 0,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Movement then L.Movement.SpeedValue = v end
+    end,
+})
+
+MLeft:AddToggle("MV_Fly", {
+    Text     = "Fly",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Movement then L.Movement.Fly = v end
+    end,
+})
+
+MLeft:AddSlider("MV_FlySpeed", {
+    Text     = "Fly Speed",
+    Default  = 60,
+    Min      = 10,
+    Max      = 500,
+    Rounding = 0,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Movement then L.Movement.FlySpeed = v end
+    end,
+})
+
+MLeft:AddToggle("MV_Noclip", {
+    Text     = "Noclip",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Movement then L.Movement.Noclip = v end
+    end,
+})
+
+MLeft:AddToggle("MV_BunnyHop", {
+    Text     = "Bunny Hop",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Movement then L.Movement.BunnyHop = v end
+    end,
+})
+
+MLeft:AddToggle("MV_AirStrafe", {
+    Text     = "Air Strafe",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Movement then L.Movement.AirStrafe = v end
+    end,
+})
+
+MRight:AddToggle("MV_NoFall", {
+    Text     = "No Fall Damage",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Movement then L.Movement.NoFallDamage = v end
+    end,
+})
+
+MRight:AddToggle("MV_AutoHeal", {
+    Text     = "Auto Heal",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Movement then L.Movement.AutoHeal = v end
+    end,
+})
+
+MRight:AddToggle("MV_Stamina", {
+    Text     = "Infinite Stamina",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Movement then L.Movement.Stamina = v end
+    end,
+})
+
+MRight:AddToggle("MV_Smoothing", {
+    Text     = "Smooth Movement",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Movement then L.Movement.Smoothing = v end
+    end,
+})
+
+MRight:AddToggle("MV_AutoSprint", {
+    Text     = "Auto Sprint",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Movement then L.Movement.AutoSprint = v end
+    end,
+})
+
+MRight:AddToggle("MV_OmniSprint", {
+    Text     = "Omni Sprint",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Movement then L.Movement.OmniSprint = v end
+    end,
+})
+
+MRight:AddToggle("MV_SprintCombat", {
+    Text     = "Sprint in Combat",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Movement then L.Movement.SprintCombat = v end
+    end,
+})
+
+-- ============================================================
+--  [Gun]
+-- ============================================================
+
+local GLeft  = Tabs.Gun:AddLeftGroupbox("Gun Mods")
+local GRight = Tabs.Gun:AddRightGroupbox("Visuals & Misc")
+
+GLeft:AddToggle("GN_NoRecoil", {
+    Text     = "No Recoil",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Gun then L.Gun.NoRecoil = v end
+    end,
+})
+
+GLeft:AddToggle("GN_NoSpread", {
+    Text     = "No Spread",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Gun then L.Gun.NoSpread = v end
+    end,
+})
+
+GLeft:AddToggle("GN_NoSway", {
+    Text     = "No Sway",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Gun then L.Gun.NoSway = v end
+    end,
+})
+
+GLeft:AddToggle("GN_InstantADS", {
+    Text     = "Instant ADS",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Gun then L.Gun.InstantADS = v end
+    end,
+})
+
+GLeft:AddToggle("GN_ForceHead", {
+    Text     = "Force Headshot",
+    Default  = false,
+    Risky    = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Gun then L.Gun.ForceHeadshot = v end
+    end,
+})
+
+GLeft:AddToggle("GN_AutoReload", {
+    Text     = "Auto Reload",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Gun then L.Gun.AutoReload = v end
+    end,
+})
+
+GLeft:AddToggle("GN_UnlockModes", {
+    Text     = "Unlock Fire Modes",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Gun then L.Gun.UnlockModes = v end
+    end,
+})
+
+GLeft:AddToggle("GN_SightZoom", {
+    Text     = "Sight Zoom",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Gun then L.Gun.SightZoom = v end
+    end,
+})
+
+GLeft:AddSlider("GN_SpreadReduction", {
+    Text     = "Spread Reduction",
+    Default  = 100,
+    Min      = 0,
+    Max      = 100,
+    Rounding = 0,
+    Suffix   = "%",
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Gun then L.Gun.SpreadReduction = v end
+    end,
+})
+
+GLeft:AddToggle("GN_RPM", {
+    Text     = "Custom RPM",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Gun then L.Gun.RPM = v end
+    end,
+})
+
+GLeft:AddSlider("GN_RPMValue", {
+    Text     = "RPM",
+    Default  = 900,
+    Min      = 30,
+    Max      = 9999,
+    Rounding = 0,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Gun then L.Gun.RPMValue = v end
+    end,
+})
+
+GLeft:AddToggle("GN_NoCameraShake", {
+    Text     = "No Camera Shake",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Gun then L.Gun.NoCameraShake = v end
+    end,
+})
+
+GLeft:AddToggle("GN_NoEquipDelay", {
+    Text     = "No Equip Delay",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Gun then L.Gun.NoEquipDelay = v end
+    end,
+})
+
+-- Gun Visuals
+GRight:AddToggle("GN_Visuals", {
+    Text     = "Gun Visuals Override",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Gun then L.Gun.Visuals = v end
+    end,
+})
+
+GRight:AddSlider("GN_Transparency", {
+    Text     = "Transparency",
+    Default  = 0,
+    Min      = 0,
+    Max      = 100,
+    Rounding = 0,
+    Suffix   = "%",
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Gun then L.Gun.Transparency = v end
+    end,
+})
+
+GRight:AddDropdown("GN_Material", {
+    Text   = "Material",
+    Values = { "Original", "Neon", "Glass", "ForceField", "SmoothPlastic" },
+    Default = 1,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Gun then L.Gun.Material = v end
+    end,
+})
+
+-- Melee
+GRight:AddDivider()
+GRight:AddToggle("ML_Headshot", {
+    Text     = "Melee Headshot",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Melee then L.Melee.Headshot = v end
+    end,
+})
+
+GRight:AddToggle("ML_Reach", {
+    Text     = "Extended Reach",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Melee then L.Melee.Reach = v end
+    end,
+})
+
+GRight:AddSlider("ML_Distance", {
+    Text     = "Reach Distance",
+    Default  = 8,
+    Min      = 2,
+    Max      = 60,
+    Rounding = 0,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Melee then L.Melee.Distance = v end
+    end,
+})
+
+GRight:AddToggle("ML_Aura", {
+    Text     = "Melee Aura",
+    Default  = false,
+    Risky    = true,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Melee then L.Melee.Aura = v end
+    end,
+})
+
+-- ============================================================
+--  [Misc] — Vehicle, Turret, World Mods, FPS Booster
+-- ============================================================
+
+local MiscTabbox = Tabs.Misc:AddLeftTabbox("Misc")
+local VehTab     = MiscTabbox:AddTab("Vehicle")
+local TurTab     = MiscTabbox:AddTab("Turret")
+local WorldTab   = MiscTabbox:AddTab("World")
+local MiscRight  = Tabs.Misc:AddRightGroupbox("FPS Booster")
+
+-- Vehicle
+VehTab:AddToggle("VH_Speed", {
+    Text     = "Speed Hack",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Vehicle then L.Vehicle.Speed = v end
+    end,
+})
+
+VehTab:AddSlider("VH_SpeedValue", {
+    Text     = "Speed",
+    Default  = 80,
+    Min      = 10,
+    Max      = 500,
+    Rounding = 0,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Vehicle then L.Vehicle.SpeedValue = v end
+    end,
+})
+
+VehTab:AddToggle("VH_Stability", {
+    Text     = "Stability",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Vehicle then L.Vehicle.Stability = v end
+    end,
+})
+
+VehTab:AddToggle("VH_FastStart", {
+    Text     = "Fast Start",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Vehicle then L.Vehicle.FastStart = v end
+    end,
+})
+
+VehTab:AddToggle("VH_Fly", {
+    Text     = "Vehicle Fly",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Vehicle then L.Vehicle.Fly = v end
+    end,
+})
+
+VehTab:AddSlider("VH_FlySpeed", {
+    Text     = "Fly Speed",
+    Default  = 60,
+    Min      = 10,
+    Max      = 500,
+    Rounding = 0,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Vehicle then L.Vehicle.FlySpeed = v end
+    end,
+})
+
+VehTab:AddToggle("VH_Noclip", {
+    Text     = "Vehicle Noclip",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Vehicle then L.Vehicle.Noclip = v end
+    end,
+})
+
+-- Turret
+TurTab:AddToggle("TR_RPM", {
+    Text     = "Custom RPM",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Turret then L.Turret.RPM = v end
+    end,
+})
+
+TurTab:AddSlider("TR_RPMValue", {
+    Text     = "RPM",
+    Default  = 900,
+    Min      = 30,
+    Max      = 9999,
+    Rounding = 0,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Turret then L.Turret.RPMValue = v end
+    end,
+})
+
+TurTab:AddToggle("TR_NoSpread", {
+    Text     = "No Spread",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Turret then L.Turret.NoSpread = v end
+    end,
+})
+
+TurTab:AddToggle("TR_NoRecoil", {
+    Text     = "No Recoil",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.Turret then L.Turret.NoRecoil = v end
+    end,
+})
+
+-- World Mods
+WorldTab:AddToggle("WM_Time", {
+    Text     = "Custom Time",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.World then L.World.time.enabled = v end
+    end,
+})
+
+WorldTab:AddSlider("WM_TimeValue", {
+    Text     = "Clock Time",
+    Default  = 14,
+    Min      = 0,
+    Max      = 24,
+    Rounding = 1,
+    Suffix   = "h",
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.World then L.World.time.value = v end
+    end,
+})
+
+WorldTab:AddToggle("WM_Fog", {
+    Text     = "Custom Fog",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.World then L.World.fog.enabled = v end
+    end,
+})
+
+WorldTab:AddSlider("WM_FogStart", {
+    Text     = "Fog Start",
+    Default  = 0,
+    Min      = 0,
+    Max      = 5000,
+    Rounding = 0,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.World then L.World.fog.s = v end
+    end,
+})
+
+WorldTab:AddSlider("WM_FogEnd", {
+    Text     = "Fog End",
+    Default  = 1000,
+    Min      = 1,
+    Max      = 10000,
+    Rounding = 0,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.World then L.World.fog.e = v end
+    end,
+})
+
+WorldTab:AddColorPicker("WM_FogColor", {
+    Default      = Color3.fromRGB(192, 192, 192),
+    Title        = "Fog Color",
+    Transparency = 0,
+    Callback     = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.World then L.World.fog.color = v end
+    end,
+})
+
+WorldTab:AddToggle("WM_Shadows", {
+    Text     = "Custom Shadows",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.World then L.World.shadows.enabled = v end
+    end,
+})
+
+WorldTab:AddSlider("WM_ShadowSoft", {
+    Text     = "Shadow Softness",
+    Default  = 0,
+    Min      = 0,
+    Max      = 100,
+    Rounding = 0,
+    Suffix   = "%",
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.World then L.World.shadows.softness = v/100 end
+    end,
+})
+
+-- FPS Booster
+MiscRight:AddToggle("FPS_Enabled", {
+    Text     = "FPS Booster",
+    Default  = false,
+    Callback = function(v)
+        local L = getgenv().LinoriaCombat
+        if L and L.World and L.World.Booster then
+            L.World.Booster.SetEnabled(v)
+        end
+    end,
+})
+
+-- ============================================================
+--  [Config]
+-- ============================================================
+
+ThemeManager:SetLibrary(TokaiHub)
+SaveManager:SetLibrary(TokaiHub)
+
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({})
+
+ThemeManager:SetFolder("BRM5Hub")
+SaveManager:SetFolder("BRM5Hub/Configs")
+
+ThemeManager:ApplyToTab(Tabs.Config)
+SaveManager:BuildConfigSection(Tabs.Config)
+
+SaveManager:LoadAutoloadConfig()
+
+-- ============================================================
+--  Ready
+-- ============================================================
+
+TokaiHub:Notify({
+    Title       = "BRM5 Hub",
+    Description = "Loaded. Right-Ctrl to toggle.",
+    Time        = 4,
+})
