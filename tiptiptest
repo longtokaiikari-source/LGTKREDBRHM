@@ -709,7 +709,9 @@ local function addTargets(group, id, settings)
     end)
 end
 
-local SilentGroup = Tabs.Main:AddLeftGroupbox('Silent Aim')
+local _MainTabbox = Tabs.Main:AddLeftTabbox()
+local _SilentTab = _MainTabbox:AddTab('Silent Aim')
+local SilentGroup = _SilentTab:AddLeftGroupbox('Silent Aim')
 local EnabledControl = addToggle(SilentGroup, 'silent_enabled', 'Enabled', Silent, 'Enabled')
 EnabledControl:AddKeyPicker('silent_key', {
     Default = 'None', Mode = 'Hold', Modes = { 'Always', 'Hold', 'Toggle' },
@@ -753,16 +755,17 @@ addSlider(SilentGroup, 'silent_distance', 'Max Distance', Silent, 'MaxDistance',
 addToggle(SilentGroup, 'silent_fov_enabled', 'FOV Check', Silent, 'FOVEnabled')
 addToggle(SilentGroup, 'silent_sticky', 'Sticky Aim', Silent, 'StickyAim')
 
-local PredictionGroup = Tabs.Main:AddRightGroupbox('Prediction')
+local PredictionGroup = _SilentTab:AddRightGroupbox('Prediction')
 addToggle(PredictionGroup, 'silent_auto_prediction', 'Auto Prediction', Silent, 'AutoPrediction')
 addToggle(PredictionGroup, 'silent_bullet_drop_compensation', 'Bullet Drop Compensation', Silent, 'BulletDropCompensation')
 
-local ChecksGroup = Tabs.Main:AddRightGroupbox('Checks')
+local ChecksGroup = _SilentTab:AddRightGroupbox('Checks')
 addToggle(ChecksGroup, 'silent_teamcheck', 'Team Check', Silent, 'TeamCheck')
 addToggle(ChecksGroup, 'silent_visiblecheck', 'Wallcheck', Silent, 'VisibleCheck')
 addToggle(ChecksGroup, 'silent_hitscan', 'Hitscan', Silent, 'Hitscan')
 
-local TriggerGroup = Tabs.Main:AddLeftGroupbox('Triggerbot')
+local _TriggerTab = _MainTabbox:AddTab('Triggerbot')
+local TriggerGroup = _TriggerTab:AddLeftGroupbox('Triggerbot')
 local TriggerControl = addToggle(TriggerGroup, 'trigger_enabled', 'Enabled', TriggerBotSettings, 'Enabled')
 TriggerControl:AddKeyPicker('trigger_key', {
     Default = 'None', Mode = 'Hold', Modes = { 'Always', 'Hold', 'Toggle' },
@@ -798,25 +801,11 @@ for _, id in ipairs({ 'trigger_reaction', 'trigger_shoot' }) do
 end
 
 -- Each primary tab owns a horizontal subnavigation row and its control pages.
-local function addSubtabs(name, pages)
-    local tab = Tabs[name]
-    if not tab then return end
-    local box = tab:AddLeftTabbox()
-    for _, page in ipairs(pages) do
-        local subTab = box:AddTab(page.Name)
-        for _, group in ipairs(page.Groups or {}) do
-            pcall(function()
-                -- Move group's frame into the subtab container
-                local frame = group.GroupFrame or group.Frame or group.Container
-                if frame and subTab.Container then
-                    frame.Parent = subTab.Container
-                end
-            end)
-        end
-    end
-end
+local function addSubtabs(name, pages) end -- groups already in subtabs
 
-local RageGroup = Tabs.Ragebot:AddLeftGroupbox('Ragebot')
+local _RageTabbox = Tabs.Ragebot:AddLeftTabbox()
+local _RageGenTab = _RageTabbox:AddTab('General')
+local RageGroup = _RageGenTab:AddLeftGroupbox('Ragebot')
 local RageControl = addToggle(RageGroup, 'rage_enabled', 'Enabled', Rage, 'Enabled')
 RageControl:AddKeyPicker('rage_key', {
     Default = 'None', Mode = 'Hold', Modes = { 'Always', 'Hold', 'Toggle' },
@@ -830,7 +819,8 @@ RageGroup:AddDropdown('rage_hitpart', {
     }, Default = Rage.HitPart,
 }):OnChanged(function(value) Rage.HitPart = value end)
 addTargets(RageGroup, 'rage_targets', Rage)
-local RageChecks = Tabs.Ragebot:AddLeftGroupbox('Checks')
+local _RageChkTab = _RageTabbox:AddTab('Checks')
+local RageChecks = _RageChkTab:AddLeftGroupbox('Checks')
 addToggle(RageChecks, 'rage_visiblecheck', 'Wallcheck', Rage, 'VisibleCheck')
 addToggle(RageChecks, 'rage_teamcheck', 'Team Check', Rage, 'TeamCheck')
 addToggle(RageChecks, 'rage_hitscan', 'Hitscan', Rage, 'Hitscan')
@@ -1528,12 +1518,16 @@ Combat.Destroy = function()
 end
 -- Adapt the Lean visual controls to Linoria without changing the renderer.
 local visualPages = {}
+local _VisualTabbox = Tabs.Visuals:AddLeftTabbox()
+local _VisualSubTabs = {}
 local function visualPage(name)
-    local page = { Name = name, Groups = {} }
+    local subTab = _VisualTabbox:AddTab(name)
+    _VisualSubTabs[name] = subTab
+    local page = { Name = name, Groups = {}, _subTab = subTab }
     table.insert(visualPages, page)
     function page:AddSection(info)
-        local group = info.Side == 'Right' and Tabs.Visuals:AddRightGroupbox(info.Title)
-            or Tabs.Visuals:AddLeftGroupbox(info.Title)
+        local group = info.Side == 'Right' and self._subTab:AddRightGroupbox(info.Title)
+            or self._subTab:AddLeftGroupbox(info.Title)
         table.insert(self.Groups, group)
         local section = {}
         local lastToggle
@@ -2505,12 +2499,18 @@ end
 end
 
 do
+local _legacyTabboxes = {}
 local function legacyPage(tab, pages, name)
-    local page = { Name = name, Groups = {} }
+    if not _legacyTabboxes[tab] then
+        _legacyTabboxes[tab] = tab:AddLeftTabbox()
+    end
+    local box = _legacyTabboxes[tab]
+    local subTab = box:AddTab(name)
+    local page = { Name = name, Groups = {}, _subTab = subTab }
     table.insert(pages, page)
     function page:AddSection(info)
-        local group = info.Side == 'Right' and tab:AddRightGroupbox(info.Title)
-            or tab:AddLeftGroupbox(info.Title)
+        local group = info.Side == 'Right' and self._subTab:AddRightGroupbox(info.Title)
+            or self._subTab:AddLeftGroupbox(info.Title)
         table.insert(self.Groups, group)
         local section = {}
         local lastToggle
