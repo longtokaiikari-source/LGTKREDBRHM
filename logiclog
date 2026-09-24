@@ -40,7 +40,7 @@ getgenv().Library = {
 --  Replace the HttpGet URL with wherever you host brm5_logic.lua
 -- ============================================================
 
-local LogicUrl = "YOUR_RAW_LOGIC_URL_HERE" -- << paste raw URL of brm5_logic.lua
+local LogicUrl = "https://raw.githubusercontent.com/longtokaiikari-source/LGTKREDBRHM/refs/heads/main/logicgate" -- << paste raw URL of brm5_logic.lua
 loadstring(game:HttpGet(LogicUrl))()
 
 -- After this point Combat, Combat.ESP, Combat.Movement etc. are live.
