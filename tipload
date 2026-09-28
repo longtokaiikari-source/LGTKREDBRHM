@@ -277,7 +277,7 @@ task.spawn(function()
     if isBlocked or rate<70 then
         panelStroke.Color=C.fail
         panelGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,Color3.fromRGB(255,120,120)),ColorSequenceKeypoint.new(1,Color3.fromRGB(255,160,160))})
-        statusLbl.Text = isBlocked and "✗  Executor không hỗ trợ" or string.format("✗  UNC thấp (%d%% < 70%%)", rate)
+        statusLbl.Text = isBlocked and "✗  Executor không hỗ trợ thay mẹ executor có unc cao đê" or string.format("✗  UNC thấp (%d%% < 70%%)", rate)
         statusLbl.TextColor3=C.fail
         local db=mkBtn("💬  Discord (Copy Link)",C.btnBlock,UDim2.new(1,-40,0,44),UDim2.new(0,20,0,196))
         db.MouseButton1Click:Connect(function()
@@ -285,7 +285,7 @@ task.spawn(function()
             else db.Text="setclipboard không hỗ trợ" end
         end)
     else
-        statusLbl.Text="✿  Chọn phiên bản của bạn"; statusLbl.TextColor3=Color3.fromRGB(255,255,255)
+        statusLbl.Text="✿  Chọn phiên bản đê pc or mobile"; statusLbl.TextColor3=Color3.fromRGB(255,255,255)
         pcBtn.Visible=true; mobileBtn.Visible=true
 
         local function loadScript(url, platform)
