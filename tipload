@@ -244,7 +244,7 @@ barGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,C.accent),ColorSequ
 mkDivider(148)
 
 -- Status
-local statusLbl=mkLabel({Size=UDim2.new(1,-40,0,28),Position=UDim2.new(0,20,0,157),Text="⏳  Đang kiểm tra...",TextColor3=C.textDim,Font=Enum.Font.GothamBold,TextSize=13,TextXAlignment=Enum.TextXAlignment.Center})
+local statusLbl=mkLabel({Size=UDim2.new(1,-40,0,28),Position=UDim2.new(0,20,0,157),Text="⏳  Đang kiểm tra UNC...",TextColor3=C.textDim,Font=Enum.Font.GothamBold,TextSize=13,TextXAlignment=Enum.TextXAlignment.Center})
 
 -- Buttons
 local pcBtn=mkBtn("💻  PC",C.btnPC,UDim2.new(0.5,-28,0,44),UDim2.new(0,20,0,196))
