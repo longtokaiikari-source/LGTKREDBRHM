@@ -1,7 +1,7 @@
 
-local repo = 'https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/'
+local repo = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/'
 
-local LibrarySourceUrl = 'https://raw.githubusercontent.com/vcqz23/settings/refs/heads/main/Linoria%20Src'
+local LibrarySourceUrl = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/LinoriaSrc.lua'
 local LibrarySource = LibrarySourceUrl ~= '' and game:HttpGet(LibrarySourceUrl) or readfile('LinoriaLib.luau')
 
 
@@ -71,7 +71,7 @@ function Fonts.Resolve(name)
         if not isfolder(folder) then makefolder(folder) end
         local path = folder .. '/' .. filename
         if not isfile(path) then
-            local data = game:HttpGet('https://raw.githubusercontent.com/i77lhm/storage/f58e45bdfab788c545200318d764474cc7cc99a5/fonts/' .. filename)
+            local data = game:HttpGet('https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/fonts/' .. filename)
             assert(#data > 1024, 'Font download is incomplete')
             writefile(path, data)
         end
@@ -110,7 +110,7 @@ Library.Create = function(self, class, properties)
 end
 
 local Window = Library:CreateWindow({
-    Title = 'Lean | BRM5 ',
+    Title = 'Tokaihub | BRM5',
     Center = true,
     AutoShow = true,
     Size = UDim2.fromOffset(568, 660),
@@ -1675,7 +1675,7 @@ Combat.Destroy = function()
     Sense.Unload()
     destroyBeforeVisuals()
 end
--- Adapt the Lean visual controls to Linoria without changing the renderer.
+-- Adapt the Tokaihub visual controls to Linoria without changing the renderer.
 local visualPages = {}
 local function visualPage(name)
     local page = { Name = name, Groups = {} }
@@ -4546,7 +4546,7 @@ end
 table.insert(Combat.connections,label:GetPropertyChangedSignal("TextBounds"):Connect(resizeWatermark))
 local elapsed,frames=0,0
 local stats: any=game:GetService("Stats")
-Library:SetWatermark("Lean | -- fps | -- ms")
+Library:SetWatermark("Tokaihub | -- fps | -- ms")
 local WatermarkConnection=AimRunService.RenderStepped:Connect(function(dt)
     elapsed+=dt;frames+=1
     if elapsed<.5 then return end
@@ -4554,7 +4554,7 @@ local WatermarkConnection=AimRunService.RenderStepped:Connect(function(dt)
     elapsed=0;frames=0
     local ok,ping=pcall(function() return stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
     local pingText=ok and type(ping)=="number" and string.format("%d",math.floor(ping+.5)) or "--"
-    Library:SetWatermark(string.format("Lean | %d fps | %s ms",fps,pingText))
+    Library:SetWatermark(string.format("Tokaihub | %d fps | %s ms",fps,pingText))
 end)
 
 Library:OnUnload(function()
@@ -4611,8 +4611,8 @@ SaveManager:SetIgnoreIndexes({ 'MenuKeybind' })
 -- use case for doing it this way:
 -- a script hub could have themes in a global folder
 -- and game configs in a separate folder per game
-ThemeManager:SetFolder('Lean')
-SaveManager:SetFolder('Lean/BRM5')
+ThemeManager:SetFolder('Tokaihub')
+SaveManager:SetFolder('Tokaihub/BRM5')
 
 -- Builds our config menu on the right side of our tab
 SaveManager:BuildConfigSection(Tabs['UI Settings'])
