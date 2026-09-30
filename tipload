@@ -212,7 +212,7 @@ end)
 local iconRow=mkLabel({Size=UDim2.new(1,0,0,26),Position=UDim2.new(0,0,0,7),Text="✿  ✿  ✿  ✿  ✿",TextColor3=Color3.fromRGB(255,255,255),Font=Enum.Font.GothamBold,TextSize=12,TextTransparency=0.3})
 task.spawn(function() local t=0; while iconRow and iconRow.Parent do t+=task.wait(0.05); iconRow.TextTransparency=0.2+math.sin(t*1.5)*0.25 end end)
 
-local titleLbl=mkLabel({Size=UDim2.new(1,-30,0,34),Position=UDim2.new(0,15,0,30),Text="✿  TokaiHub  ✿",TextColor3=Color3.fromRGB(255,255,255),Font=Enum.Font.GothamBold,TextSize=21,TextXAlignment=Enum.TextXAlignment.Center})
+local titleLbl=mkLabel({Size=UDim2.new(1,-30,0,34),Position=UDim2.new(0,15,0,30),Text="✿  TokaiHub🐍  ✿",TextColor3=Color3.fromRGB(255,255,255),Font=Enum.Font.GothamBold,TextSize=21,TextXAlignment=Enum.TextXAlignment.Center})
 do
     local g=Instance.new("UIGradient",titleLbl)
     g.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,C.accent),ColorSequenceKeypoint.new(0.5,Color3.fromRGB(255,240,248)),ColorSequenceKeypoint.new(1,C.accent)})
