@@ -88,7 +88,7 @@ local innerGlow=Instance.new("UIStroke"); innerGlow.Thickness=4; innerGlow.Color
 local SPLASH = {
     "This script was created by a Vietnamese person.",  "This tip is useless.",  "Did you know LongTokai is a tsundere?",
     "Longtokai is very strange.", "Who created this tip?",   "oi oi",
-    "Hmm?",    "You cheat, you're weird.",     "Did you know that Tokaihub was founded on February 20, 2026?",
+    "Hmm?",    "You cheat, you're weird.",     "Did you know that Tokaihub was founded on February 20, 2026?",  "BAKA",  "404#erro??.",  "What did you do, UNC?", "skill issue.",  "I hope you know Longtokai.",  "vietnam:D",  "Longtokai's birthday is February 28th.",  "aishiteru.",  
 }
 local splashLbl = Instance.new("TextLabel", panel)
 splashLbl.Size             = UDim2.fromOffset(120, 20)
