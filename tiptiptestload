@@ -86,9 +86,9 @@ local innerGlow=Instance.new("UIStroke"); innerGlow.Thickness=4; innerGlow.Color
 
 -- ─── Splash text — góc trên phải, xoay 45° ───────────────────────────
 local SPLASH = {
-    "Phiên bản mới!",  "100% hợp lệ!",  "Xịn xò!",
-    "Hoạt động thật!", "Không virus!",   "Miễn phí!",
-    "Open source!",    "Không lag!",     "Actually works!",
+    "This script was created by a Vietnamese person.",  "This tip is useless.",  "Did you know LongTokai is a tsundere?",
+    "Longtokai is very strange.", "Who created this tip?",   "oi oi",
+    "Hmm?",    "You cheat, you're weird.",     "Did you know that Tokaihub was founded on February 20, 2026?",
 }
 local splashLbl = Instance.new("TextLabel", panel)
 splashLbl.Size             = UDim2.fromOffset(120, 20)
