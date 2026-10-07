@@ -110,7 +110,7 @@ Library.Create = function(self, class, properties)
 end
 
 local Window = Library:CreateWindow({
-    Title = 'Tokaihub | BRM5',
+    Title = '🎃Tokaihub | BRM5🎃',
     Center = true,
     AutoShow = true,
     Size = UDim2.fromOffset(568, 660),
