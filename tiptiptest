@@ -1,5 +1,4 @@
-
-local repo = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/'
+ local repo = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/'
 
 local LibrarySourceUrl = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/LinoriaSrc.lua'
 local LibrarySource = LibrarySourceUrl ~= '' and game:HttpGet(LibrarySourceUrl) or readfile('LinoriaLib.luau')
@@ -996,6 +995,15 @@ addSubtabs('Ragebot', {
 })
 
 do
+-- hlObjects: scope bao phủ Sense IIFE và Heartbeat connection
+local hlObjects = {} -- [uid string] = Highlight instance
+local hlSettings = {npc=false,players=false,zombies=false,corpses=false}
+local hlZombieColors = {
+    [1]=Color3.fromRGB(149,75,0),   -- Crippled: nâu
+    [2]=Color3.fromRGB(255,255,0),  -- Slow: vàng
+    [3]=Color3.fromRGB(255,0,0),    -- Normal: đỏ
+    [4]=Color3.fromRGB(148,0,255),  -- Sprinter: tím
+}
 local Sense = (function()
     local E: {[string]: any} = {
         _hasLoaded = false, objects = {}, errors = {}, scanAt = 0,
@@ -1858,6 +1866,8 @@ end
 local NpcGeneral = NpcPage:AddSection({Title="General",Side="Left"})
 NpcGeneral:AddToggle({Text="ESP Enabled",Flag="npc_enabled",Default=true,
     Callback=function(v) Sense.teamSettings.npc.enabled=v end})
+NpcGeneral:AddToggle({Text="Highlight ESP",Flag="npc_highlight",Default=false,
+    Callback=function(v) hlSettings.npc=v end})
 addESPDistance(NpcGeneral,"npc")
 local function buildTeamPage(page, team)
     local t     = Sense.teamSettings[team]
@@ -2187,6 +2197,8 @@ buildTeamPage(NpcPage,"npc")
 local PlayerGeneral=PlayersPage:AddSection({Title="General",Side="Left"})
 PlayerGeneral:AddToggle({Text="ESP Enabled",Flag="players_enabled",Default=false,
     Callback=function(v) Sense.teamSettings.players.enabled=v end})
+PlayerGeneral:AddToggle({Text="Highlight ESP",Flag="players_highlight",Default=false,
+    Callback=function(v) hlSettings.players=v end})
 addESPDistance(PlayerGeneral,"players")
 PlayerGeneral:AddToggle({Text="Team Check",Flag="players_team_check",Default=false,
     Callback=function(v) Sense.teamSettings.players.teamCheck=v end})
@@ -2196,6 +2208,8 @@ for _,entry in ipairs({{ZombiePage,"zombies"},{CorpsePage,"corpses"}}) do
     local general=page:AddSection({Title="General",Side="Left"})
     general:AddToggle({Text="ESP Enabled",Flag=kind.."_enabled",Default=false,
         Callback=function(v) Sense.teamSettings[kind].enabled=v end})
+    general:AddToggle({Text="Highlight ESP",Flag=kind.."_highlight",Default=false,
+        Callback=function(v) hlSettings[kind]=v end})
     addESPDistance(general,kind)
     buildTeamPage(page,kind)
 end
@@ -3539,7 +3553,7 @@ do
     local X: {[string]: any}={classes={},nextScan=0,saved={},active=true}
     local V: {[string]: any}={Speed=false,SpeedValue=80,Stability=false,FastStart=false,Fly=false,FlySpeed=60,Noclip=false,Bounce=false,bounceStates=setmetatable({},{__mode="k"}),keyState={}}
     local T={RPM=false,RPMValue=900,NoSpread=false,NoRecoil=false}
-    local A: {[string]: any}={Headshot=false,Reach=false,Distance=8,Aura=false,Targets={Zombies=true,NPCs=true},keyState={},nextSwing=0,nextTargetScan=0}
+    local A: {[string]: any}={Headshot=false,Reach=false,Distance=8,Aura=false,Targets={Zombies=true,NPCs=true},keyState={},nextSwing=0,nextTargetScan=0,RakNet=false,RakNetRange=80}
     Combat.Extensions=X;Combat.Vehicle=V;Combat.Turret=T;Combat.Melee=A
     Gun.RPM=false;Gun.RPMValue=900
     Gun.NoCameraShake=false;Gun.SightZoom=false;Gun.Zoom=2;Gun.NoEquipDelay=false;Gun.Debug=false
@@ -3598,6 +3612,8 @@ do
             for k,v in pairs(values or {}) do local name=type(k)=="number" and v or (v and k);if map[name] then selected[map[name]]=true end end
             A.Targets=selected
         end})
+    toggle(mr,"RakNet Desync",A,"RakNet","melee_raknet_enabled")
+    slider(mr,"RakNet Range",A,"RakNetRange","melee_raknet_range",5,500,80,1," studs")
     local vp=VehiclePage
     local vl=vp:AddSection({Title="Driving",Side="Left"});local vr=vp:AddSection({Title="Flight",Side="Right"})
     toggle(vl,"Speed Mod",V,"Speed","vehicle_speed")
@@ -3700,7 +3716,7 @@ do
     end
     function A.SelectTarget(me,weapon)
         if not me or not me.CFrame then return nil end
-        local range=A.Range(weapon)
+        local range=A.RakNet and A.RakNetRange or A.Range(weapon)
         if range<=0 then return nil end
         local origin=me.CFrame:PointToWorldSpace(Vector3.new(0,2.5,0))
         local camera=workspace.CurrentCamera
@@ -3789,6 +3805,26 @@ do
                 if not weapon or weapon._firearm or X.meleeWeapon~=weapon then return end
                 A.targetActor,A.target=A.SelectTarget(self._actor,weapon)
                 if not A.target then return end
+                if A.RakNet then
+                    -- RakNet mode: bypass local raycast entirely.
+                    -- Return target position + UID directly so MeleeInventory._use
+                    -- fires the remote event with far-target data. Slash was already
+                    -- sent by _use before this Impact call — game remote event flow intact.
+                    local parts=A.targetActor.Parts
+                    local part=(A.Headshot and parts and parts.Head)
+                        or (parts and (parts.Head or parts.UpperTorso))
+                    if not part or not part.Parent then return end
+                    local uid=A.targetActor.UID
+                    if not uid then
+                        local u2=self.Replicator and self.Replicator:GetFromBodyPart(part)
+                        uid=u2
+                    end
+                    if not uid then return end
+                    local hitPos=part.Position
+                    local partName=A.Headshot and "Head" or part.Name
+                    A.lastImpactUID=uid;A.lastImpactAt=os.clock()
+                    return hitPos,uid,partName
+                end
                 local origin=self._actor.CFrame:PointToWorldSpace(Vector3.new(0,2.5,0))
                 direction=Combat.PartPosition(A.targetActor,A.target)-origin
                 local range=A.Range(weapon)
@@ -3918,7 +3954,7 @@ do
             for name in pairs(installers) do if not X.classes[name] then X.modulesResolved=false;break end end
         end
         V.flyActive=V.Fly and Combat.KeyActive(V.key,V.keyState)
-        A.auraActive=A.Aura and Combat.KeyActive(A.key,A.keyState)
+        A.auraActive=(A.Aura or A.RakNet) and Combat.KeyActive(A.key,A.keyState)
         local me=actor();local w=Combat.Weapon()
         if X.meleeWeapon~=w then
             if X.meleeWeapon then restore(X.meleeWeapon);if X.autoSwing then X.meleeWeapon._swinging=false end end
@@ -4488,6 +4524,65 @@ addSubtabs('Mods', modPages)
 end
 
 table.insert(Combat.connections, AimRunService.RenderStepped:Connect(Combat.Frame))
+
+-- Highlight ESP standalone connection
+-- hlObjects và hlSettings đều accessible vì cùng do block scope
+table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
+    -- check có cái nào enabled không
+    local anyOn = hlSettings.npc or hlSettings.players or hlSettings.zombies or hlSettings.corpses
+    local c = Sense.Service()
+    local actors = c and c.Replicator and c.Replicator.Actors
+    if not anyOn or not actors then
+        -- tắt hết highlight khi không cần
+        for uid, hl in pairs(hlObjects) do
+            if hl and hl.Parent then hl.Enabled = false end
+        end
+        return
+    end
+    local alive = {}
+    for uid, actor in pairs(actors) do
+        local kind = Sense.Kind(actor)
+        if not kind then continue end
+        local char = actor.Character
+        if not (typeof(char) == "Instance" and char:IsA("Model") and char.Parent) then continue end
+        local on = hlSettings[kind]
+        alive[uid] = true
+        local hl = hlObjects[uid]
+        if not hl or not hl.Parent then
+            -- tạo Highlight mới — giống tipmobile CreateHighlight
+            hl = Instance.new("Highlight")
+            hl.FillTransparency = 0.6
+            hl.OutlineTransparency = 0
+            pcall(function() hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop end)
+            hl.Enabled = on
+            hl.Parent = char
+            hlObjects[uid] = hl
+        else
+            hl.Enabled = on
+        end
+        if on then
+            -- update màu
+            local col
+            if kind == "zombies" or kind == "corpses" then
+                local ab = type(actor.Health) == "table" and actor.Health.Ability
+                col = (ab and hlZombieColors[ab]) or Color3.fromRGB(255, 0, 0)
+            elseif kind == "players" then
+                col = Color3.fromRGB(255, 165, 0)
+            else
+                col = Color3.fromRGB(100, 220, 150)
+            end
+            hl.FillColor = col
+            hl.OutlineColor = col
+        end
+    end
+    -- cleanup actors không còn tồn tại
+    for uid, hl in pairs(hlObjects) do
+        if not alive[uid] then
+            if hl and hl.Parent then hl:Destroy() end
+            hlObjects[uid] = nil
+        end
+    end
+end))
 
 -- Keep overlay visibility independent from text and performance updates.
 local OverlaySettings={Watermark=true,Keybinds=true}
