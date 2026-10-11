@@ -1,4 +1,4 @@
- local repo = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/'
+local repo = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/'
 
 local LibrarySourceUrl = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/LinoriaSrc.lua'
 local LibrarySource = LibrarySourceUrl ~= '' and game:HttpGet(LibrarySourceUrl) or readfile('LinoriaLib.luau')
@@ -3700,7 +3700,18 @@ do
             return original(ctrl,...)
         end end)
     end
-    installers.MeleeInventory=function(c) A.class=c end
+    installers.MeleeInventory=function(c)
+        A.class=c
+        -- Capture the network module from _use upvalues so RakNet mode can fire
+        -- InventoryAction directly without going through the local raycast path.
+        if type(getupvalues)=="function" then
+            for _,v in ipairs(getupvalues(c._use or function()end)) do
+                if type(v)=="table" and type(rawget(v,"FireServer"))=="function" then
+                    A.network=v;break
+                end
+            end
+        end
+    end
     local meleeRay=RaycastParams.new()
     meleeRay.FilterType=Enum.RaycastFilterType.Exclude
     meleeRay.IgnoreWater=false
@@ -3737,11 +3748,16 @@ do
                     local delta=Combat.PartPosition(target,head)-origin
                     local distance=delta.Magnitude
                     if distance>.001 and distance<=nearest then
-                        local hit=workspace:Raycast(origin,delta,params)
-                        local visible=not hit or hit.Instance:IsDescendantOf(target.Character)
-                        if not visible and type(replicator.GetFromBodyPart)=="function" then
-                            local uid=replicator:GetFromBodyPart(hit.Instance)
-                            visible=uid==target.UID
+                        -- RakNet mode: skip local LOS check entirely — we fire the remote
+                        -- directly, server does its own validation, walls are irrelevant.
+                        local visible=A.RakNet
+                        if not visible then
+                            local hit=workspace:Raycast(origin,delta,params)
+                            visible=not hit or hit.Instance:IsDescendantOf(target.Character)
+                            if not visible and type(replicator.GetFromBodyPart)=="function" then
+                                local uid=replicator:GetFromBodyPart(hit.Instance)
+                                visible=uid==target.UID
+                            end
                         end
                         if visible then best=target;bestPart=head;nearest=distance end
                     end
@@ -3974,7 +3990,27 @@ do
                 A.swingPending=true
                 task.spawn(function()
                     local ok,err=pcall(function()
-                        if X.active and A.auraActive and A.target and Combat.Weapon()==w then A.class._use(w,true) end
+                        if X.active and A.auraActive and A.target and Combat.Weapon()==w then
+                            if A.RakNet and A.network then
+                                -- RINGRING approach: construct the data and send directly to server.
+                                -- No local raycast involved. Format from traffic log:
+                                -- Slash: ("InventoryAction","Slash", animIndex)
+                                -- Impact: ("InventoryAction","Impact", {X,Y,Z}, uid, partName)
+                                local tActor=A.targetActor;local tPart=A.target
+                                if tActor and tPart and tPart.Parent and A.Allowed(tActor,me) then
+                                    local pos=tPart.Position
+                                    local uid=tActor.UID
+                                    local partName=A.Headshot and "Head" or tPart.Name
+                                    -- Send Slash before Impact (RINGRING: image 5)
+                                    A.network:FireServer("InventoryAction","Slash",math.random(1,3))
+                                    -- Immediately send Impact with target coords+uid+part (image 6)
+                                    A.network:FireServer("InventoryAction","Impact",{pos.X,pos.Y,pos.Z},uid,partName)
+                                end
+                            else
+                                -- Normal aura: use _use which goes through local raycast + Impact hook
+                                A.class._use(w,true)
+                            end
+                        end
                     end)
                     A.swingPending=false
                     if not ok then X.error=tostring(err);w._swinging=false;w._looping=false end
