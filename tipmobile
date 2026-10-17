@@ -1,4 +1,3 @@
-
 local repo = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/'
 
 local LibrarySourceUrl = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/LinoriaSrc.lua'
@@ -110,7 +109,7 @@ Library.Create = function(self, class, properties)
 end
 
 local Window = Library:CreateWindow({
-    Title = '🎃Tokaihub | BRM5🎃 vis:Gen2 v1.2.0b',
+    Title = 'Tokaihub | BRM5 Gen2 v1.3.1b',
     Center = true,
     AutoShow = true,
     Size = UDim2.fromOffset(568, 660),
@@ -1038,6 +1037,8 @@ local Sense = (function()
         E.chams[kind]=table.clone(E.chams.npc)
         E.advanced[kind]=table.clone(E.advanced.npc)
     end
+    -- per-ability type filter: when false, hides ALL ESP for that zombie type
+    E.teamSettings.zombies.abilityFilter={[1]=true,[2]=true,[3]=true,[4]=true}
     local service, resolveAt, connection, anchor
     local signs = {Vector3.new(-1,-1,-1),Vector3.new(-1,1,-1),Vector3.new(-1,1,1),Vector3.new(-1,-1,1),
         Vector3.new(1,-1,-1),Vector3.new(1,1,-1),Vector3.new(1,1,1),Vector3.new(1,-1,1)}
@@ -1526,6 +1527,12 @@ local Sense = (function()
         local kind=o.preview and a.Kind or E.Kind(a)
         if o.preview then o.previewViewportSize=camera.ViewportSize end
         if not kind then return end
+        -- per-zombie-type visibility filter
+        if kind=="zombies" then
+            local ability=a.Health and type(a.Health)=="table" and a.Health.Ability
+            local filter=E.teamSettings.zombies.abilityFilter
+            if ability and filter and filter[ability]==false then return end
+        end
         local t=E.teamSettings[kind]
         local enabledChams=E.chams[kind] and E.chams[kind].enabled
         local enabledSkeleton=E.advanced[kind] and E.advanced[kind].skeleton
@@ -1616,7 +1623,11 @@ local Sense = (function()
                     label=a.DisplayName or (a.OwnerName~="???" and a.OwnerName) or (a.Zombie and "Zombie" or "NPC")
                     if not o.preview then label=tostring(label).." ["..tostring(a.UID):sub(1,6).."]" end
                 end
-                if kind=="zombies" then label="Zombie"
+                if kind=="zombies" then
+                    label=(o.model and o.model.Name or "Zombie"):gsub("^AI_",""):gsub("_+"," "):gsub("^ ",""):gsub(" $","")
+                    local _abilityTag={[1]="Crippled",[2]="Slow",[3]="Normal",[4]="Sprinter"}
+                    local _ab=a.Health and type(a.Health)=="table" and a.Health.Ability
+                    if _ab and _abilityTag[_ab] then label=label.." ["..(_abilityTag[_ab]).."]" end
                 elseif kind=="corpses" then label="Corpse: "..(a.Zombie and "Zombie" or (E.IsPlayer(a) and a.Owner.Name or "NPC")) end
                 textAt(o,"name",label,Vector2.new(cx,min.Y-shared.textSize-3),t.nameColor,t.nameOutline,override)
             end
@@ -1675,6 +1686,79 @@ Combat.Destroy = function()
     Sense.Unload()
     destroyBeforeVisuals()
 end
+-- ── HIGHLIGHT ESP INFRASTRUCTURE ─────────────────────────────────
+do
+    local hlInstances = {}
+    local hlSettings = {
+        npc     = {enabled=false,fillColor=Color3.fromRGB(255,170,0),  outlineColor=Color3.fromRGB(255,255,255),fillTransp=0.5,outlineTransp=0},
+        players = {enabled=false,fillColor=Color3.fromRGB(255,50,50),  outlineColor=Color3.fromRGB(255,255,255),fillTransp=0.5,outlineTransp=0},
+        -- zombies: single fill OR per-ability fill colors (1=Crippled 2=Slow 3=Normal 4=Sprinter)
+        zombies = {enabled=false,
+            useAbilityColors=true,
+            fillColor=Color3.fromRGB(255,50,0),
+            abilityColors={
+                [1]=Color3.fromRGB(148,74,0),
+                [2]=Color3.fromRGB(255,255,0),
+                [3]=Color3.fromRGB(255,0,0),
+                [4]=Color3.fromRGB(148,0,255),
+            },
+            abilityEnabled={[1]=true,[2]=true,[3]=true,[4]=true},
+            outlineColor=Color3.fromRGB(255,255,255),fillTransp=0.5,outlineTransp=0},
+        corpses = {enabled=false,fillColor=Color3.fromRGB(150,150,150),outlineColor=Color3.fromRGB(200,200,200),fillTransp=0.5,outlineTransp=0},
+    }
+    Sense.highlightSettings = hlSettings
+    local function destroyHL(actor)
+        if hlInstances[actor] then
+            pcall(function() hlInstances[actor]:Destroy() end)
+            hlInstances[actor]=nil
+        end
+    end
+    local function syncHL()
+        for actor,obj in pairs(Sense.objects) do
+            local kind=Sense.Kind(actor)
+            local cfg=kind and hlSettings[kind]
+            -- skip 3D-preview models (not in workspace) and team-mates
+            local inWorld=obj.model and obj.model.Parent and obj.model:IsDescendantOf(workspace)
+            local isTeammate=kind=="players" and Sense.teamSettings.players.teamCheck and Combat.IsTeammate(actor)
+            local espEnabled = Sense.teamSettings[kind] and Sense.teamSettings[kind].enabled
+            if cfg and cfg.enabled and espEnabled and inWorld and not isTeammate then
+                local hl=hlInstances[actor]
+                if not hl or not hl.Parent then
+                    hl=Instance.new("Highlight")
+                    hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop
+                    hl.Parent=obj.model
+                    hlInstances[actor]=hl
+                end
+                if kind=="zombies" then
+                    local ability=actor.Health and type(actor.Health)=="table" and actor.Health.Ability
+                    -- per-ability toggle: if this type is disabled, destroy and skip
+                    if ability and cfg.abilityEnabled and cfg.abilityEnabled[ability]==false then
+                        destroyHL(actor); continue
+                    end
+                    local fillColor=(ability and cfg.abilityColors and cfg.abilityColors[ability])
+                        or (cfg.abilityColors and cfg.abilityColors[3]) or Color3.fromRGB(255,0,0)
+                    hl.FillColor=fillColor
+                else
+                    hl.FillColor=cfg.fillColor
+                end
+                hl.OutlineColor=cfg.outlineColor
+                hl.FillTransparency=cfg.fillTransp
+                hl.OutlineTransparency=cfg.outlineTransp
+            else
+                destroyHL(actor)
+            end
+        end
+        for actor in pairs(hlInstances) do
+            if not Sense.objects[actor] then destroyHL(actor) end
+        end
+    end
+    table.insert(Combat.connections,AimRunService.Heartbeat:Connect(syncHL))
+    local prevDestroyHL=Combat.Destroy
+    Combat.Destroy=function()
+        for actor in pairs(hlInstances) do destroyHL(actor) end
+        prevDestroyHL()
+    end
+end
 -- Adapt the Tokaihub visual controls to Linoria without changing the renderer.
 local visualPages = {}
 local function visualPage(name)
@@ -1703,7 +1787,7 @@ local function visualPage(name)
         function section:AddSlider(data)
             local control = group:AddSlider(data.Flag, {
                 Text = data.Text, Default = data.Default, Min = data.Min, Max = data.Max,
-                Rounding = 0, Suffix = data.Suffix or '',
+                Rounding = data.Rounding or 0, Suffix = data.Suffix or '',
             })
             control:OnChanged(data.Callback)
             return control
@@ -2181,6 +2265,44 @@ local function buildTeamPage(page, team)
             if alpha ~= nil then chams.occludedIntensity = alpha end
         end
     })
+
+    -- ── Highlight ─────────────────────────────────────────────────
+    local hlCfg = Sense.highlightSettings and Sense.highlightSettings[team]
+    if hlCfg then
+        local HLSec = page:AddSection({Title = "Highlight", Side = "Right"})
+        HLSec:AddToggle({Text="Highlight",Flag=prefix.."hl_enabled",Default=false,
+            Callback=function(v) hlCfg.enabled=v end})
+        if team=="zombies" then
+            -- tipmobile style: each zombie type = own row [toggle] + [color], ordered Crippled/Slow/Normal/Sprinter
+            local abilityLabels={[1]="Zombie: Crippled",[2]="Zombie: Slow",[3]="Zombie: Normal",[4]="Zombie: Sprinter"}
+            for ability=1,4 do
+                local ab=ability
+                HLSec:AddToggle({Text=abilityLabels[ab],Flag=prefix.."hl_zb_en"..ab,
+                    Default=(hlCfg.abilityEnabled==nil or hlCfg.abilityEnabled[ab]~=false),
+                    Callback=function(v)
+                        if not hlCfg.abilityEnabled then hlCfg.abilityEnabled={[1]=true,[2]=true,[3]=true,[4]=true} end
+                        hlCfg.abilityEnabled[ab]=v
+                    end})
+                HLSec:AddColorPicker({Text="Color",Flag=prefix.."hl_zb"..ab,
+                    Default=hlCfg.abilityColors[ab],
+                    Callback=function(color) hlCfg.abilityColors[ab]=color end})
+            end
+        else
+            HLSec:AddColorPicker({Text="Fill Color",Flag=prefix.."hl_fill",
+                Default=hlCfg.fillColor,
+                Callback=function(color) hlCfg.fillColor=color end})
+        end
+        HLSec:AddColorPicker({Text="Outline Color",Flag=prefix.."hl_outline",
+            Default=hlCfg.outlineColor,
+            Callback=function(color) hlCfg.outlineColor=color end})
+        -- Transparency sliders: 0 = fully visible, 1 = invisible
+        HLSec:AddSlider({Text="Fill Transparency",Flag=prefix.."hl_fill_transp",
+            Min=0,Max=1,Default=hlCfg.fillTransp,Rounding=2,Suffix="",
+            Callback=function(v) hlCfg.fillTransp=v end})
+        HLSec:AddSlider({Text="Outline Transparency",Flag=prefix.."hl_outline_transp",
+            Min=0,Max=1,Default=hlCfg.outlineTransp,Rounding=2,Suffix="",
+            Callback=function(v) hlCfg.outlineTransp=v end})
+    end
 end
 
 buildTeamPage(NpcPage,"npc")
@@ -2241,6 +2363,126 @@ SharedLeft:AddDropdown({
 
 SharedLeft:AddSlider({Text="Box Outline Thickness",Flag="npc_box_outline_thickness",Min=1,Max=5,Default=1,Suffix="px",
     Callback=function(v) Sense.teamSettings.npc.boxOutlineThickness=v;Sense.teamSettings.players.boxOutlineThickness=v end})
+
+-- ── NIGHT VISION / THERMAL ────────────────────────────────────────
+do
+    local nvEffect,nvActive,nvMode=nil,false,"Night Vision"
+    local NV_BUILTIN_KEYS={"Night Vision","Thermal"}
+    local NV_BUILTIN_CFG={
+        ["Night Vision"]={Brightness=0.5,Contrast=0.1,Saturation=-0.8,TintColor=Color3.fromRGB(130,255,130)},
+        ["Thermal"]     ={Brightness=0.3,Contrast=0.5,Saturation=-1,  TintColor=Color3.fromRGB(255,120,40)},
+    }
+    local NV_PRESET_FILE="Tokaihub/BRM5/nv_presets.json"
+    local userPresets={}
+    pcall(function()
+        if isfile(NV_PRESET_FILE) then
+            local ok,decoded=pcall(function()
+                return game:GetService("HttpService"):JSONDecode(readfile(NV_PRESET_FILE))
+            end)
+            if ok and type(decoded)=="table" then
+                for name,cfg in pairs(decoded) do
+                    if type(cfg)=="table" then
+                        userPresets[name]={
+                            Brightness=tonumber(cfg.Brightness) or 0,
+                            Contrast  =tonumber(cfg.Contrast)   or 0,
+                            Saturation=tonumber(cfg.Saturation) or 0,
+                            TintColor =Color3.fromRGB(
+                                tonumber(cfg.R) or 255,
+                                tonumber(cfg.G) or 255,
+                                tonumber(cfg.B) or 255),
+                        }
+                    end
+                end
+            end
+        end
+    end)
+    local function savePresetsFile()
+        pcall(function()
+            local data={}
+            for name,cfg in pairs(userPresets) do
+                data[name]={
+                    Brightness=cfg.Brightness, Contrast=cfg.Contrast, Saturation=cfg.Saturation,
+                    R=math.floor(cfg.TintColor.R*255+0.5),
+                    G=math.floor(cfg.TintColor.G*255+0.5),
+                    B=math.floor(cfg.TintColor.B*255+0.5),
+                }
+            end
+            if not isfolder("Tokaihub/BRM5") then makefolder("Tokaihub/BRM5") end
+            writefile(NV_PRESET_FILE,game:GetService("HttpService"):JSONEncode(data))
+        end)
+    end
+    local function getDropdownList()
+        local list={}
+        for _,n in ipairs(NV_BUILTIN_KEYS) do list[#list+1]=n end
+        local userNames={}
+        for name in pairs(userPresets) do userNames[#userNames+1]=name end
+        table.sort(userNames)
+        for _,n in ipairs(userNames) do list[#list+1]=n end
+        return list
+    end
+    local function applyNV()
+        if not nvActive then
+            if nvEffect then nvEffect:Destroy();nvEffect=nil end;return
+        end
+        local Lighting=game:GetService("Lighting")
+        if not nvEffect or not nvEffect.Parent then
+            nvEffect=Instance.new("ColorCorrectionEffect")
+            nvEffect.Name="ERISKOI_NV";nvEffect.Parent=Lighting
+        end
+        local cfg=NV_BUILTIN_CFG[nvMode] or userPresets[nvMode] or NV_BUILTIN_CFG["Night Vision"]
+        nvEffect.Brightness=cfg.Brightness;nvEffect.Contrast=cfg.Contrast
+        nvEffect.Saturation=cfg.Saturation;nvEffect.TintColor=cfg.TintColor
+    end
+    SharedLeft:AddToggle({Text="Night Vision",Flag="nv_enabled",Default=false,
+        Callback=function(v) nvActive=v;applyNV() end})
+    SharedLeft:AddDropdown({Text="NV Mode",Flag="nv_mode",
+        Options=getDropdownList(),Default="Night Vision",
+        Callback=function(v) nvMode=v;applyNV() end})
+    -- Preset builder on the right side of the settings page
+    local NVPresetSec=SharedPage:AddSection({Title="NV Preset Builder",Side="Right"})
+    local NVRaw=SharedPage.Groups[#SharedPage.Groups]
+    NVRaw:AddInput("nv_preset_name",{Text="Preset Name",Placeholder="Enter name...",Default=""})
+    NVRaw:AddSlider("nv_build_brightness",{Text="Brightness",Min=-1,Max=1,Default=0,Rounding=2,Suffix=""})
+    NVRaw:AddSlider("nv_build_contrast",  {Text="Contrast",  Min=-1,Max=1,Default=0,Rounding=2,Suffix=""})
+    NVRaw:AddSlider("nv_build_saturation",{Text="Saturation",Min=-1,Max=1,Default=0,Rounding=2,Suffix=""})
+    NVPresetSec:AddToggle({Text="Custom Tint",Flag="nv_build_tint_enabled",Default=false,Callback=function() end})
+    NVPresetSec:AddColorPicker({Text="Tint Color",Flag="nv_build_tint",
+        Default=Color3.fromRGB(130,255,130),Callback=function() end})
+    NVRaw:AddButton("Save Preset",function()
+        local name=Options["nv_preset_name"] and tostring(Options["nv_preset_name"].Value) or ""
+        name=name:gsub("^%s+",""):gsub("%s+$","")
+        if name=="" then Library:Notify("Enter a preset name first.");return end
+        if NV_BUILTIN_CFG[name] then Library:Notify("Cannot overwrite built-in preset.");return end
+        local tintEnabled=Options["nv_build_tint_enabled"] and Options["nv_build_tint_enabled"].Value or false
+        local tintColor=tintEnabled and Options["nv_build_tint"] and Options["nv_build_tint"].Value or Color3.fromRGB(255,255,255)
+        userPresets[name]={
+            Brightness=Options["nv_build_brightness"] and Options["nv_build_brightness"].Value or 0,
+            Contrast  =Options["nv_build_contrast"]   and Options["nv_build_contrast"].Value   or 0,
+            Saturation=Options["nv_build_saturation"] and Options["nv_build_saturation"].Value or 0,
+            TintColor =tintColor,
+        }
+        savePresetsFile()
+        Options["nv_mode"]:SetValues(getDropdownList())
+        Library:Notify("Preset '"..name.."' saved.")
+    end)
+    NVRaw:AddButton("Delete Selected",function()
+        if NV_BUILTIN_CFG[nvMode] then Library:Notify("Cannot delete a built-in preset.");return end
+        if not userPresets[nvMode] then Library:Notify("No custom preset selected.");return end
+        local deleted=nvMode
+        userPresets[nvMode]=nil
+        savePresetsFile()
+        nvMode="Night Vision"
+        Options["nv_mode"]:SetValues(getDropdownList())
+        Options["nv_mode"]:SetValue("Night Vision")
+        applyNV()
+        Library:Notify("Preset '"..deleted.."' deleted.")
+    end)
+    local prevDestroyNV=Combat.Destroy
+    Combat.Destroy=function()
+        if nvEffect then nvEffect:Destroy();nvEffect=nil end
+        prevDestroyNV()
+    end
+end
 
 addSubtabs('Visuals', visualPages)
 -- Visuals 3D Preview: Players, NPCs and Zombies.
@@ -2873,6 +3115,14 @@ do
         if not M.NoJumpDelay and now<(M.bunnyNextAttempt or 0) then return end
         if M.bunnyWaitingForAir and ctrl.VelocityGravity>0 then return end
         local jump=M.inputService and M.inputService._mounts and M.inputService._mounts.Jump
+        if type(jump)~="function" and M.inputService and M.inputService._mounts then
+            for k,v in pairs(M.inputService._mounts) do
+                if type(v)=="function" and tostring(k):lower():find("jump") then jump=v;break end
+            end
+        end
+        if type(jump)~="function" then
+            jump=M.inputService and type(M.inputService.Jump)=="function" and M.inputService.Jump or nil
+        end
         if type(jump)~="function" then return end
         local previousUp=ctrl._up
         -- Scope the cooldown override to this Bunny Hop request only.
@@ -3598,6 +3848,123 @@ do
             for k,v in pairs(values or {}) do local name=type(k)=="number" and v or (v and k);if map[name] then selected[map[name]]=true end end
             A.Targets=selected
         end})
+
+    -- ── Aura Kill V2 ──────────────────────────────────────────────────────────
+    -- Pipeline: InventoryAction "Slash" → InventoryAction "Impact"
+    -- Server-trusted hit registration — zero proximity required
+    local AK2: {[string]: any} = {
+        enabled     = false,
+        killAI      = true,
+        killZombie  = true,
+        killPlayer  = false,
+        hitPart     = "Head",
+        maxPerCycle = 12,
+        cooldown    = 0.15,
+        headYOffset = 1.5,
+        _lastFire   = {},
+        _net        = nil,
+        _netRetry   = 0,
+    }
+    Combat.AK2 = AK2
+
+    local function AK2_findNet()
+        if AK2._net then return AK2._net end
+        if os.clock() < AK2._netRetry then return nil end
+        AK2._netRetry = os.clock() + 1
+        -- Primary: getupvalues on Replicator.Update
+        local inspect = (debug and debug.getupvalues) or getupvalues
+        local svc = Combat.Service()
+        local rep = svc and svc.Replicator
+        if inspect and rep and type(rep.Update) == "function" then
+            local ok, vals = pcall(inspect, rep.Update)
+            if ok and type(vals) == "table" then
+                for _, v in pairs(vals) do
+                    if type(v) == "table" then
+                        local ok2, fs = pcall(function() return v.FireServer end)
+                        if ok2 and type(fs) == "function" then AK2._net = v; return v end
+                    end
+                end
+            end
+        end
+        -- Fallback: getgc scan matching _events table + FireServer method
+        if getgc then
+            for _, v in ipairs(getgc(true)) do
+                if type(v) == "table"
+                and type(rawget(v, "FireServer")) == "function"
+                and type(rawget(v, "_events"))    == "table" then
+                    local ev = rawget(v, "_events")
+                    if rawget(ev, "ReplicateBulkActor") ~= nil
+                    or rawget(ev, "RegisterActor")      ~= nil then
+                        AK2._net = v; return v
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    local function AK2_fire(net, ...)
+        local ok, err = pcall(net.FireServer, net, ...)
+        if not ok then AK2._net = nil end  -- invalidate stale net on error
+    end
+
+    table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
+        if not AK2.enabled then return end
+        local net = AK2_findNet()
+        if not net then return end
+        local svc = Combat.Service()
+        local registry = svc and svc.Replicator and svc.Replicator.Actors
+        if not registry then return end
+        local now = tick(); local count = 0
+        for uid, a in pairs(registry) do
+            if count >= AK2.maxPerCycle then break end
+            if not Combat.IsAlive(a) then continue end
+            local kind = Combat.Kind(a)
+            if not kind then continue end
+            local allow = false
+            if kind == "Zombies" and AK2.killZombie then allow = true end
+            if kind == "NPCs"    and AK2.killAI     then allow = true end
+            if kind == "Players" and AK2.killPlayer then allow = true end
+            if not allow then continue end
+            if (now - (AK2._lastFire[uid] or 0)) < AK2.cooldown then continue end
+            local pos = a.Position
+            if typeof(pos) ~= "Vector3" then continue end
+            AK2._lastFire[uid] = now
+            local hitPos = { pos.X, pos.Y + AK2.headYOffset, pos.Z }
+            local slashArg = math.random(1, 3)
+            AK2_fire(net, "InventoryAction", "Slash", slashArg)
+            task.delay(0, function()
+                if not AK2.enabled then return end
+                local n = AK2_findNet(); if not n then return end
+                AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK2.hitPart)
+            end)
+            count = count + 1
+        end
+    end))
+
+    local ak2l = mp:AddSection({Title="Aura Kill V2",Side="Left"})
+    ak2l:AddToggle({Text="Enable",Flag="ak2_enabled",Default=false,
+        Callback=function(v) AK2.enabled=v end})
+    ak2l:AddToggle({Text="Kill NPCs",Flag="ak2_kill_ai",Default=true,
+        Callback=function(v) AK2.killAI=v end})
+    ak2l:AddToggle({Text="Kill Zombies",Flag="ak2_kill_zombie",Default=true,
+        Callback=function(v) AK2.killZombie=v end})
+    ak2l:AddToggle({Text="Kill Players",Flag="ak2_kill_player",Default=false,
+        Callback=function(v) AK2.killPlayer=v end})
+    ak2l:AddDropdown({Text="Hit Part",Flag="ak2_hitpart",
+        Options={"Head","UpperTorso","LowerTorso","LeftUpperArm","RightUpperArm","LeftUpperLeg","RightUpperLeg"},
+        Default="Head",
+        Callback=function(v) AK2.hitPart=v end})
+    ak2l:AddSlider({Text="Max Targets/Tick",Flag="ak2_max_targets",
+        Min=1,Max=30,Default=12,Rounding=1,Suffix="",
+        Callback=function(v) AK2.maxPerCycle=math.clamp(v,1,30) end})
+    ak2l:AddSlider({Text="Hit Cooldown",Flag="ak2_cooldown",
+        Min=0.05,Max=2.0,Default=0.15,Rounding=0.05,Suffix=" s",
+        Callback=function(v) AK2.cooldown=math.clamp(v,0.05,2.0) end})
+    ak2l:AddSlider({Text="Head Y Offset",Flag="ak2_head_y_offset",
+        Min=0.5,Max=2.5,Default=1.5,Rounding=0.05,Suffix=" st",
+        Callback=function(v) AK2.headYOffset=math.clamp(v,0.5,2.5) end})
+
     local vp=VehiclePage
     local vl=vp:AddSection({Title="Driving",Side="Left"});local vr=vp:AddSection({Title="Flight",Side="Right"})
     toggle(vl,"Speed Mod",V,"Speed","vehicle_speed")
@@ -4652,6 +5019,59 @@ Combat.Destroy = function()
     destroyBeforeWorld()
 end
 
+end
+
+-- ── SPINBOT + THIRD PERSON (merged into Movement page) ───────────
+do
+    -- Spinbot — right side of the existing Movement page
+    local SpinSec=movementPages[1]:AddSection({Title="Spinbot",Side="Right"})
+    local spinEnabled,spinSpeed=false,5
+    SpinSec:AddToggle({Text="Enable Spinbot",Flag="spinbot_enabled",Default=false,
+        Callback=function(v)
+            spinEnabled=v
+            AimRunService:UnbindFromRenderStep("ERISKOI_Spinbot")
+            if spinEnabled then
+                AimRunService:BindToRenderStep("ERISKOI_Spinbot",2000,function(dt)
+                    local char=AimLocalPlayer.Character
+                    local hrp=char and char:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        hrp.CFrame=hrp.CFrame*CFrame.Angles(0,math.rad(spinSpeed*dt*60),0)
+                    end
+                end)
+            end
+        end})
+    SpinSec:AddSlider({Text="Spin Speed",Flag="spinbot_speed",Min=1,Max=20,Default=5,Rounding=1,Suffix="",
+        Callback=function(v) spinSpeed=v end})
+    SpinSec:AddToggle({Text="Spinbot Key",Flag="spinbot_key_toggle",Default=false,Callback=function() end})
+    SpinSec:AddKeyPicker({Text="Spinbot",Flag="spinbot_key",Default="None",Mode="Toggle",Callback=function() end})
+    local prevDestroySpinbot=Combat.Destroy
+    Combat.Destroy=function()
+        AimRunService:UnbindFromRenderStep("ERISKOI_Spinbot")
+        prevDestroySpinbot()
+    end
+end
+do
+    -- Third Person Unlock — right side of the existing Movement page
+    local CharSec=movementPages[1]:AddSection({Title="Character",Side="Right"})
+    local tpEnabled=false
+    CharSec:AddToggle({Text="Third Person Unlock",Flag="thirdperson_enabled",Default=false,
+        Callback=function(v)
+            tpEnabled=v
+            if v then
+                task.spawn(function()
+                    while tpEnabled do
+                        pcall(function()
+                            for _,t in ipairs(getgc(true)) do
+                                if type(t)=="table" and rawget(t,"FIRST_PERSON")~=nil then
+                                    t.FIRST_PERSON=false
+                                end
+                            end
+                        end)
+                        task.wait(0.8)
+                    end
+                end)
+            end
+        end})
 end
 
 addSubtabs('Movement', movementPages)
