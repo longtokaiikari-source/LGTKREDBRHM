@@ -3700,18 +3700,47 @@ do
             return original(ctrl,...)
         end end)
     end
-    installers.MeleeInventory=function(c)
-        A.class=c
-        -- Capture the network module from _use upvalues so RakNet mode can fire
-        -- InventoryAction directly without going through the local raycast path.
-        if type(getupvalues)=="function" then
-            for _,v in ipairs(getupvalues(c._use or function()end)) do
-                if type(v)=="table" and type(rawget(v,"FireServer"))=="function" then
-                    A.network=v;break
+    -- RakNet fire pipeline — confirmed against MeleeInventory._use source:
+    --   v_u_2 = shared.import("network")   -- a plain Lua table, NOT an Instance
+    --   v_u_2:FireServer("InventoryAction", "Slash", n)
+    --   v_u_2:FireServer("InventoryAction", "Impact", vector3toTable(pos), uid, part)
+    -- Because network is a table (not an Instance), hookmetamethod(game,"__namecall")
+    -- NEVER sees these calls — that hook only fires for real Instance method calls.
+    -- Must grab the module directly via shared.import, same entry point the game itself uses.
+    local _rakRemote=nil
+    local function _rakFindRemote()
+        if _rakRemote and type(rawget(_rakRemote,"FireServer"))=="function" then return _rakRemote end
+        if shared and type(shared.import)=="function" then
+            local ok,net=pcall(shared.import,"network")
+            if ok and type(net)=="table" and type(rawget(net,"FireServer"))=="function" then
+                _rakRemote=net;return net
+            end
+        end
+        -- Fallback: GC scan for the same table shape (works even if shared.import name changes).
+        local gok,gc=pcall(function() return type(filtergc)=="function" and filtergc("table") or getgc(true) end)
+        if gok and gc then
+            for _,v in pairs(gc) do
+                if type(v)=="table" and type(rawget(v,"FireServer"))=="function" and rawget(v,"_events") then
+                    _rakRemote=v;return v
                 end
             end
         end
+        return nil
     end
+    -- Matches MeleeInventory._use exactly (source-confirmed):
+    --   actor:Action(Inventory,"Slash",n); network:FireServer("InventoryAction","Slash",n)
+    --   task.delay(_delay, actor:Action(Inventory,"Impact",dir); network:FireServer("InventoryAction","Impact",vector3toTable(pos),uid,part))
+    -- The "second Slash" seen in traffic is the NEXT while-loop iteration, not part
+    -- of the same swing — firing it here would desync the server's swing-state machine.
+    local function _rakFire(remote,hitPos,uid,partName)
+        pcall(function()
+            remote:FireServer("InventoryAction","Slash",math.random(1,3))
+            remote:FireServer("InventoryAction","Impact",{hitPos.X,hitPos.Y,hitPos.Z},uid,partName)
+        end)
+        return true
+    end
+    task.spawn(_rakFindRemote)
+    installers.MeleeInventory=function(c) A.class=c end
     local meleeRay=RaycastParams.new()
     meleeRay.FilterType=Enum.RaycastFilterType.Exclude
     meleeRay.IgnoreWater=false
@@ -3739,9 +3768,10 @@ do
         local params=replica and replica._params or meleeRay
         local service=Combat.Service()
         local replicator=service and service.Replicator
-        local best,bestPart,nearest=nil,nil,range
+        local best,bestPart,bestUID,nearest=nil,nil,nil,range
         -- Read the actor registry directly so melee works without any firearm feature enabled.
-        for _,target in pairs(replicator and replicator.Actors or {}) do
+        -- uid is the loop KEY from Replicator.Actors — guaranteed correct GUID string.
+        for uid,target in pairs(replicator and replicator.Actors or {}) do
             if A.Allowed(target,me) then
                 local head=target.Parts and target.Parts.Head
                 if head and head.Parent then
@@ -3755,16 +3785,16 @@ do
                             local hit=workspace:Raycast(origin,delta,params)
                             visible=not hit or hit.Instance:IsDescendantOf(target.Character)
                             if not visible and type(replicator.GetFromBodyPart)=="function" then
-                                local uid=replicator:GetFromBodyPart(hit.Instance)
-                                visible=uid==target.UID
+                                local u2=replicator:GetFromBodyPart(hit.Instance)
+                                visible=u2==uid
                             end
                         end
-                        if visible then best=target;bestPart=head;nearest=distance end
+                        if visible then best=target;bestPart=head;bestUID=uid;nearest=distance end
                     end
                 end
             end
         end
-        return best,bestPart
+        return best,bestPart,bestUID
     end
     function A.PickReachDirection(self,origin,range)
         local params=RaycastParams.new();params.FilterType=Enum.RaycastFilterType.Exclude
@@ -3816,30 +3846,34 @@ do
     installers.MeleeInventoryReplicator=function(c)
         Gun.Hook(c,"Impact",function(original) return function(self,direction,...)
             if self._actor==actor() and A.auraActive then
-                -- Recheck after the swing delay: targets can move, die or become occluded.
                 local weapon=Combat.Weapon()
-                if not weapon or weapon._firearm or X.meleeWeapon~=weapon then return end
-                A.targetActor,A.target=A.SelectTarget(self._actor,weapon)
+                -- Removed X.meleeWeapon~=weapon: Combat.Weapon() returns new refs each call.
+                if not weapon or weapon._firearm then return end
+                A.targetActor,A.target,A.targetUID=A.SelectTarget(self._actor,weapon)
                 if not A.target then return end
                 if A.RakNet then
-                    -- RakNet mode: bypass local raycast entirely.
-                    -- Return target position + UID directly so MeleeInventory._use
-                    -- fires the remote event with far-target data. Slash was already
-                    -- sent by _use before this Impact call — game remote event flow intact.
+                    -- Point the ray directly at the target with full magnitude.
+                    -- original() does the Raycast — if it hits, uid comes from
+                    -- GetFromBodyPart which is the server's source of truth.
+                    -- If it misses (wall/LOS), fall back to loop-key uid.
+                    local origin=self._actor.CFrame:PointToWorldSpace(Vector3.new(0,2.5,0))
+                    local fullDir=Combat.PartPosition(A.targetActor,A.target)-origin
+                    local r=table.pack(original(self,fullDir,...))
+                    if r[1] then
+                        if A.Headshot then r[3]="Head" end
+                        A.lastImpactUID=r[2];A.lastImpactAt=os.clock()
+                        return table.unpack(r,1,r.n)
+                    end
+                    -- Raycast missed — force hit using loop-key uid
+                    local uid=A.targetUID
+                    if not uid then return end
                     local parts=A.targetActor.Parts
                     local part=(A.Headshot and parts and parts.Head)
                         or (parts and (parts.Head or parts.UpperTorso))
                     if not part or not part.Parent then return end
-                    local uid=A.targetActor.UID
-                    if not uid then
-                        local u2=self.Replicator and self.Replicator:GetFromBodyPart(part)
-                        uid=u2
-                    end
-                    if not uid then return end
-                    local hitPos=part.Position
                     local partName=A.Headshot and "Head" or part.Name
                     A.lastImpactUID=uid;A.lastImpactAt=os.clock()
-                    return hitPos,uid,partName
+                    return part.Position,uid,partName
                 end
                 local origin=self._actor.CFrame:PointToWorldSpace(Vector3.new(0,2.5,0))
                 direction=Combat.PartPosition(A.targetActor,A.target)-origin
@@ -3981,7 +4015,7 @@ do
             if A.auraActive and A.class and me and not me.Locked and not me.Sprinting then
                 if os.clock()>=A.nextTargetScan then
                     A.nextTargetScan=os.clock()+.05
-                    A.targetActor,A.target=A.SelectTarget(me,w)
+                    A.targetActor,A.target,A.targetUID=A.SelectTarget(me,w)
                 end
                 if A.targetActor and not A.Allowed(A.targetActor,me) then A.target=nil;A.targetActor=nil end
             else A.target=nil;A.targetActor=nil;A.nextTargetScan=0 end
@@ -3990,24 +4024,27 @@ do
                 A.swingPending=true
                 task.spawn(function()
                     local ok,err=pcall(function()
-                        if X.active and A.auraActive and A.target and Combat.Weapon()==w then
-                            if A.RakNet and A.network then
-                                -- RINGRING approach: construct the data and send directly to server.
-                                -- No local raycast involved. Format from traffic log:
-                                -- Slash: ("InventoryAction","Slash", animIndex)
-                                -- Impact: ("InventoryAction","Impact", {X,Y,Z}, uid, partName)
-                                local tActor=A.targetActor;local tPart=A.target
-                                if tActor and tPart and tPart.Parent and A.Allowed(tActor,me) then
-                                    local pos=tPart.Position
-                                    local uid=tActor.UID
+                        if X.active and A.auraActive and A.target and A.targetUID then
+                            if A.RakNet then
+                                -- Confirmed sequence: Slash(1) → Impact(pos,uid,part) → Slash(2).
+                                local remote=_rakFindRemote()
+                                local tActor=A.targetActor;local tPart=A.target;local tUID=A.targetUID
+                                if remote and tActor and tPart and tPart.Parent and A.Allowed(tActor,me) then
                                     local partName=A.Headshot and "Head" or tPart.Name
-                                    -- Send Slash before Impact (RINGRING: image 5)
-                                    A.network:FireServer("InventoryAction","Slash",math.random(1,3))
-                                    -- Immediately send Impact with target coords+uid+part (image 6)
-                                    A.network:FireServer("InventoryAction","Impact",{pos.X,pos.Y,pos.Z},uid,partName)
+                                    local delay=w._delay or 0.3
+                                    -- Re-read position after the real swing delay so a moving
+                                    -- target still gets an accurate hit coordinate.
+                                    task.delay(delay,function()
+                                        if X.active and A.auraActive and tPart.Parent then
+                                            _rakFire(remote,tPart.Position,tUID,partName)
+                                        end
+                                    end)
+                                elseif not remote then
+                                    X.error="RakNet: remote not found"
                                 end
                             else
-                                -- Normal aura: use _use which goes through local raycast + Impact hook
+                                -- Fallback: _use triggers Slash + Impact hook returns target data.
+                                -- Impact hook uses A.targetUID (loop key) — no UID ambiguity.
                                 A.class._use(w,true)
                             end
                         end
