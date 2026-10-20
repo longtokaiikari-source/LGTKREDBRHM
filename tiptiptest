@@ -225,10 +225,14 @@ function Combat.IsTeammate(a)
     return AimLocalPlayer.Team~=nil and not AimLocalPlayer.Neutral and not owner.Neutral and owner.Team==AimLocalPlayer.Team
 end
 function Combat.Kind(actor)
+    -- actor.UID is NOT a real property on the actor object — UID only exists as
+    -- the dictionary key in Replicator.Actors (confirmed against ActorClass.lua /
+    -- ReplicatorService.lua). The old registry[actor.UID]~=actor check always
+    -- failed (actor.UID is nil), so Kind() always returned nil — the aura could
+    -- never select a target. Classify directly off the actor's own fields instead.
+    if not actor then return nil end
     local c=Combat.Service()
-    local registry=c and c.Replicator and c.Replicator.Actors
-    if not registry or not actor or not actor.UID or registry[actor.UID]~=actor then return nil end
-    if actor.IsLocalPlayer or actor.Owner==AimLocalPlayer or actor==c.Replicator.LocalActor then return nil end
+    if actor.IsLocalPlayer or actor.Owner==AimLocalPlayer or (c and c.Replicator and actor==c.Replicator.LocalActor) then return nil end
     if actor.Zombie==true then return "Zombies" end
     if actor.Owner==nil then return "NPCs" end
     if typeof(actor.Owner)=="Instance" and actor.Owner:IsA("Player") then return "Players" end
@@ -289,7 +293,11 @@ function Combat.Sync(force)
             end
         end
     end
-    for a in pairs(Combat.samples) do if not a.UID or registry[a.UID]~=a then Combat.samples[a]=nil;Combat.parts[a]=nil end end
+    -- actor.UID is not a real property (see Combat.Kind) — check presence by
+    -- value in the registry instead of keying off a field that doesn't exist.
+    local present={}
+    for _,a in pairs(registry) do present[a]=true end
+    for a in pairs(Combat.samples) do if not present[a] then Combat.samples[a]=nil;Combat.parts[a]=nil end end
     Combat.actors=list
 end
 function Combat.PartCFrame(actor,part)
@@ -322,12 +330,17 @@ function Combat.Visible(actor,point,camera)
     -- identity mapping that the game's bullet-impact handler uses.
     local replicator=c and c.Replicator
     local registry=replicator and replicator.Actors
-    if not registry or registry[actor.UID]~=actor then return false end
-    local uid=hit.Instance:GetAttribute("ActorUID")
-    if uid==actor.UID then return true end
+    if not registry then return false end
+    -- actor.UID is not a real property — resolve the actual uid by reverse
+    -- lookup against the registry (same fix as Combat.Kind above).
+    local actorUID=nil
+    for u,a in pairs(registry) do if a==actor then actorUID=u;break end end
+    if not actorUID then return false end
+    local attrUID=hit.Instance:GetAttribute("ActorUID")
+    if attrUID==actorUID then return true end
     if type(replicator.GetFromBodyPart)=="function" then
         local ok,resolvedUID=pcall(replicator.GetFromBodyPart,replicator,hit.Instance)
-        if ok and resolvedUID==actor.UID then return true end
+        if ok and resolvedUID==actorUID then return true end
     end
     return false
 end
@@ -994,8 +1007,10 @@ addSubtabs('Ragebot', {
     { Name = 'Checks', Groups = { RageChecks } },
 })
 
-do
--- hlObjects: scope bao phủ Sense IIFE và Heartbeat connection
+-- hlObjects/hlSettings/hlZombieColors: declared OUTSIDE the do block below.
+-- The Heartbeat connection that reads them lives after that block's closing
+-- 'end' (line ~4598) — a local declared inside would be nil out there.
+-- This was the actual root cause of the 'attempt to index nil with npc' crash.
 local hlObjects = {} -- [uid string] = Highlight instance
 local hlSettings = {npc=false,players=false,zombies=false,corpses=false}
 local hlZombieColors = {
@@ -1004,6 +1019,7 @@ local hlZombieColors = {
     [3]=Color3.fromRGB(255,0,0),    -- Normal: đỏ
     [4]=Color3.fromRGB(148,0,255),  -- Sprinter: tím
 }
+do
 local Sense = (function()
     local E: {[string]: any} = {
         _hasLoaded = false, objects = {}, errors = {}, scanAt = 0,
@@ -1065,16 +1081,19 @@ local Sense = (function()
         end
         return service
     end
+    -- actor.UID was never a real property on actor objects — UID only exists as
+    -- the dictionary key in Replicator.Actors (confirmed against ActorClass.lua /
+    -- ReplicatorService.lua source). The old registry[actor.UID]==actor check
+    -- always failed, so E.IsNPC/E.IsPlayer always returned false — E.Kind always
+    -- returned nil — the entire Sense system (ESP, aimbot, triggerbot, melee aura)
+    -- never classified a single actor. Classify off the actor's own real fields.
     function E.IsNPC(actor)
-        local c = E.Service()
-        local registry = c and c.Replicator and c.Replicator.Actors
-        return type(actor)=="table" and registry and actor.UID and registry[actor.UID]==actor
-            and actor.Owner==nil and actor.IsLocalPlayer~=true
+        return type(actor)=="table" and actor.Owner==nil and actor.IsLocalPlayer~=true
+            and actor.Zombie~=true
             and typeof(actor.Character)=="Instance" and actor.Character:IsA("Model")
     end
     function E.IsPlayer(actor)
-        local c=E.Service();local registry=c and c.Replicator and c.Replicator.Actors
-        return type(actor)=="table" and registry and actor.UID and registry[actor.UID]==actor
+        return type(actor)=="table"
             and typeof(actor.Owner)=="Instance" and actor.Owner:IsA("Player")
             and actor.Owner~=AimLocalPlayer and actor.IsLocalPlayer~=true
             and typeof(actor.Character)=="Instance" and actor.Character:IsA("Model")
@@ -2312,8 +2331,14 @@ local installPreview=function(Context)
             return validModel(actor.Character) and Context.IsAlive(actor)
         end
         local registry=replicator and replicator.Actors or {}
+        -- actor.UID is not a real property — check the actor is still a live
+        -- registry value instead of keying off a field that doesn't exist.
+        local function stillRegistered(a)
+            for _,v in pairs(registry) do if v==a then return true end end
+            return false
+        end
         if not force and previous and eligible(previous.actor) and previous.actor.Character==previous.model
-            and previous.actor.UID and registry[previous.actor.UID]==previous.actor then return previous end
+            and stillRegistered(previous.actor) then return previous end
         local candidates={}
         for _,actor in pairs(registry) do
             if eligible(actor) and (not force or not previous or actor.Character~=previous.model) then
@@ -3553,7 +3578,33 @@ do
     local X: {[string]: any}={classes={},nextScan=0,saved={},active=true}
     local V: {[string]: any}={Speed=false,SpeedValue=80,Stability=false,FastStart=false,Fly=false,FlySpeed=60,Noclip=false,Bounce=false,bounceStates=setmetatable({},{__mode="k"}),keyState={}}
     local T={RPM=false,RPMValue=900,NoSpread=false,NoRecoil=false}
-    local A: {[string]: any}={Headshot=false,Reach=false,Distance=8,Aura=false,Targets={Zombies=true,NPCs=true},keyState={},nextSwing=0,nextTargetScan=0,RakNet=false,RakNetRange=80}
+    local A: {[string]: any}={Headshot=false,Reach=false,Distance=8,Aura=false,Targets={Zombies=true,NPCs=true},keyState={},nextSwing=0,nextTargetScan=0,RakNet=false,RakNetRange=80,teleportRev=0}
+    -- Independent CharacterController lookup for the teleport-decoy aura. The
+    -- Movement feature's M.currentController lives in a different do-block and
+    -- isn't visible here, so this grabs the class directly and hooks Update once
+    -- to capture the live instance, the same way Movement does internally.
+    local _ctrlClass,_liveCtrl=nil,nil
+    local function _findController()
+        if _liveCtrl then return _liveCtrl end
+        if _ctrlClass then return nil end
+        for _,module in ipairs(getloadedmodules()) do
+            if module.Name=="CharacterController" then
+                local ok,class=pcall(require,module)
+                if ok and type(class)=="table" and type(class.Update)=="function"
+                    and type(class.Teleport)=="function" then
+                    _ctrlClass=class
+                    local original=class.Update
+                    class.Update=function(ctrl,...)
+                        if ctrl._localActor then _liveCtrl=ctrl end
+                        return original(ctrl,...)
+                    end
+                end
+                break
+            end
+        end
+        return nil
+    end
+    task.spawn(_findController)
     Combat.Extensions=X;Combat.Vehicle=V;Combat.Turret=T;Combat.Melee=A
     Gun.RPM=false;Gun.RPMValue=900
     Gun.NoCameraShake=false;Gun.SightZoom=false;Gun.Zoom=2;Gun.NoEquipDelay=false;Gun.Debug=false
@@ -3700,46 +3751,12 @@ do
             return original(ctrl,...)
         end end)
     end
-    -- RakNet fire pipeline — confirmed against MeleeInventory._use source:
-    --   v_u_2 = shared.import("network")   -- a plain Lua table, NOT an Instance
-    --   v_u_2:FireServer("InventoryAction", "Slash", n)
-    --   v_u_2:FireServer("InventoryAction", "Impact", vector3toTable(pos), uid, part)
-    -- Because network is a table (not an Instance), hookmetamethod(game,"__namecall")
-    -- NEVER sees these calls — that hook only fires for real Instance method calls.
-    -- Must grab the module directly via shared.import, same entry point the game itself uses.
-    local _rakRemote=nil
-    local function _rakFindRemote()
-        if _rakRemote and type(rawget(_rakRemote,"FireServer"))=="function" then return _rakRemote end
-        if shared and type(shared.import)=="function" then
-            local ok,net=pcall(shared.import,"network")
-            if ok and type(net)=="table" and type(rawget(net,"FireServer"))=="function" then
-                _rakRemote=net;return net
-            end
-        end
-        -- Fallback: GC scan for the same table shape (works even if shared.import name changes).
-        local gok,gc=pcall(function() return type(filtergc)=="function" and filtergc("table") or getgc(true) end)
-        if gok and gc then
-            for _,v in pairs(gc) do
-                if type(v)=="table" and type(rawget(v,"FireServer"))=="function" and rawget(v,"_events") then
-                    _rakRemote=v;return v
-                end
-            end
-        end
-        return nil
-    end
-    -- Matches MeleeInventory._use exactly (source-confirmed):
-    --   actor:Action(Inventory,"Slash",n); network:FireServer("InventoryAction","Slash",n)
-    --   task.delay(_delay, actor:Action(Inventory,"Impact",dir); network:FireServer("InventoryAction","Impact",vector3toTable(pos),uid,part))
-    -- The "second Slash" seen in traffic is the NEXT while-loop iteration, not part
-    -- of the same swing — firing it here would desync the server's swing-state machine.
-    local function _rakFire(remote,hitPos,uid,partName)
-        pcall(function()
-            remote:FireServer("InventoryAction","Slash",math.random(1,3))
-            remote:FireServer("InventoryAction","Impact",{hitPos.X,hitPos.Y,hitPos.Z},uid,partName)
-        end)
-        return true
-    end
-    task.spawn(_rakFindRemote)
+    -- Decoy/teleport RakNet: the server validates real distance on Impact, so a
+    -- hand-built FireServer payload with spoofed coordinates never passes that
+    -- check (confirmed by repeated field testing). Instead the auto-swing block
+    -- below physically moves me.RootPart next to the target, fires the real
+    -- _use() swing, then restores the original CFrame. See that block for the
+    -- full sequence.
     installers.MeleeInventory=function(c) A.class=c end
     local meleeRay=RaycastParams.new()
     meleeRay.FilterType=Enum.RaycastFilterType.Exclude
@@ -4026,21 +4043,42 @@ do
                     local ok,err=pcall(function()
                         if X.active and A.auraActive and A.target and A.targetUID then
                             if A.RakNet then
-                                -- Confirmed sequence: Slash(1) → Impact(pos,uid,part) → Slash(2).
-                                local remote=_rakFindRemote()
+                                -- Decoy/teleport approach: the server validates real distance
+                                -- on Impact, so spoofed coordinates alone never pass. Instead,
+                                -- actually move the RootPart next to the target — inside real
+                                -- swing reach — fire the normal _use() swing (full validation
+                                -- chain intact), then restore the original CFrame right after.
                                 local tActor=A.targetActor;local tPart=A.target;local tUID=A.targetUID
-                                if remote and tActor and tPart and tPart.Parent and A.Allowed(tActor,me) then
-                                    local partName=A.Headshot and "Head" or tPart.Name
-                                    local delay=w._delay or 0.3
-                                    -- Re-read position after the real swing delay so a moving
-                                    -- target still gets an accurate hit coordinate.
-                                    task.delay(delay,function()
-                                        if X.active and A.auraActive and tPart.Parent then
-                                            _rakFire(remote,tPart.Position,tUID,partName)
-                                        end
-                                    end)
-                                elseif not remote then
-                                    X.error="RakNet: remote not found"
+                                local ctrl=_findController()
+                                if ctrl and tActor and tPart and tPart.Parent and A.Allowed(tActor,me) and me.RootPart then
+                                    local originalCFrame=me.RootPart.CFrame
+                                    local reach=(w._distance or 6)*0.8
+                                    local targetPos=tPart.Position
+                                    local approachDir=(originalCFrame.Position-targetPos)
+                                    if approachDir.Magnitude<0.1 then approachDir=Vector3.new(0,0,1) end
+                                    approachDir=approachDir.Unit
+                                    local closePos=targetPos+approachDir*reach
+                                    local okCF,closeCFrame=pcall(CFrame.new,closePos,targetPos)
+                                    if not okCF then closeCFrame=CFrame.new(closePos) end
+                                    -- Teleport() is the real API: updates _position, ForceNextPosition,
+                                    -- SimulatedPosition and CFrame together so ReplicateMovement sends
+                                    -- the new spot immediately instead of snapping back to the old one.
+                                    A.teleportRev=A.teleportRev+1
+                                    pcall(ctrl.Teleport,ctrl,closeCFrame,true,A.teleportRev)
+                                    task.wait()
+                                    local stillOk=X.active and A.auraActive and A.RakNet and tPart.Parent
+                                        and w.Equipped and A.Allowed(tActor,me)
+                                    if stillOk then
+                                        A.class._use(w,true)
+                                        local delay=w._delay or 0.3
+                                        task.delay(delay+0.05,function()
+                                            A.teleportRev=A.teleportRev+1
+                                            pcall(ctrl.Teleport,ctrl,originalCFrame,true,A.teleportRev)
+                                        end)
+                                    else
+                                        A.teleportRev=A.teleportRev+1
+                                        pcall(ctrl.Teleport,ctrl,originalCFrame,true,A.teleportRev)
+                                    end
                                 end
                             else
                                 -- Fallback: _use triggers Slash + Impact hook returns target data.
@@ -4599,7 +4637,9 @@ end
 table.insert(Combat.connections, AimRunService.RenderStepped:Connect(Combat.Frame))
 
 -- Highlight ESP standalone connection
--- hlObjects và hlSettings đều accessible vì cùng do block scope
+-- hlObjects/hlSettings/hlZombieColors are declared at outer scope (before the
+-- do block above), so they're visible here even though this runs after that
+-- block's 'end'.
 table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
     -- check có cái nào enabled không
     local anyOn = hlSettings.npc or hlSettings.players or hlSettings.zombies or hlSettings.corpses
