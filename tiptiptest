@@ -4209,8 +4209,9 @@ do
         return true
     end
 
-    -- RINGRING: three position methods layered together
-    local function ak3_pushPos(pos)
+    -- RINGRING: local-only hold (ForceNextPosition + SimulatePosition)
+    -- dùng trong heartbeat mọi frame — không gửi packet, không bị rate-limit
+    local function ak3_holdPos(pos)
         local rep = ak3_rep(); local a = rep and rep.LocalActor
         if not a then return end
         pcall(function() a.ForceNextPosition = pos end)
@@ -4218,6 +4219,14 @@ do
             if type(a.SimulatePosition)=="function" then a:SimulatePosition(pos)
             elseif type(rep.SimulatePosition)=="function" then rep:SimulatePosition(pos) end
         end)
+    end
+
+    -- RINGRING: full push (ForceNextPosition + SimulatePosition + FireNextPosition)
+    -- chỉ gọi đúng 1 lần tại thời điểm Slash/Impact — FireNextPosition gửi packet ngay lập tức
+    local function ak3_pushPos(pos)
+        ak3_holdPos(pos)
+        local rep = ak3_rep(); local a = rep and rep.LocalActor
+        if not a then return end
         pcall(function()
             if type(a.FireNextPosition)=="function" then a:FireNextPosition(pos)
             elseif type(rep.FireNextPosition)=="function" then rep:FireNextPosition(pos) end
@@ -4231,11 +4240,12 @@ do
         if a then pcall(function() a.ForceNextPosition = nil end) end
     end
 
-    -- Decoy heartbeat — RINGRING: SimulatePosition + FireNextPosition + ForceNextPosition
-    -- chạy mọi frame khi ak3DecoyPos được set (cả manual decoy lẫn auto-spoof từ attack)
+    -- Decoy heartbeat — chỉ ForceNextPosition + SimulatePosition (local, không gửi packet)
+    -- FireNextPosition KHÔNG gọi ở đây — gọi mỗi frame = flood server → rate-limit sau 1-2 kill
+    -- FireNextPosition chỉ gọi đúng 1 lần tại thời điểm Slash/Impact trong attack loop
     table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
         if not AK3.enabled or not ak3DecoyPos then return end
-        ak3_pushPos(ak3DecoyPos)
+        ak3_holdPos(ak3DecoyPos)  -- local only, an toàn để gọi mọi frame
     end))
 
     -- Main aura loop
