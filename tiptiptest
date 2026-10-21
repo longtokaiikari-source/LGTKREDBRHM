@@ -4239,10 +4239,9 @@ do
     end))
 
     -- Main aura loop
+    local ak3_lastClean = 0
     table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
         if not AK3.enabled then return end
-        -- RINGRING: CheckCharacterControllable guard
-        if not ak3_isControllable() then return end
         local net = AK2_findNet(); if not net then return end
         local rep = ak3_rep(); if not rep then return end
         local registry = rep.Actors; if not registry then return end
@@ -4250,6 +4249,13 @@ do
         local from = myActor and typeof(myActor.Position)=="Vector3" and myActor.Position
         if not from then return end
         local now = os.clock()
+        -- cleanup _lastFire mỗi 5 giây: xóa uid không còn trong registry
+        if now - ak3_lastClean > 5 then
+            ak3_lastClean = now
+            for uid in pairs(AK3._lastFire) do
+                if not registry[uid] then AK3._lastFire[uid] = nil end
+            end
+        end
 
         local candidates = {}
         for uid, a in pairs(registry) do
