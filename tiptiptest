@@ -4209,14 +4209,14 @@ do
         return true
     end
 
-    -- RINGRING: local-only hold (ForceNextPosition + ServerPosition + SimulatePosition)
+    -- RINGRING: local-only hold (ForceNextPosition + SimulatePosition)
     -- dùng trong heartbeat mọi frame — không gửi packet, không bị rate-limit
-    -- ServerPosition cần SET (không chỉ đọc) để server biết vị trí hiện tại của mình
+    -- KHÔNG ghi ServerPosition — đó là field server-authoritative, client ghi vào
+    -- làm actor bị flag/invalid ngay lập tức, phá luôn cả melee bình thường
     local function ak3_holdPos(pos)
         local rep = ak3_rep(); local a = rep and rep.LocalActor
         if not a then return end
         pcall(function() a.ForceNextPosition = pos end)
-        pcall(function() a.ServerPosition = pos end)   -- RINGRING: set ServerPosition
         pcall(function()
             if type(a.SimulatePosition)=="function" then a:SimulatePosition(pos)
             elseif type(rep.SimulatePosition)=="function" then rep:SimulatePosition(pos) end
@@ -4307,7 +4307,7 @@ do
             if ak3DecoyPos then
                 ak3DecoyPos = nil
                 local r = ak3_rep(); local la = r and r.LocalActor
-                if la then pcall(function() la.ForceNextPosition = nil; la.ServerPosition = nil end) end
+                if la then pcall(function() la.ForceNextPosition = nil end) end
             end
             return
         end
@@ -4339,10 +4339,7 @@ do
                     if ak3DecoyPos == decoySnap then
                         ak3DecoyPos = nil
                         local r = ak3_rep(); local la = r and r.LocalActor
-                        if la then
-                            pcall(function() la.ForceNextPosition = nil end)
-                            pcall(function() la.ServerPosition = nil end)
-                        end
+                        if la then pcall(function() la.ForceNextPosition = nil end) end
                     end
                 end)
             end)
