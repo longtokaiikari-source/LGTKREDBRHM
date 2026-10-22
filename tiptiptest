@@ -4165,9 +4165,15 @@ do
         impactDelay  = 0.28,
         decoyEnabled = true,
         decoyOffset  = 3,
+        debug        = false,
         _lastFire    = {},
     }
     Combat.AK3 = AK3
+
+    local function ak3_dbg(fmt, ...)
+        if not AK3.debug then return end
+        warn(("[AK3] "..fmt):format(...))
+    end
 
     local ak3DecoyConn = nil
     local ak3DecoyPos: Vector3? = nil
@@ -4215,12 +4221,15 @@ do
     -- làm actor bị flag/invalid ngay lập tức, phá luôn cả melee bình thường
     local function ak3_holdPos(pos)
         local rep = ak3_rep(); local a = rep and rep.LocalActor
-        if not a then return end
-        pcall(function() a.ForceNextPosition = pos end)
-        pcall(function()
+        if not a then ak3_dbg("holdPos: no LocalActor"); return end
+        local ok1, err1 = pcall(function() a.ForceNextPosition = pos end)
+        if not ok1 then ak3_dbg("ForceNextPosition failed: %s", tostring(err1)) end
+        local ok2, err2 = pcall(function()
             if type(a.SimulatePosition)=="function" then a:SimulatePosition(pos)
-            elseif type(rep.SimulatePosition)=="function" then rep:SimulatePosition(pos) end
+            elseif type(rep.SimulatePosition)=="function" then rep:SimulatePosition(pos)
+            else error("SimulatePosition not found on actor or rep") end
         end)
+        if not ok2 then ak3_dbg("SimulatePosition failed: %s", tostring(err2)) end
     end
 
     -- RINGRING: full push (ForceNextPosition + SimulatePosition + FireNextPosition)
@@ -4229,10 +4238,12 @@ do
         ak3_holdPos(pos)
         local rep = ak3_rep(); local a = rep and rep.LocalActor
         if not a then return end
-        pcall(function()
+        local ok, err = pcall(function()
             if type(a.FireNextPosition)=="function" then a:FireNextPosition(pos)
-            elseif type(rep.FireNextPosition)=="function" then rep:FireNextPosition(pos) end
+            elseif type(rep.FireNextPosition)=="function" then rep:FireNextPosition(pos)
+            else error("FireNextPosition not found on actor or rep") end
         end)
+        if not ok then ak3_dbg("FireNextPosition failed: %s", tostring(err)) end
     end
 
     local function ak3_tearDecoy()
@@ -4254,9 +4265,12 @@ do
     local ak3_lastClean = 0
     table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
         if not AK3.enabled then return end
-        local net = AK2_findNet(); if not net then return end
-        local rep = ak3_rep(); if not rep then return end
-        local registry = rep.Actors; if not registry then return end
+        local net = AK2_findNet()
+        if not net then ak3_dbg("main loop: AK2_findNet() returned nil"); return end
+        local rep = ak3_rep()
+        if not rep then ak3_dbg("main loop: Replicator not found"); return end
+        local registry = rep.Actors
+        if not registry then ak3_dbg("main loop: rep.Actors not found"); return end
 
         -- RINGRING fix: dùng HumanoidRootPart thay vì myActor.Position
         -- myActor.Position bị ảnh hưởng bởi ForceNextPosition đang được set
@@ -4269,7 +4283,7 @@ do
             local myActor = rep.LocalActor
             from = myActor and typeof(myActor.Position)=="Vector3" and myActor.Position
         end
-        if not from then return end
+        if not from then ak3_dbg("main loop: could not resolve 'from' position"); return end
 
         local now = os.clock()
         -- cleanup _lastFire mỗi 2 giây: xóa uid dead hoặc không còn trong registry
@@ -4301,6 +4315,9 @@ do
             table.insert(candidates, {uid=uid, pos=pos, dist=dist})
         end
         table.sort(candidates, function(x, y) return x.dist < y.dist end)
+        ak3_dbg("scan: registry=%d candidates=%d from=(%.1f,%.1f,%.1f)",
+            (function() local n=0; for _ in pairs(registry) do n+=1 end; return n end)(),
+            #candidates, from.X, from.Y, from.Z)
 
         -- không có target: dọn decoy cũ để khỏi spoof sai vị trí mãi
         if #candidates == 0 then
@@ -4322,6 +4339,7 @@ do
             -- RINGRING: FireNextPosition #1 — trước Slash
             ak3_pushPos(spawnPos)
 
+            ak3_dbg("fire Slash uid=%s pos=(%.1f,%.1f,%.1f) dist=%.1f", tostring(entry.uid), entry.pos.X, entry.pos.Y, entry.pos.Z, entry.dist)
             AK2_fire(net, "InventoryAction", "Slash", math.random(1, 3))
 
             local uid2    = entry.uid
@@ -4330,9 +4348,11 @@ do
 
             task.delay(AK3.impactDelay, function()
                 if not AK3.enabled then return end
-                local n2 = AK2_findNet(); if not n2 then return end
+                local n2 = AK2_findNet()
+                if not n2 then ak3_dbg("impact: AK2_findNet() returned nil"); return end
                 -- RINGRING: FireNextPosition #2 — trước Impact (screenshot: "Firmenexposition" xuất hiện 2 lần)
                 ak3_pushPos(decoySnap)
+                ak3_dbg("fire Impact uid=%s", tostring(uid2))
                 AK2_fire(n2, "InventoryAction", "Impact", hitPos, uid2, AK3.hitPart)
                 -- Xóa decoy sau 0.1s buffer
                 task.delay(0.1, function()
@@ -4399,6 +4419,8 @@ do
         AK2._net=nil; AK2._remote=nil; AK2._netRetry=0
         task.spawn(function() AK2_findNet(); AK2_getRemote() end)
     end})
+    ak3r:AddToggle({Text="Debug Log (xem Output/Console)",Flag="ak3_debug",Default=false,
+        Callback=function(v) AK3.debug=v end})
 
     local vp=VehiclePage
     local vl=vp:AddSection({Title="Driving",Side="Left"});local vr=vp:AddSection({Title="Flight",Side="Right"})
