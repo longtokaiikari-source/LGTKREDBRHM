@@ -4209,12 +4209,14 @@ do
         return true
     end
 
-    -- RINGRING: local-only hold (ForceNextPosition + SimulatePosition)
+    -- RINGRING: local-only hold (ForceNextPosition + ServerPosition + SimulatePosition)
     -- dùng trong heartbeat mọi frame — không gửi packet, không bị rate-limit
+    -- ServerPosition cần SET (không chỉ đọc) để server biết vị trí hiện tại của mình
     local function ak3_holdPos(pos)
         local rep = ak3_rep(); local a = rep and rep.LocalActor
         if not a then return end
         pcall(function() a.ForceNextPosition = pos end)
+        pcall(function() a.ServerPosition = pos end)   -- RINGRING: set ServerPosition
         pcall(function()
             if type(a.SimulatePosition)=="function" then a:SimulatePosition(pos)
             elseif type(rep.SimulatePosition)=="function" then rep:SimulatePosition(pos) end
@@ -4255,15 +4257,30 @@ do
         local net = AK2_findNet(); if not net then return end
         local rep = ak3_rep(); if not rep then return end
         local registry = rep.Actors; if not registry then return end
-        local myActor = rep.LocalActor
-        local from = myActor and typeof(myActor.Position)=="Vector3" and myActor.Position
+
+        -- RINGRING fix: dùng HumanoidRootPart thay vì myActor.Position
+        -- myActor.Position bị ảnh hưởng bởi ForceNextPosition đang được set
+        -- HumanoidRootPart là vị trí thật không bị spoof
+        local char = Players.LocalPlayer.Character
+        local hrp = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
+        local from = hrp and hrp.Position
+        if not from then
+            -- fallback: myActor nếu không có hrp
+            local myActor = rep.LocalActor
+            from = myActor and typeof(myActor.Position)=="Vector3" and myActor.Position
+        end
         if not from then return end
+
         local now = os.clock()
-        -- cleanup _lastFire mỗi 5 giây: xóa uid không còn trong registry
-        if now - ak3_lastClean > 5 then
+        -- cleanup _lastFire mỗi 2 giây: xóa uid dead hoặc không còn trong registry
+        if now - ak3_lastClean > 2 then
             ak3_lastClean = now
-            for uid in pairs(AK3._lastFire) do
-                if not registry[uid] then AK3._lastFire[uid] = nil end
+            for uid, t in pairs(AK3._lastFire) do
+                local a = registry[uid]
+                -- xóa nếu không còn trong registry, hoặc dead và cooldown đã qua
+                if not a or (not Combat.IsAlive(a) and (now-t) > AK3.cooldown) then
+                    AK3._lastFire[uid] = nil
+                end
             end
         end
 
@@ -4285,35 +4302,47 @@ do
         end
         table.sort(candidates, function(x, y) return x.dist < y.dist end)
 
+        -- không có target: dọn decoy cũ để khỏi spoof sai vị trí mãi
+        if #candidates == 0 then
+            if ak3DecoyPos then
+                ak3DecoyPos = nil
+                local r = ak3_rep(); local la = r and r.LocalActor
+                if la then pcall(function() la.ForceNextPosition = nil; la.ServerPosition = nil end) end
+            end
+            return
+        end
+
         local fired = 0
         for _, entry in ipairs(candidates) do
             if fired >= AK3.maxPerCycle then break end
             AK3._lastFire[entry.uid] = now
 
             local spawnPos = entry.pos + Vector3.new(0, 0.5, 0)
-            -- RINGRING: set decoy → heartbeat push liên tục mọi frame từ đây
             ak3DecoyPos = spawnPos
-            ak3_pushPos(spawnPos) -- immediate push ngay lập tức
+            -- RINGRING: FireNextPosition #1 — trước Slash
+            ak3_pushPos(spawnPos)
 
             AK2_fire(net, "InventoryAction", "Slash", math.random(1, 3))
 
-            local uid2  = entry.uid
-            local hitPos = {entry.pos.X, entry.pos.Y + AK3.headYOffset, entry.pos.Z}
+            local uid2    = entry.uid
+            local hitPos  = {entry.pos.X, entry.pos.Y + AK3.headYOffset, entry.pos.Z}
             local decoySnap = spawnPos
 
             task.delay(AK3.impactDelay, function()
                 if not AK3.enabled then return end
                 local n2 = AK2_findNet(); if not n2 then return end
-                -- RINGRING: ServerPosition — dùng vị trí server biết (sau khi đã push)
-                local sp = ak3_serverPos()
-                -- decoy heartbeat vẫn đang push spawnPos mọi frame
+                -- RINGRING: FireNextPosition #2 — trước Impact (screenshot: "Firmenexposition" xuất hiện 2 lần)
+                ak3_pushPos(decoySnap)
                 AK2_fire(n2, "InventoryAction", "Impact", hitPos, uid2, AK3.hitPart)
-                -- Xóa decoy sau 0.1s buffer (player tự do di chuyển lại)
+                -- Xóa decoy sau 0.1s buffer
                 task.delay(0.1, function()
                     if ak3DecoyPos == decoySnap then
                         ak3DecoyPos = nil
                         local r = ak3_rep(); local la = r and r.LocalActor
-                        if la then pcall(function() la.ForceNextPosition = nil end) end
+                        if la then
+                            pcall(function() la.ForceNextPosition = nil end)
+                            pcall(function() la.ServerPosition = nil end)
+                        end
                     end
                 end)
             end)
