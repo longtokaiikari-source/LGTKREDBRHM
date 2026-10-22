@@ -225,14 +225,10 @@ function Combat.IsTeammate(a)
     return AimLocalPlayer.Team~=nil and not AimLocalPlayer.Neutral and not owner.Neutral and owner.Team==AimLocalPlayer.Team
 end
 function Combat.Kind(actor)
-    -- actor.UID is NOT a real property on the actor object — UID only exists as
-    -- the dictionary key in Replicator.Actors (confirmed against ActorClass.lua /
-    -- ReplicatorService.lua). The old registry[actor.UID]~=actor check always
-    -- failed (actor.UID is nil), so Kind() always returned nil — the aura could
-    -- never select a target. Classify directly off the actor's own fields instead.
-    if not actor then return nil end
     local c=Combat.Service()
-    if actor.IsLocalPlayer or actor.Owner==AimLocalPlayer or (c and c.Replicator and actor==c.Replicator.LocalActor) then return nil end
+    local registry=c and c.Replicator and c.Replicator.Actors
+    if not registry or not actor or not actor.UID or registry[actor.UID]~=actor then return nil end
+    if actor.IsLocalPlayer or actor.Owner==AimLocalPlayer or actor==c.Replicator.LocalActor then return nil end
     if actor.Zombie==true then return "Zombies" end
     if actor.Owner==nil then return "NPCs" end
     if typeof(actor.Owner)=="Instance" and actor.Owner:IsA("Player") then return "Players" end
@@ -293,11 +289,7 @@ function Combat.Sync(force)
             end
         end
     end
-    -- actor.UID is not a real property (see Combat.Kind) — check presence by
-    -- value in the registry instead of keying off a field that doesn't exist.
-    local present={}
-    for _,a in pairs(registry) do present[a]=true end
-    for a in pairs(Combat.samples) do if not present[a] then Combat.samples[a]=nil;Combat.parts[a]=nil end end
+    for a in pairs(Combat.samples) do if not a.UID or registry[a.UID]~=a then Combat.samples[a]=nil;Combat.parts[a]=nil end end
     Combat.actors=list
 end
 function Combat.PartCFrame(actor,part)
@@ -330,17 +322,12 @@ function Combat.Visible(actor,point,camera)
     -- identity mapping that the game's bullet-impact handler uses.
     local replicator=c and c.Replicator
     local registry=replicator and replicator.Actors
-    if not registry then return false end
-    -- actor.UID is not a real property — resolve the actual uid by reverse
-    -- lookup against the registry (same fix as Combat.Kind above).
-    local actorUID=nil
-    for u,a in pairs(registry) do if a==actor then actorUID=u;break end end
-    if not actorUID then return false end
-    local attrUID=hit.Instance:GetAttribute("ActorUID")
-    if attrUID==actorUID then return true end
+    if not registry or registry[actor.UID]~=actor then return false end
+    local uid=hit.Instance:GetAttribute("ActorUID")
+    if uid==actor.UID then return true end
     if type(replicator.GetFromBodyPart)=="function" then
         local ok,resolvedUID=pcall(replicator.GetFromBodyPart,replicator,hit.Instance)
-        if ok and resolvedUID==actorUID then return true end
+        if ok and resolvedUID==actor.UID then return true end
     end
     return false
 end
@@ -1007,18 +994,6 @@ addSubtabs('Ragebot', {
     { Name = 'Checks', Groups = { RageChecks } },
 })
 
--- hlObjects/hlSettings/hlZombieColors: declared OUTSIDE the do block below.
--- The Heartbeat connection that reads them lives after that block's closing
--- 'end' (line ~4598) — a local declared inside would be nil out there.
--- This was the actual root cause of the 'attempt to index nil with npc' crash.
-local hlObjects = {} -- [uid string] = Highlight instance
-local hlSettings = {npc=false,players=false,zombies=false,corpses=false}
-local hlZombieColors = {
-    [1]=Color3.fromRGB(149,75,0),   -- Crippled: nâu
-    [2]=Color3.fromRGB(255,255,0),  -- Slow: vàng
-    [3]=Color3.fromRGB(255,0,0),    -- Normal: đỏ
-    [4]=Color3.fromRGB(148,0,255),  -- Sprinter: tím
-}
 do
 local Sense = (function()
     local E: {[string]: any} = {
@@ -1062,6 +1037,8 @@ local Sense = (function()
         E.chams[kind]=table.clone(E.chams.npc)
         E.advanced[kind]=table.clone(E.advanced.npc)
     end
+    -- per-ability type filter: when false, hides ALL ESP for that zombie type
+    E.teamSettings.zombies.abilityFilter={[1]=true,[2]=true,[3]=true,[4]=true}
     local service, resolveAt, connection, anchor
     local signs = {Vector3.new(-1,-1,-1),Vector3.new(-1,1,-1),Vector3.new(-1,1,1),Vector3.new(-1,-1,1),
         Vector3.new(1,-1,-1),Vector3.new(1,1,-1),Vector3.new(1,1,1),Vector3.new(1,-1,1)}
@@ -1081,19 +1058,16 @@ local Sense = (function()
         end
         return service
     end
-    -- actor.UID was never a real property on actor objects — UID only exists as
-    -- the dictionary key in Replicator.Actors (confirmed against ActorClass.lua /
-    -- ReplicatorService.lua source). The old registry[actor.UID]==actor check
-    -- always failed, so E.IsNPC/E.IsPlayer always returned false — E.Kind always
-    -- returned nil — the entire Sense system (ESP, aimbot, triggerbot, melee aura)
-    -- never classified a single actor. Classify off the actor's own real fields.
     function E.IsNPC(actor)
-        return type(actor)=="table" and actor.Owner==nil and actor.IsLocalPlayer~=true
-            and actor.Zombie~=true
+        local c = E.Service()
+        local registry = c and c.Replicator and c.Replicator.Actors
+        return type(actor)=="table" and registry and actor.UID and registry[actor.UID]==actor
+            and actor.Owner==nil and actor.IsLocalPlayer~=true
             and typeof(actor.Character)=="Instance" and actor.Character:IsA("Model")
     end
     function E.IsPlayer(actor)
-        return type(actor)=="table"
+        local c=E.Service();local registry=c and c.Replicator and c.Replicator.Actors
+        return type(actor)=="table" and registry and actor.UID and registry[actor.UID]==actor
             and typeof(actor.Owner)=="Instance" and actor.Owner:IsA("Player")
             and actor.Owner~=AimLocalPlayer and actor.IsLocalPlayer~=true
             and typeof(actor.Character)=="Instance" and actor.Character:IsA("Model")
@@ -1553,6 +1527,12 @@ local Sense = (function()
         local kind=o.preview and a.Kind or E.Kind(a)
         if o.preview then o.previewViewportSize=camera.ViewportSize end
         if not kind then return end
+        -- per-zombie-type visibility filter
+        if kind=="zombies" then
+            local ability=a.Health and type(a.Health)=="table" and a.Health.Ability
+            local filter=E.teamSettings.zombies.abilityFilter
+            if ability and filter and filter[ability]==false then return end
+        end
         local t=E.teamSettings[kind]
         local enabledChams=E.chams[kind] and E.chams[kind].enabled
         local enabledSkeleton=E.advanced[kind] and E.advanced[kind].skeleton
@@ -1643,7 +1623,11 @@ local Sense = (function()
                     label=a.DisplayName or (a.OwnerName~="???" and a.OwnerName) or (a.Zombie and "Zombie" or "NPC")
                     if not o.preview then label=tostring(label).." ["..tostring(a.UID):sub(1,6).."]" end
                 end
-                if kind=="zombies" then label="Zombie"
+                if kind=="zombies" then
+                    label=(o.model and o.model.Name or "Zombie"):gsub("^AI_",""):gsub("_+"," "):gsub("^ ",""):gsub(" $","")
+                    local _abilityTag={[1]="Crippled",[2]="Slow",[3]="Normal",[4]="Sprinter"}
+                    local _ab=a.Health and type(a.Health)=="table" and a.Health.Ability
+                    if _ab and _abilityTag[_ab] then label=label.." ["..(_abilityTag[_ab]).."]" end
                 elseif kind=="corpses" then label="Corpse: "..(a.Zombie and "Zombie" or (E.IsPlayer(a) and a.Owner.Name or "NPC")) end
                 textAt(o,"name",label,Vector2.new(cx,min.Y-shared.textSize-3),t.nameColor,t.nameOutline,override)
             end
@@ -1702,6 +1686,79 @@ Combat.Destroy = function()
     Sense.Unload()
     destroyBeforeVisuals()
 end
+-- ── HIGHLIGHT ESP INFRASTRUCTURE ─────────────────────────────────
+do
+    local hlInstances = {}
+    local hlSettings = {
+        npc     = {enabled=false,fillColor=Color3.fromRGB(255,170,0),  outlineColor=Color3.fromRGB(255,255,255),fillTransp=0.5,outlineTransp=0},
+        players = {enabled=false,fillColor=Color3.fromRGB(255,50,50),  outlineColor=Color3.fromRGB(255,255,255),fillTransp=0.5,outlineTransp=0},
+        -- zombies: single fill OR per-ability fill colors (1=Crippled 2=Slow 3=Normal 4=Sprinter)
+        zombies = {enabled=false,
+            useAbilityColors=true,
+            fillColor=Color3.fromRGB(255,50,0),
+            abilityColors={
+                [1]=Color3.fromRGB(148,74,0),
+                [2]=Color3.fromRGB(255,255,0),
+                [3]=Color3.fromRGB(255,0,0),
+                [4]=Color3.fromRGB(148,0,255),
+            },
+            abilityEnabled={[1]=true,[2]=true,[3]=true,[4]=true},
+            outlineColor=Color3.fromRGB(255,255,255),fillTransp=0.5,outlineTransp=0},
+        corpses = {enabled=false,fillColor=Color3.fromRGB(150,150,150),outlineColor=Color3.fromRGB(200,200,200),fillTransp=0.5,outlineTransp=0},
+    }
+    Sense.highlightSettings = hlSettings
+    local function destroyHL(actor)
+        if hlInstances[actor] then
+            pcall(function() hlInstances[actor]:Destroy() end)
+            hlInstances[actor]=nil
+        end
+    end
+    local function syncHL()
+        for actor,obj in pairs(Sense.objects) do
+            local kind=Sense.Kind(actor)
+            local cfg=kind and hlSettings[kind]
+            -- skip 3D-preview models (not in workspace) and team-mates
+            local inWorld=obj.model and obj.model.Parent and obj.model:IsDescendantOf(workspace)
+            local isTeammate=kind=="players" and Sense.teamSettings.players.teamCheck and Combat.IsTeammate(actor)
+            local espEnabled = Sense.teamSettings[kind] and Sense.teamSettings[kind].enabled
+            if cfg and cfg.enabled and espEnabled and inWorld and not isTeammate then
+                local hl=hlInstances[actor]
+                if not hl or not hl.Parent then
+                    hl=Instance.new("Highlight")
+                    hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop
+                    hl.Parent=obj.model
+                    hlInstances[actor]=hl
+                end
+                if kind=="zombies" then
+                    local ability=actor.Health and type(actor.Health)=="table" and actor.Health.Ability
+                    -- per-ability toggle: if this type is disabled, destroy and skip
+                    if ability and cfg.abilityEnabled and cfg.abilityEnabled[ability]==false then
+                        destroyHL(actor); continue
+                    end
+                    local fillColor=(ability and cfg.abilityColors and cfg.abilityColors[ability])
+                        or (cfg.abilityColors and cfg.abilityColors[3]) or Color3.fromRGB(255,0,0)
+                    hl.FillColor=fillColor
+                else
+                    hl.FillColor=cfg.fillColor
+                end
+                hl.OutlineColor=cfg.outlineColor
+                hl.FillTransparency=cfg.fillTransp
+                hl.OutlineTransparency=cfg.outlineTransp
+            else
+                destroyHL(actor)
+            end
+        end
+        for actor in pairs(hlInstances) do
+            if not Sense.objects[actor] then destroyHL(actor) end
+        end
+    end
+    table.insert(Combat.connections,AimRunService.Heartbeat:Connect(syncHL))
+    local prevDestroyHL=Combat.Destroy
+    Combat.Destroy=function()
+        for actor in pairs(hlInstances) do destroyHL(actor) end
+        prevDestroyHL()
+    end
+end
 -- Adapt the Tokaihub visual controls to Linoria without changing the renderer.
 local visualPages = {}
 local function visualPage(name)
@@ -1730,7 +1787,7 @@ local function visualPage(name)
         function section:AddSlider(data)
             local control = group:AddSlider(data.Flag, {
                 Text = data.Text, Default = data.Default, Min = data.Min, Max = data.Max,
-                Rounding = 0, Suffix = data.Suffix or '',
+                Rounding = data.Rounding or 0, Suffix = data.Suffix or '',
             })
             control:OnChanged(data.Callback)
             return control
@@ -1885,8 +1942,6 @@ end
 local NpcGeneral = NpcPage:AddSection({Title="General",Side="Left"})
 NpcGeneral:AddToggle({Text="ESP Enabled",Flag="npc_enabled",Default=true,
     Callback=function(v) Sense.teamSettings.npc.enabled=v end})
-NpcGeneral:AddToggle({Text="Highlight ESP",Flag="npc_highlight",Default=false,
-    Callback=function(v) hlSettings.npc=v end})
 addESPDistance(NpcGeneral,"npc")
 local function buildTeamPage(page, team)
     local t     = Sense.teamSettings[team]
@@ -2210,14 +2265,50 @@ local function buildTeamPage(page, team)
             if alpha ~= nil then chams.occludedIntensity = alpha end
         end
     })
+
+    -- ── Highlight ─────────────────────────────────────────────────
+    local hlCfg = Sense.highlightSettings and Sense.highlightSettings[team]
+    if hlCfg then
+        local HLSec = page:AddSection({Title = "Highlight", Side = "Right"})
+        HLSec:AddToggle({Text="Highlight",Flag=prefix.."hl_enabled",Default=false,
+            Callback=function(v) hlCfg.enabled=v end})
+        if team=="zombies" then
+            -- tipmobile style: each zombie type = own row [toggle] + [color], ordered Crippled/Slow/Normal/Sprinter
+            local abilityLabels={[1]="Zombie: Crippled",[2]="Zombie: Slow",[3]="Zombie: Normal",[4]="Zombie: Sprinter"}
+            for ability=1,4 do
+                local ab=ability
+                HLSec:AddToggle({Text=abilityLabels[ab],Flag=prefix.."hl_zb_en"..ab,
+                    Default=(hlCfg.abilityEnabled==nil or hlCfg.abilityEnabled[ab]~=false),
+                    Callback=function(v)
+                        if not hlCfg.abilityEnabled then hlCfg.abilityEnabled={[1]=true,[2]=true,[3]=true,[4]=true} end
+                        hlCfg.abilityEnabled[ab]=v
+                    end})
+                HLSec:AddColorPicker({Text="Color",Flag=prefix.."hl_zb"..ab,
+                    Default=hlCfg.abilityColors[ab],
+                    Callback=function(color) hlCfg.abilityColors[ab]=color end})
+            end
+        else
+            HLSec:AddColorPicker({Text="Fill Color",Flag=prefix.."hl_fill",
+                Default=hlCfg.fillColor,
+                Callback=function(color) hlCfg.fillColor=color end})
+        end
+        HLSec:AddColorPicker({Text="Outline Color",Flag=prefix.."hl_outline",
+            Default=hlCfg.outlineColor,
+            Callback=function(color) hlCfg.outlineColor=color end})
+        -- Transparency sliders: 0 = fully visible, 1 = invisible
+        HLSec:AddSlider({Text="Fill Transparency",Flag=prefix.."hl_fill_transp",
+            Min=0,Max=1,Default=hlCfg.fillTransp,Rounding=2,Suffix="",
+            Callback=function(v) hlCfg.fillTransp=v end})
+        HLSec:AddSlider({Text="Outline Transparency",Flag=prefix.."hl_outline_transp",
+            Min=0,Max=1,Default=hlCfg.outlineTransp,Rounding=2,Suffix="",
+            Callback=function(v) hlCfg.outlineTransp=v end})
+    end
 end
 
 buildTeamPage(NpcPage,"npc")
 local PlayerGeneral=PlayersPage:AddSection({Title="General",Side="Left"})
 PlayerGeneral:AddToggle({Text="ESP Enabled",Flag="players_enabled",Default=false,
     Callback=function(v) Sense.teamSettings.players.enabled=v end})
-PlayerGeneral:AddToggle({Text="Highlight ESP",Flag="players_highlight",Default=false,
-    Callback=function(v) hlSettings.players=v end})
 addESPDistance(PlayerGeneral,"players")
 PlayerGeneral:AddToggle({Text="Team Check",Flag="players_team_check",Default=false,
     Callback=function(v) Sense.teamSettings.players.teamCheck=v end})
@@ -2227,8 +2318,6 @@ for _,entry in ipairs({{ZombiePage,"zombies"},{CorpsePage,"corpses"}}) do
     local general=page:AddSection({Title="General",Side="Left"})
     general:AddToggle({Text="ESP Enabled",Flag=kind.."_enabled",Default=false,
         Callback=function(v) Sense.teamSettings[kind].enabled=v end})
-    general:AddToggle({Text="Highlight ESP",Flag=kind.."_highlight",Default=false,
-        Callback=function(v) hlSettings[kind]=v end})
     addESPDistance(general,kind)
     buildTeamPage(page,kind)
 end
@@ -2274,6 +2363,126 @@ SharedLeft:AddDropdown({
 
 SharedLeft:AddSlider({Text="Box Outline Thickness",Flag="npc_box_outline_thickness",Min=1,Max=5,Default=1,Suffix="px",
     Callback=function(v) Sense.teamSettings.npc.boxOutlineThickness=v;Sense.teamSettings.players.boxOutlineThickness=v end})
+
+-- ── NIGHT VISION / THERMAL ────────────────────────────────────────
+do
+    local nvEffect,nvActive,nvMode=nil,false,"Night Vision"
+    local NV_BUILTIN_KEYS={"Night Vision","Thermal"}
+    local NV_BUILTIN_CFG={
+        ["Night Vision"]={Brightness=0.5,Contrast=0.1,Saturation=-0.8,TintColor=Color3.fromRGB(130,255,130)},
+        ["Thermal"]     ={Brightness=0.3,Contrast=0.5,Saturation=-1,  TintColor=Color3.fromRGB(255,120,40)},
+    }
+    local NV_PRESET_FILE="Tokaihub/BRM5/nv_presets.json"
+    local userPresets={}
+    pcall(function()
+        if isfile(NV_PRESET_FILE) then
+            local ok,decoded=pcall(function()
+                return game:GetService("HttpService"):JSONDecode(readfile(NV_PRESET_FILE))
+            end)
+            if ok and type(decoded)=="table" then
+                for name,cfg in pairs(decoded) do
+                    if type(cfg)=="table" then
+                        userPresets[name]={
+                            Brightness=tonumber(cfg.Brightness) or 0,
+                            Contrast  =tonumber(cfg.Contrast)   or 0,
+                            Saturation=tonumber(cfg.Saturation) or 0,
+                            TintColor =Color3.fromRGB(
+                                tonumber(cfg.R) or 255,
+                                tonumber(cfg.G) or 255,
+                                tonumber(cfg.B) or 255),
+                        }
+                    end
+                end
+            end
+        end
+    end)
+    local function savePresetsFile()
+        pcall(function()
+            local data={}
+            for name,cfg in pairs(userPresets) do
+                data[name]={
+                    Brightness=cfg.Brightness, Contrast=cfg.Contrast, Saturation=cfg.Saturation,
+                    R=math.floor(cfg.TintColor.R*255+0.5),
+                    G=math.floor(cfg.TintColor.G*255+0.5),
+                    B=math.floor(cfg.TintColor.B*255+0.5),
+                }
+            end
+            if not isfolder("Tokaihub/BRM5") then makefolder("Tokaihub/BRM5") end
+            writefile(NV_PRESET_FILE,game:GetService("HttpService"):JSONEncode(data))
+        end)
+    end
+    local function getDropdownList()
+        local list={}
+        for _,n in ipairs(NV_BUILTIN_KEYS) do list[#list+1]=n end
+        local userNames={}
+        for name in pairs(userPresets) do userNames[#userNames+1]=name end
+        table.sort(userNames)
+        for _,n in ipairs(userNames) do list[#list+1]=n end
+        return list
+    end
+    local function applyNV()
+        if not nvActive then
+            if nvEffect then nvEffect:Destroy();nvEffect=nil end;return
+        end
+        local Lighting=game:GetService("Lighting")
+        if not nvEffect or not nvEffect.Parent then
+            nvEffect=Instance.new("ColorCorrectionEffect")
+            nvEffect.Name="ERISKOI_NV";nvEffect.Parent=Lighting
+        end
+        local cfg=NV_BUILTIN_CFG[nvMode] or userPresets[nvMode] or NV_BUILTIN_CFG["Night Vision"]
+        nvEffect.Brightness=cfg.Brightness;nvEffect.Contrast=cfg.Contrast
+        nvEffect.Saturation=cfg.Saturation;nvEffect.TintColor=cfg.TintColor
+    end
+    SharedLeft:AddToggle({Text="Night Vision",Flag="nv_enabled",Default=false,
+        Callback=function(v) nvActive=v;applyNV() end})
+    SharedLeft:AddDropdown({Text="NV Mode",Flag="nv_mode",
+        Options=getDropdownList(),Default="Night Vision",
+        Callback=function(v) nvMode=v;applyNV() end})
+    -- Preset builder on the right side of the settings page
+    local NVPresetSec=SharedPage:AddSection({Title="NV Preset Builder",Side="Right"})
+    local NVRaw=SharedPage.Groups[#SharedPage.Groups]
+    NVRaw:AddInput("nv_preset_name",{Text="Preset Name",Placeholder="Enter name...",Default=""})
+    NVRaw:AddSlider("nv_build_brightness",{Text="Brightness",Min=-1,Max=1,Default=0,Rounding=2,Suffix=""})
+    NVRaw:AddSlider("nv_build_contrast",  {Text="Contrast",  Min=-1,Max=1,Default=0,Rounding=2,Suffix=""})
+    NVRaw:AddSlider("nv_build_saturation",{Text="Saturation",Min=-1,Max=1,Default=0,Rounding=2,Suffix=""})
+    NVPresetSec:AddToggle({Text="Custom Tint",Flag="nv_build_tint_enabled",Default=false,Callback=function() end})
+    NVPresetSec:AddColorPicker({Text="Tint Color",Flag="nv_build_tint",
+        Default=Color3.fromRGB(130,255,130),Callback=function() end})
+    NVRaw:AddButton("Save Preset",function()
+        local name=Options["nv_preset_name"] and tostring(Options["nv_preset_name"].Value) or ""
+        name=name:gsub("^%s+",""):gsub("%s+$","")
+        if name=="" then Library:Notify("Enter a preset name first.");return end
+        if NV_BUILTIN_CFG[name] then Library:Notify("Cannot overwrite built-in preset.");return end
+        local tintEnabled=Options["nv_build_tint_enabled"] and Options["nv_build_tint_enabled"].Value or false
+        local tintColor=tintEnabled and Options["nv_build_tint"] and Options["nv_build_tint"].Value or Color3.fromRGB(255,255,255)
+        userPresets[name]={
+            Brightness=Options["nv_build_brightness"] and Options["nv_build_brightness"].Value or 0,
+            Contrast  =Options["nv_build_contrast"]   and Options["nv_build_contrast"].Value   or 0,
+            Saturation=Options["nv_build_saturation"] and Options["nv_build_saturation"].Value or 0,
+            TintColor =tintColor,
+        }
+        savePresetsFile()
+        Options["nv_mode"]:SetValues(getDropdownList())
+        Library:Notify("Preset '"..name.."' saved.")
+    end)
+    NVRaw:AddButton("Delete Selected",function()
+        if NV_BUILTIN_CFG[nvMode] then Library:Notify("Cannot delete a built-in preset.");return end
+        if not userPresets[nvMode] then Library:Notify("No custom preset selected.");return end
+        local deleted=nvMode
+        userPresets[nvMode]=nil
+        savePresetsFile()
+        nvMode="Night Vision"
+        Options["nv_mode"]:SetValues(getDropdownList())
+        Options["nv_mode"]:SetValue("Night Vision")
+        applyNV()
+        Library:Notify("Preset '"..deleted.."' deleted.")
+    end)
+    local prevDestroyNV=Combat.Destroy
+    Combat.Destroy=function()
+        if nvEffect then nvEffect:Destroy();nvEffect=nil end
+        prevDestroyNV()
+    end
+end
 
 addSubtabs('Visuals', visualPages)
 -- Visuals 3D Preview: Players, NPCs and Zombies.
@@ -2331,14 +2540,8 @@ local installPreview=function(Context)
             return validModel(actor.Character) and Context.IsAlive(actor)
         end
         local registry=replicator and replicator.Actors or {}
-        -- actor.UID is not a real property — check the actor is still a live
-        -- registry value instead of keying off a field that doesn't exist.
-        local function stillRegistered(a)
-            for _,v in pairs(registry) do if v==a then return true end end
-            return false
-        end
         if not force and previous and eligible(previous.actor) and previous.actor.Character==previous.model
-            and stillRegistered(previous.actor) then return previous end
+            and previous.actor.UID and registry[previous.actor.UID]==previous.actor then return previous end
         local candidates={}
         for _,actor in pairs(registry) do
             if eligible(actor) and (not force or not previous or actor.Character~=previous.model) then
@@ -2755,6 +2958,9 @@ local function legacyPage(tab, pages, name)
             })
             return Options[data.Flag]
         end
+        function section:AddButton(data)
+            return group:AddButton(data.Text or data.Name or "Button", data.Callback or function() end)
+        end
         return section
     end
     return page
@@ -2912,6 +3118,14 @@ do
         if not M.NoJumpDelay and now<(M.bunnyNextAttempt or 0) then return end
         if M.bunnyWaitingForAir and ctrl.VelocityGravity>0 then return end
         local jump=M.inputService and M.inputService._mounts and M.inputService._mounts.Jump
+        if type(jump)~="function" and M.inputService and M.inputService._mounts then
+            for k,v in pairs(M.inputService._mounts) do
+                if type(v)=="function" and tostring(k):lower():find("jump") then jump=v;break end
+            end
+        end
+        if type(jump)~="function" then
+            jump=M.inputService and type(M.inputService.Jump)=="function" and M.inputService.Jump or nil
+        end
         if type(jump)~="function" then return end
         local previousUp=ctrl._up
         -- Scope the cooldown override to this Bunny Hop request only.
@@ -3180,19 +3394,106 @@ do
     end)
 end
 
+-- ── SPINBOT ──────────────────────────────────────────────────────
+do
+    local SpinSec = movementPages[1]:AddSection({Title="Spinbot", Side="Right"})
+    local spinEnabled = false
+    local spinSpeed = 20
+    local spinHeartConn = nil
+    local spinCC = nil  -- hooked CharacterCamera ref
+
+    -- Layer 1: hook CharacterCamera.Update (same technique as reference script)
+    -- Sets actor.Orientation/GoalOrientation/CameraX so the camera tracks the spin client-side
+    local function hookCameraUpdate()
+        if spinCC then return end
+        local cc = getgenv and getgenv().CharacterCamera
+        if not cc then
+            for _, obj in pairs(getgc(true)) do
+                if type(obj)=="table" and rawget(obj,"Update") and rawget(obj,"Render") and rawget(obj,"Watch") then
+                    cc = obj; break
+                end
+            end
+        end
+        if not cc or not cc.Update or cc._spinbotOrig then return end
+        cc._spinbotOrig = cc.Update
+        cc.Update = function(self, ...)
+            local res = cc._spinbotOrig(self, ...)
+            if spinEnabled then
+                local ok, svc = pcall(Combat.Service)
+                local actor = ok and svc and svc.Replicator and svc.Replicator.LocalActor
+                if actor and actor.Alive then
+                    local yaw = (tick() * spinSpeed) % (math.pi * 2)
+                    actor.Orientation = yaw; actor.GoalOrientation = yaw; actor.CameraX = yaw
+                end
+            end
+            return res
+        end
+        spinCC = cc
+    end
+
+    local function bindSpin()
+        if spinHeartConn then spinHeartConn:Disconnect(); spinHeartConn = nil end
+        AimRunService:UnbindFromRenderStep("ERISKOI_Spinbot")
+        if not spinEnabled then return end
+        pcall(hookCameraUpdate)
+        -- Layer 2 (Heartbeat): drives actor orientation fields + actor.CFrame → replicator reads these
+        -- Layer 3 (RenderStep 2000): keeps visual root.CFrame in sync after character controller runs
+        spinHeartConn = AimRunService.Heartbeat:Connect(function()
+            local ok, svc = pcall(Combat.Service)
+            local actor = ok and svc and svc.Replicator and svc.Replicator.LocalActor
+            if not actor or not actor.Alive then return end
+            local root = actor.RootPart
+            if not root then return end
+            local yaw = (tick() * spinSpeed) % (math.pi * 2)
+            -- actor orientation fields (network replication path, same as reference script)
+            actor.Orientation = yaw; actor.GoalOrientation = yaw
+            actor.CameraX = yaw; actor.CameraY = 0
+            -- actor.CFrame rotation (BRM5 replication layer)
+            if typeof(actor.CFrame) == "CFrame" then
+                actor.CFrame = CFrame.new(actor.Position) * CFrame.Angles(0, yaw, 0)
+            end
+        end)
+        AimRunService:BindToRenderStep("ERISKOI_Spinbot", 2000, function()
+            local ok, svc = pcall(Combat.Service)
+            local actor = ok and svc and svc.Replicator and svc.Replicator.LocalActor
+            if not actor or not actor.Alive then return end
+            local root = actor.RootPart
+            if not root then return end
+            local yaw = (tick() * spinSpeed) % (math.pi * 2)
+            local vel = root.AssemblyLinearVelocity
+            root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
+            root.AssemblyLinearVelocity = vel
+        end)
+    end
+
+    SpinSec:AddToggle({Text="Enable Spinbot", Flag="spinbot_enabled", Default=false,
+        Callback=function(v) spinEnabled=v; bindSpin() end})
+    SpinSec:AddSlider({Text="Spin Speed", Flag="spinbot_speed", Min=1, Max=100, Default=20, Rounding=1, Suffix="",
+        Callback=function(v) spinSpeed=v end})
+
+    local prevDestroySpinbot = Combat.Destroy
+    Combat.Destroy = function()
+        if spinHeartConn then spinHeartConn:Disconnect(); spinHeartConn = nil end
+        AimRunService:UnbindFromRenderStep("ERISKOI_Spinbot")
+        if spinCC and spinCC._spinbotOrig then
+            spinCC.Update = spinCC._spinbotOrig; spinCC._spinbotOrig = nil
+        end
+        spinCC = nil
+        prevDestroySpinbot()
+    end
+end
 
 local GunPage = legacyPage(Tabs.Mods, modPages, 'Gun Mods')
 local TurretPage = legacyPage(Tabs.Mods, modPages, 'Turret Mods')
 local VehiclePage = legacyPage(Tabs.Mods, modPages, 'Vehicle Mods')
 local MeleePage = legacyPage(Tabs.Mods, modPages, 'Melee Mods')
+local AKPage = legacyPage(Tabs.Mods, modPages, 'Aura Kill V3')
 local GunVisualsPage = GunPage
 local Gun: {[string]: any}={NoRecoil=false,InstantADS=false,NoSway=false,NoSpread=false,SpreadReduction=100,
     UnlockModes=false,AutoReload=false,ForceHeadshot=false,active=true,originals={},hooks={},nextResolve=0,
     Visuals=false,Transparency=0,Material="Original",visualParts={},nextVisualScan=0,nextReload=0,
     WeaponColor=Color3.fromRGB(150,80,255),Tracers=false,TracerStyle="Lightning",
-    TracerColor=Color3.fromRGB(150,80,255),TracerDuration=.6,TracerWidth=.08,
-    AuraKill=false,AuraRange=200,AuraRate=8,AuraHeadshot=true,AuraTargets={Zombies=true,NPCs=true},
-    auraNextFire=0,auraKeyState={}}
+    TracerColor=Color3.fromRGB(150,80,255),TracerDuration=.6,TracerWidth=.08}
 Combat.Gun=Gun
 function Gun.RestoreTunes()
     for tune,fields in pairs(Gun.originals) do
@@ -3574,48 +3875,13 @@ GunTracerSection:AddSlider({Text="Duration",Flag="gun_tracer_duration",Min=.1,Ma
     Default=.6,Suffix=" s",Callback=function(v) Gun.TracerDuration=v end})
 GunTracerSection:AddSlider({Text="Width",Flag="gun_tracer_width",Min=.02,Max=.3,Rounding=.01,
     Default=.08,Callback=function(v) Gun.TracerWidth=v end})
-local GunAuraSection=GunPage:AddSection({Title="Aura Kill (No Fire)",Side="Right"})
-GunAuraSection:AddToggle({Text="Enabled",Flag="gun_aura_enabled",Default=false,
-    Callback=function(v) Gun.AuraKill=v end})
-Gun.auraKeyPicker=GunAuraSection:AddKeyPicker({Text="Aura Key",Flag="gun_aura_key",Default=Enum.KeyCode.None,Mode="Toggle",Callback=function() end})
-GunAuraSection:AddSlider({Text="Range",Flag="gun_aura_range",Min=10,Max=1000,Rounding=1,
-    Default=200,Suffix=" studs",Callback=function(v) Gun.AuraRange=v end})
-GunAuraSection:AddSlider({Text="Fire Rate",Flag="gun_aura_rate",Min=1,Max=20,Rounding=1,
-    Default=8,Suffix="/s",Callback=function(v) Gun.AuraRate=v end})
-GunAuraSection:AddToggle({Text="Headshot Only",Flag="gun_aura_headshot",Default=true,
-    Callback=function(v) Gun.AuraHeadshot=v end})
-GunAuraSection:AddDropdown({Text="Targets",Flag="gun_aura_targets",Options={"Zombie","NPC","Player"},Default={"Zombie","NPC"},Multi=true,
-    Callback=function(values)
-        local selected={};local map={Zombie="Zombies",NPC="NPCs",Player="Players"}
-        if type(values)=="string" then values={values} end
-        for k,v in pairs(values or {}) do local name=type(k)=="number" and v or (v and k);if map[name] then selected[map[name]]=true end end
-        Gun.AuraTargets=selected
-    end})
 
 -- BRM5 adapters verified against place version 10120.
 do
     local X: {[string]: any}={classes={},nextScan=0,saved={},active=true}
     local V: {[string]: any}={Speed=false,SpeedValue=80,Stability=false,FastStart=false,Fly=false,FlySpeed=60,Noclip=false,Bounce=false,bounceStates=setmetatable({},{__mode="k"}),keyState={}}
     local T={RPM=false,RPMValue=900,NoSpread=false,NoRecoil=false}
-    local A: {[string]: any}={Headshot=false,Reach=false,Distance=8,Aura=false,Targets={Zombies=true,NPCs=true},keyState={},nextSwing=0,nextTargetScan=0,RakNet=false,RakNetRange=80}
-    -- RakNet decoy aura — proven pattern (confirmed working reference script):
-    -- DO NOT move the actual character/RootPart. Instead set LocalActor.ForceNextPosition
-    -- every single Heartbeat tick to a "reported" position that walks toward the target.
-    -- The server's ReplicateMovement reads ForceNextPosition-or-SimulatedPosition each
-    -- tick (see ReplicatorService.lua), so the server believes the actor is near the
-    -- target while the real character model on screen never moves — no snap-back, no
-    -- animation conflict, no "frozen" symptom. A.reportedPos is the illusion position;
-    -- Impact's hit coordinate is computed FROM that reported position, not the real one.
-    A.reportedPos=nil
-    A.log={};A.swings=0;A.impacts=0;A.status=""
-    local function auraEvent(text)
-        local line=("[%s] %s"):format(os.date("%H:%M:%S"),text)
-        A.log[#A.log+1]=line
-        if #A.log>40 then table.remove(A.log,1) end
-    end
-    local function auraStatus(text)
-        if A.status~=text then A.status=text;auraEvent("AURA "..text) end
-    end
+    local A: {[string]: any}={Headshot=false,Reach=false,Distance=8,Aura=false,Targets={Zombies=true,NPCs=true},keyState={},nextSwing=0,nextTargetScan=0}
     Combat.Extensions=X;Combat.Vehicle=V;Combat.Turret=T;Combat.Melee=A
     Gun.RPM=false;Gun.RPMValue=900
     Gun.NoCameraShake=false;Gun.SightZoom=false;Gun.Zoom=2;Gun.NoEquipDelay=false;Gun.Debug=false
@@ -3674,8 +3940,480 @@ do
             for k,v in pairs(values or {}) do local name=type(k)=="number" and v or (v and k);if map[name] then selected[map[name]]=true end end
             A.Targets=selected
         end})
-    toggle(mr,"RakNet Desync",A,"RakNet","melee_raknet_enabled")
-    slider(mr,"RakNet Range",A,"RakNetRange","melee_raknet_range",5,500,80,1," studs")
+
+    -- ── Aura Kill V2 ──────────────────────────────────────────────────────────
+    -- Pipeline: InventoryAction "Slash" → InventoryAction "Impact"
+    -- Timing + reach matched to MTC game_tree dump (MeleeInventory.lua / Melee.lua) —
+    -- server most likely gates Impact on realistic melee distance + Slash→Impact delay.
+    local AK2: {[string]: any} = {
+        enabled     = false,
+        killAI      = true,
+        killZombie  = true,
+        killPlayer  = false,
+        hitPart     = "Head",
+        maxPerCycle = 12,
+        cooldown    = 0.15,
+        headYOffset = 1.5,
+        range       = 8,        -- MTC Melee.lua: max real Reach = 7 (Tomahawk). Server likely
+                                 -- validates Impact distance against this — stay close to it.
+        impactDelay = 0.3,      -- MTC Melee.lua: real Slash→Impact gap is 0.25-0.3s (MeleeInventory._use).
+                                 -- Firing both same-frame (old behavior) looks server-impossible.
+        _lastFire   = {},
+        _net        = nil,
+        _remote     = nil,
+        _netRetry   = 0,
+    }
+    Combat.AK2 = AK2
+
+    local function AK2_findNet()
+        if AK2._net then return AK2._net end
+        if os.clock() < AK2._netRetry then return nil end
+        AK2._netRetry = os.clock() + 1
+        -- Method 0: shared.import("network") — cleanest, verified via oldvis RSpy dump
+        if shared and type(shared.import) == "function" then
+            local ok, net = pcall(function() return shared.import("network") end)
+            if ok and net and rawget(net, "_key") and rawget(net, "_code") then
+                AK2._net = net; return net
+            end
+        end
+        -- Method 1: getupvalues on Replicator.Update
+        local inspect = (debug and debug.getupvalues) or getupvalues
+        local svc = Combat.Service()
+        local rep = svc and svc.Replicator
+        if inspect and rep and type(rep.Update) == "function" then
+            local ok, vals = pcall(inspect, rep.Update)
+            if ok and type(vals) == "table" then
+                for _, v in pairs(vals) do
+                    if type(v) == "table" then
+                        local ok2, fs = pcall(function() return v.FireServer end)
+                        if ok2 and type(fs) == "function" then AK2._net = v; return v end
+                    end
+                end
+            end
+        end
+        -- Method 2: GC scan — cipher net (_code+_key+_events) OR direct net (FireServer+_events)
+        local gok, gc = pcall(function() return filtergc("table") end)
+        if not gok then gok, gc = pcall(function() return getgc(true) end) end
+        if gok and gc then
+            for _, v in ipairs(gc) do
+                if type(v) ~= "table" then continue end
+                local k  = rawget(v, "_key")
+                local co = rawget(v, "_code")
+                local ev = rawget(v, "_events")
+                -- Cipher net pattern: _code (UUID) + _key (5 nums) + _events
+                if type(k)=="table" and #k>=5
+                    and type(co)=="string" and co:match("^%x+%-%x+%-%x+%-%x+%-%x+$")
+                    and type(ev)=="table" then
+                    local allNums = true
+                    for _, n in ipairs(k) do if type(n)~="number" then allNums=false; break end end
+                    if allNums then AK2._net = v; return v end
+                end
+                -- Direct net pattern: FireServer method + known event keys
+                if type(rawget(v, "FireServer"))=="function" and type(ev)=="table" then
+                    if rawget(ev, "ReplicateBulkActor") ~= nil or rawget(ev, "RegisterActor") ~= nil then
+                        AK2._net = v; return v
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    -- RemoteEvent via ReplicatedStorage.Events — fallback for cipher path (oldvis verified)
+    local function AK2_getRemote()
+        if AK2._remote and AK2._remote.Parent then return AK2._remote end
+        local ev = game:GetService("ReplicatedStorage"):FindFirstChild("Events")
+        if ev then
+            local re = ev:FindFirstChild("RemoteEvent")
+            if re then AK2._remote = re; return re end
+        end
+        for _, v in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
+            if v:IsA("RemoteEvent") then AK2._remote = v; return v end
+        end
+        return nil
+    end
+
+    -- XOR-rotation cipher — exact match from Flux_client.lua, verified vs RSpy dump (oldvis)
+    local function AK2_netEncode(jsonStr, key)
+        local result = ""
+        for i = 1, #jsonStr do
+            local ki   = i % 4
+            local kval = key[ki + 1]
+            local nb   = (string.byte(jsonStr, i) - 32 + kval) % 95 + 32
+            result = result .. string.char(nb)
+        end
+        local firstByte = string.byte(jsonStr, 1)
+        for v24 = 1, key[5] do
+            local v27 = firstByte - string.byte(tostring(v24), 1)
+            result = result .. string.char(v27)
+        end
+        return result
+    end
+
+    local function AK2_fire(net, ...)
+        -- Cipher path: net has _code + _key — fire encoded payload via RemoteEvent:FireServer
+        local code = rawget(net, "_code")
+        local key  = rawget(net, "_key")
+        if type(code)=="string" and type(key)=="table" and #key>=5 then
+            local remote = AK2_getRemote()
+            if remote then
+                local hs = game:GetService("HttpService")
+                local args = {...}
+                local payload = {code}
+                for _, a in ipairs(args) do payload[#payload+1] = a end
+                local ok2, raw = pcall(function() return hs:JSONEncode(payload) end)
+                if ok2 and raw then
+                    local enc = AK2_netEncode(raw, key)
+                    pcall(function() remote:FireServer(enc) end)
+                    return
+                end
+            end
+        end
+        -- Direct path: net.FireServer handles encoding internally
+        local ok = pcall(net.FireServer, net, ...)
+        if not ok then AK2._net = nil end
+    end
+
+    table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
+        if not AK2.enabled then return end
+        local net = AK2_findNet()
+        if not net then return end
+        local svc = Combat.Service()
+        local registry = svc and svc.Replicator and svc.Replicator.Actors
+        if not registry then return end
+        local now = tick(); local count = 0
+        local myActor = svc and svc.Replicator and svc.Replicator.LocalActor
+        local myPos = myActor and typeof(myActor.Position)=="Vector3" and myActor.Position
+        for uid, a in pairs(registry) do
+            if count >= AK2.maxPerCycle then break end
+            if not Combat.IsAlive(a) then continue end
+            local kind = Combat.Kind(a)
+            if not kind then continue end
+            local allow = false
+            if kind == "Zombies" and AK2.killZombie then allow = true end
+            if kind == "NPCs"    and AK2.killAI     then allow = true end
+            if kind == "Players" and AK2.killPlayer then allow = true end
+            if not allow then continue end
+            if (now - (AK2._lastFire[uid] or 0)) < AK2.cooldown then continue end
+            local pos = a.Position
+            if typeof(pos) ~= "Vector3" then continue end
+            if myPos and (pos - myPos).Magnitude > AK2.range then continue end
+            AK2._lastFire[uid] = now
+            local hitPos = { pos.X, pos.Y + AK2.headYOffset, pos.Z }
+            local slashArg = math.random(1, 3)
+            AK2_fire(net, "InventoryAction", "Slash", slashArg)
+            -- MTC MeleeInventory._use: real client waits `_delay` (0.25-0.3s) after Slash
+            -- before raycasting + firing Impact. Matching that timing, not same-frame.
+            task.delay(AK2.impactDelay, function()
+                if not AK2.enabled then return end
+                local n = AK2_findNet(); if not n then return end
+                AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK2.hitPart)
+            end)
+            count = count + 1
+        end
+    end))
+
+    local ak2l = mp:AddSection({Title="Aura Kill V2",Side="Left"})
+    ak2l:AddToggle({Text="Enable",Flag="ak2_enabled",Default=false,
+        Callback=function(v) AK2.enabled=v end})
+    ak2l:AddToggle({Text="Kill NPCs",Flag="ak2_kill_ai",Default=true,
+        Callback=function(v) AK2.killAI=v end})
+    ak2l:AddToggle({Text="Kill Zombies",Flag="ak2_kill_zombie",Default=true,
+        Callback=function(v) AK2.killZombie=v end})
+    ak2l:AddToggle({Text="Kill Players",Flag="ak2_kill_player",Default=false,
+        Callback=function(v) AK2.killPlayer=v end})
+    ak2l:AddDropdown({Text="Hit Part",Flag="ak2_hitpart",
+        Options={"Head","UpperTorso","LowerTorso","LeftUpperArm","RightUpperArm","LeftUpperLeg","RightUpperLeg"},
+        Default="Head",
+        Callback=function(v) AK2.hitPart=v end})
+    ak2l:AddSlider({Text="Max Targets/Tick",Flag="ak2_max_targets",
+        Min=1,Max=30,Default=12,Rounding=1,Suffix="",
+        Callback=function(v) AK2.maxPerCycle=math.clamp(v,1,30) end})
+    ak2l:AddSlider({Text="Hit Cooldown",Flag="ak2_cooldown",
+        Min=0.05,Max=2.0,Default=0.15,Rounding=0.05,Suffix=" s",
+        Callback=function(v) AK2.cooldown=math.clamp(v,0.05,2.0) end})
+    ak2l:AddSlider({Text="Head Y Offset",Flag="ak2_head_y_offset",
+        Min=0.5,Max=2.5,Default=1.5,Rounding=0.05,Suffix=" st",
+        Callback=function(v) AK2.headYOffset=math.clamp(v,0.5,2.5) end})
+    ak2l:AddSlider({Text="Range",Flag="ak2_range",
+        Min=5,Max=30,Default=8,Rounding=1,Suffix=" st",
+        Callback=function(v) AK2.range=math.clamp(v,5,30) end})
+    ak2l:AddSlider({Text="Impact Delay",Flag="ak2_impact_delay",
+        Min=0,Max=1,Default=0.3,Rounding=0.05,Suffix=" s",
+        Callback=function(v) AK2.impactDelay=math.clamp(v,0,1) end})
+    ak2l:AddButton({Text="Rescan Net",Callback=function()
+        AK2._net=nil; AK2._remote=nil; AK2._netRetry=0
+        task.spawn(function() AK2_findNet(); AK2_getRemote() end)
+    end})
+
+    -- ── Aura Kill V3 ──────────────────────────────────────────────────────────
+    -- Position layer (đã xác nhận đúng với MTC game_tree dump):
+    -- ForceNextPosition + SimulatedPosition là property, tự replicate qua ReplicatorService:Update()
+    -- Per-UID cooldown, multi-target sorted by distance.
+    -- Reuses AK2_findNet / AK2_fire already defined above.
+    local AK3: {[string]: any} = {
+        enabled      = false,
+        killAI       = true,
+        killZombie   = true,
+        killPlayer   = false,
+        hitPart      = "Head",
+        headYOffset  = 1.5,
+        maxPerCycle  = 4,
+        cooldown     = 0.55,
+        range        = 10000,
+        rangeMargin  = 0.3,
+        impactDelay  = 0.28,
+        decoyEnabled = true,
+        decoyOffset  = 3,
+        debug        = false,
+        _lastFire    = {},
+    }
+    Combat.AK3 = AK3
+
+    local function ak3_dbg(fmt, ...)
+        if not AK3.debug then return end
+        warn(("[AK3] "..fmt):format(...))
+    end
+
+    local ak3DecoyConn = nil
+    local ak3DecoyPos: Vector3? = nil
+
+    local function ak3_rep()
+        local svc = Combat.Service()
+        return svc and svc.Replicator
+    end
+
+    local function ak3_reportedPos()
+        if ak3DecoyPos and AK3.decoyEnabled then return ak3DecoyPos end
+        local rep = ak3_rep(); local a = rep and rep.LocalActor
+        if a then
+            local ok, pos = pcall(function() return a.Position end)
+            if ok and typeof(pos) == "Vector3" then return pos end
+        end
+        local char = Players.LocalPlayer.Character
+        local root = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
+        if root then return root.Position end
+        return nil
+    end
+
+    local function ak3_serverPos()
+        local rep = ak3_rep(); local a = rep and rep.LocalActor
+        if not a then return nil end
+        local ok, sp = pcall(function() return a.ServerPosition end)
+        if ok and typeof(sp) == "Vector3" then return sp end
+        return nil
+    end
+
+    -- RINGRING: CheckCharacterControllable — guard before each fire tick
+    local function ak3_isControllable()
+        local rep = ak3_rep(); if not rep then return true end
+        local a = rep.LocalActor; if not a then return false end
+        local ok, v = pcall(function() return a:CheckCharacterControllable() end)
+        if ok then return v ~= false end
+        local ok2, v2 = pcall(function() return a.CharacterControllable end)
+        if ok2 and v2 ~= nil then return v2 ~= false end
+        return true
+    end
+
+    -- ĐỌC TỪ MTC game_tree DUMP THẬT (ReplicatorService.lua / CharacterController.lua / ActorClass.lua):
+    -- ForceNextPosition và SimulatedPosition (có "d") là PROPERTY, KHÔNG phải method.
+    -- Không hề có hàm "SimulatePosition()" hay "FireNextPosition()" nào tồn tại trong game —
+    -- gọi chúng như method chính là nguyên nhân lỗi "attempt to index nil".
+    -- ReplicatorService:Update() (chạy mỗi frame qua ClientHandler PreRender) tự đọc
+    -- v136.ForceNextPosition or v136.SimulatedPosition, tự FireUnreliableServer("ReplicateMovement",...),
+    -- rồi tự xóa ForceNextPosition — ta chỉ cần SET property, engine tự lo phần gửi.
+    -- ServerPosition là field SERVER ghi vào actor để báo vị trí của actor cho người khác biết —
+    -- không phải thứ client nên ghi để spoof, ghi vào đó không ảnh hưởng tới hit validation.
+    local function ak3_holdPos(pos)
+        local rep = ak3_rep(); local a = rep and rep.LocalActor
+        if not a then ak3_dbg("holdPos: no LocalActor"); return end
+        local ok1, err1 = pcall(function() a.ForceNextPosition = pos end)
+        if not ok1 then ak3_dbg("ForceNextPosition failed: %s", tostring(err1)) end
+        local ok2, err2 = pcall(function() a.SimulatedPosition = pos end)
+        if not ok2 then ak3_dbg("SimulatedPosition failed: %s", tostring(err2)) end
+    end
+
+    -- Không còn "push" riêng — ForceNextPosition/SimulatedPosition tự được
+    -- ReplicatorService:Update() gửi lên server mỗi frame, throttle 0.1s (xem _lastReplicate).
+    local function ak3_pushPos(pos)
+        ak3_holdPos(pos)
+    end
+
+    local function ak3_tearDecoy()
+        if ak3DecoyConn then ak3DecoyConn:Disconnect(); ak3DecoyConn = nil end
+        ak3DecoyPos = nil
+        local rep = ak3_rep(); local a = rep and rep.LocalActor
+        if a then pcall(function() a.ForceNextPosition = nil end) end
+    end
+
+    -- Decoy heartbeat — set ForceNextPosition + SimulatedPosition mỗi frame
+    -- ReplicatorService:Update() của game tự đọc và gửi ReplicateMovement lên server (throttle 0.1s)
+    table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
+        if not AK3.enabled or not ak3DecoyPos then return end
+        ak3_holdPos(ak3DecoyPos)  -- local only, an toàn để gọi mọi frame
+    end))
+
+    -- Main aura loop
+    local ak3_lastClean = 0
+    table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
+        if not AK3.enabled then return end
+        local net = AK2_findNet()
+        if not net then ak3_dbg("main loop: AK2_findNet() returned nil"); return end
+        local rep = ak3_rep()
+        if not rep then ak3_dbg("main loop: Replicator not found"); return end
+        local registry = rep.Actors
+        if not registry then ak3_dbg("main loop: rep.Actors not found"); return end
+
+        -- RINGRING fix: dùng HumanoidRootPart thay vì myActor.Position
+        -- myActor.Position bị ảnh hưởng bởi ForceNextPosition đang được set
+        -- HumanoidRootPart là vị trí thật không bị spoof
+        local char = Players.LocalPlayer.Character
+        local hrp = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
+        local from = hrp and hrp.Position
+        if not from then
+            -- fallback: myActor nếu không có hrp
+            local myActor = rep.LocalActor
+            from = myActor and typeof(myActor.Position)=="Vector3" and myActor.Position
+        end
+        if not from then ak3_dbg("main loop: could not resolve 'from' position"); return end
+
+        local now = os.clock()
+        -- cleanup _lastFire mỗi 2 giây: xóa uid dead hoặc không còn trong registry
+        if now - ak3_lastClean > 2 then
+            ak3_lastClean = now
+            for uid, t in pairs(AK3._lastFire) do
+                local a = registry[uid]
+                -- xóa nếu không còn trong registry, hoặc dead và cooldown đã qua
+                if not a or (not Combat.IsAlive(a) and (now-t) > AK3.cooldown) then
+                    AK3._lastFire[uid] = nil
+                end
+            end
+        end
+
+        local candidates = {}
+        for uid, a in pairs(registry) do
+            if not Combat.IsAlive(a) then continue end
+            local kind = Combat.Kind(a); if not kind then continue end
+            local allow = false
+            if kind=="Zombies" and AK3.killZombie then allow=true end
+            if kind=="NPCs"    and AK3.killAI     then allow=true end
+            if kind=="Players" and AK3.killPlayer then allow=true end
+            if not allow then continue end
+            if (now-(AK3._lastFire[uid] or 0)) < AK3.cooldown then continue end
+            local pos = a.Position
+            if typeof(pos) ~= "Vector3" then continue end
+            local dist = (pos - from).Magnitude
+            if dist > AK3.range then continue end
+            table.insert(candidates, {uid=uid, pos=pos, dist=dist})
+        end
+        table.sort(candidates, function(x, y) return x.dist < y.dist end)
+        ak3_dbg("scan: registry=%d candidates=%d from=(%.1f,%.1f,%.1f)",
+            (function() local n=0; for _ in pairs(registry) do n+=1 end; return n end)(),
+            #candidates, from.X, from.Y, from.Z)
+
+        -- không có target: dọn decoy cũ để khỏi spoof sai vị trí mãi
+        if #candidates == 0 then
+            if ak3DecoyPos then
+                ak3DecoyPos = nil
+                local r = ak3_rep(); local la = r and r.LocalActor
+                if la then pcall(function() la.ForceNextPosition = nil end) end
+            end
+            return
+        end
+
+        local fired = 0
+        for _, entry in ipairs(candidates) do
+            if fired >= AK3.maxPerCycle then break end
+            AK3._lastFire[entry.uid] = now
+
+            local spawnPos = entry.pos + Vector3.new(0, 0.5, 0)
+            ak3DecoyPos = spawnPos
+            -- set vị trí giả trước Slash — engine tự replicate lên server
+            ak3_pushPos(spawnPos)
+
+            ak3_dbg("fire Slash uid=%s pos=(%.1f,%.1f,%.1f) dist=%.1f", tostring(entry.uid), entry.pos.X, entry.pos.Y, entry.pos.Z, entry.dist)
+            AK2_fire(net, "InventoryAction", "Slash", math.random(1, 3))
+
+            local uid2    = entry.uid
+            local hitPos  = {entry.pos.X, entry.pos.Y + AK3.headYOffset, entry.pos.Z}
+            local decoySnap = spawnPos
+
+            task.delay(AK3.impactDelay, function()
+                if not AK3.enabled then return end
+                local n2 = AK2_findNet()
+                if not n2 then ak3_dbg("impact: AK2_findNet() returned nil"); return end
+                -- set lại lần nữa trước Impact — phòng trường hợp decoy heartbeat bị trễ frame
+                ak3_pushPos(decoySnap)
+                ak3_dbg("fire Impact uid=%s", tostring(uid2))
+                AK2_fire(n2, "InventoryAction", "Impact", hitPos, uid2, AK3.hitPart)
+                -- Xóa decoy sau 0.1s buffer
+                task.delay(0.1, function()
+                    if ak3DecoyPos == decoySnap then
+                        ak3DecoyPos = nil
+                        local r = ak3_rep(); local la = r and r.LocalActor
+                        if la then pcall(function() la.ForceNextPosition = nil end) end
+                    end
+                end)
+            end)
+            fired += 1
+        end
+    end))
+
+    -- AK3 lives on its own subtab: Mods → "Aura Kill V3"
+    local ak3l = AKPage:AddSection({Title="Aura Kill V3",Side="Left"})
+    local ak3r = AKPage:AddSection({Title="Decoy & Net",Side="Right"})
+
+    ak3l:AddToggle({Text="Enable",Flag="ak3_enabled",Default=false,
+        Callback=function(v) AK3.enabled=v end})
+    ak3l:AddToggle({Text="Kill NPCs",Flag="ak3_kill_ai",Default=true,
+        Callback=function(v) AK3.killAI=v end})
+    ak3l:AddToggle({Text="Kill Zombies",Flag="ak3_kill_zombie",Default=true,
+        Callback=function(v) AK3.killZombie=v end})
+    ak3l:AddToggle({Text="Kill Players",Flag="ak3_kill_player",Default=false,
+        Callback=function(v) AK3.killPlayer=v end})
+    ak3l:AddDropdown({Text="Hit Part",Flag="ak3_hitpart",
+        Options={"Head","UpperTorso","LowerTorso","LeftUpperArm","RightUpperArm","LeftUpperLeg","RightUpperLeg"},
+        Default="Head",
+        Callback=function(v) AK3.hitPart=v end})
+    ak3l:AddSlider({Text="Max Targets/Tick",Flag="ak3_max_targets",
+        Min=1,Max=20,Default=4,Rounding=1,Suffix="",
+        Callback=function(v) AK3.maxPerCycle=math.clamp(v,1,20) end})
+    ak3l:AddSlider({Text="Hit Cooldown",Flag="ak3_cooldown",
+        Min=0.05,Max=2.0,Default=0.55,Rounding=0.05,Suffix=" s",
+        Callback=function(v) AK3.cooldown=math.clamp(v,0.05,2.0) end})
+    ak3l:AddSlider({Text="Range",Flag="ak3_range",
+        Min=3,Max=10000,Default=10000,Rounding=100,Suffix=" st",
+        Callback=function(v) AK3.range=math.clamp(v,3,10000) end})
+    ak3l:AddSlider({Text="Impact Delay",Flag="ak3_impact_delay",
+        Min=0,Max=1,Default=0.28,Rounding=0.02,Suffix=" s",
+        Callback=function(v) AK3.impactDelay=math.clamp(v,0,1) end})
+
+    ak3r:AddToggle({Text="Decoy Position",Flag="ak3_decoy",Default=true,
+        Callback=function(v) AK3.decoyEnabled=v; if not v then ak3_tearDecoy() end end})
+    ak3r:AddSlider({Text="Decoy Offset",Flag="ak3_decoy_offset",
+        Min=0,Max=10,Default=3,Rounding=0.5,Suffix=" st",
+        Callback=function(v) AK3.decoyOffset=math.clamp(v,0,10) end})
+    ak3r:AddButton({Text="Drop Decoy (Crosshair)",Callback=function()
+        if not AK3.decoyEnabled then return end
+        local cam = workspace.CurrentCamera
+        local vp = cam.ViewportSize
+        local ray = cam:ViewportPointToRay(vp.X/2, vp.Y/2)
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        local ign = {cam}
+        if Players.LocalPlayer.Character then table.insert(ign, Players.LocalPlayer.Character) end
+        params.FilterDescendantsInstances = ign
+        local r = workspace:Raycast(ray.Origin, ray.Direction*300, params)
+        if r then ak3DecoyPos = r.Position + Vector3.new(0, AK3.decoyOffset, 0) end
+    end})
+    ak3r:AddButton({Text="Recall Decoy",Callback=function() ak3_tearDecoy() end})
+    ak3r:AddButton({Text="Rescan Net",Callback=function()
+        AK2._net=nil; AK2._remote=nil; AK2._netRetry=0
+        task.spawn(function() AK2_findNet(); AK2_getRemote() end)
+    end})
+    ak3r:AddToggle({Text="Debug Log (xem Output/Console)",Flag="ak3_debug",Default=false,
+        Callback=function(v) AK3.debug=v end})
+
     local vp=VehiclePage
     local vl=vp:AddSection({Title="Driving",Side="Left"});local vr=vp:AddSection({Title="Flight",Side="Right"})
     toggle(vl,"Speed Mod",V,"Speed","vehicle_speed")
@@ -3687,6 +4425,176 @@ do
     V.key=vr:AddKeyPicker({Text="Vehicle Fly Key",Flag="vehicle_fly_key",Default="None",Mode="Toggle",Callback=function() end})
     slider(vr,"Fly Speed",V,"FlySpeed","vehicle_fly_speed",1,2000,60,1," studs/s")
     toggle(vr,"Vehicle Noclip",V,"Noclip","vehicle_noclip")
+
+    -- ── Vehicle Teleporter ─────────────────────────────────────────────────────
+    local VTEL_PATH = "Tokaihub/BRM5/veh_coords.json"
+    local vtel_coords = {}
+
+    local function vtel_load()
+        pcall(function()
+            if isfile and isfile(VTEL_PATH) then
+                local ok2, decoded = pcall(function()
+                    return game:GetService("HttpService"):JSONDecode(readfile(VTEL_PATH))
+                end)
+                if ok2 and type(decoded) == "table" then vtel_coords = decoded end
+            end
+        end)
+    end
+
+    local function vtel_save()
+        pcall(function()
+            if not isfolder("Tokaihub") then makefolder("Tokaihub") end
+            if not isfolder("Tokaihub/BRM5") then makefolder("Tokaihub/BRM5") end
+            writefile(VTEL_PATH, game:GetService("HttpService"):JSONEncode(vtel_coords))
+        end)
+    end
+
+    local function vtel_names()
+        local names = {}
+        for k in pairs(vtel_coords) do names[#names+1] = k end
+        table.sort(names)
+        return names
+    end
+
+    local function GetActiveVehicleController()
+        local s = V.activeSolver
+        if s and s._vehicle and s._vehicle.Controlling then return s end
+        return nil
+    end
+
+    local function GetNetwork()
+        if V._vtel_net then return V._vtel_net end
+        local inspect = (debug and debug.getupvalues) or getupvalues
+        if not inspect then return nil end
+        local service = Combat.Service()
+        local replicator = service and service.Replicator
+        if replicator and type(replicator.Update) == "function" then
+            local ok, values = pcall(inspect, replicator.Update)
+            if ok then
+                for _, value in pairs(values) do
+                    if type(value) == "table" then
+                        local ok2, fs = pcall(function() return value.FireServer end)
+                        if ok2 and type(fs) == "function" then V._vtel_net = value; return value end
+                    end
+                end
+            end
+        end
+        local vs = X.classes.VehicleSolver
+        if vs then
+            for _, mname in ipairs({"Update", "_integrate"}) do
+                local fn = type(rawget(vs, mname)) == "function" and rawget(vs, mname)
+                if fn then
+                    local ok, vals = pcall(inspect, fn)
+                    if ok then
+                        for _, v in pairs(vals) do
+                            if type(v) == "table" then
+                                local ok2, fs = pcall(function() return v.FireServer end)
+                                if ok2 and type(fs) == "function" then V._vtel_net = v; return v end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    local function TeleportVehicle(targetPos, targetRotY)
+        local net = GetNetwork()
+        if not net then Library:Notify("Network Service not found!", 3); return end
+        local controller = GetActiveVehicleController()
+        if not controller or not controller._vehicle then Library:Notify("Get in a vehicle first!", 3); return end
+        local vehicle = controller._vehicle
+        local newCF
+        if typeof and typeof(targetPos) == "CFrame" then
+            newCF = targetPos
+        elseif type(targetPos) == "userdata" and targetPos.IsA and targetPos:IsA("CFrame") then
+            newCF = targetPos
+        elseif type(targetPos) == "table" and targetPos.Position then
+            newCF = targetPos
+        else
+            newCF = CFrame.new(targetPos)
+            if targetRotY then newCF = newCF * CFrame.Angles(0, math.rad(targetRotY), 0) end
+        end
+        if vehicle.Hitbox then vehicle.Hitbox.CFrame = newCF end
+        vehicle.CFrame = newCF
+        local solver = controller._solver
+        if solver and solver.SetState then
+            solver:SetState(newCF, Vector3.new(0,0,0), Vector3.new(0,0,0), vehicle.ComponentReplicates)
+        end
+        local x,y,z,r00,r01,r02,r10,r11,r12,r20,r21,r22 = newCF:GetComponents()
+        net:FireServer(
+            "ReplicateVehicle", vehicle.UID,
+            x,y,z, r00,r01,r02, r10,r11,r12, r20,r21,r22,
+            vehicle.Steering or 0, vehicle.ComponentReplicates
+        )
+        Library:Notify("Vehicle Teleported!", 3)
+    end
+
+    vtel_load()
+
+    local vtpSection = vp:AddSection({Title="Teleporter", Side="Left"})
+    local vtpGroup = vp.Groups[#vp.Groups]  -- raw LinoriaLib groupbox (section wrapper has no AddButton)
+
+    vtpGroup:AddDropdown("tp_saved_coords", {
+        Text     = "Saved Coordinates",
+        Values   = vtel_names(),
+        AllowNull = true,
+    })
+
+    vtpGroup:AddButton("Get Coordinates", function()
+        local controller = GetActiveVehicleController()
+        if not controller or not controller._vehicle then
+            Library:Notify("Get in a vehicle first!", 3)
+            return
+        end
+        local cf = controller._vehicle.CFrame
+        local idx = 1
+        while vtel_coords["Coord "..idx] do idx = idx + 1 end
+        local name = "Coord "..idx
+        local x,y,z,r00,r01,r02,r10,r11,r12,r20,r21,r22 = cf:GetComponents()
+        vtel_coords[name] = {x,y,z,r00,r01,r02,r10,r11,r12,r20,r21,r22}
+        vtel_save()
+        local names = vtel_names()
+        Options["tp_saved_coords"]:SetValues(names)
+        Options["tp_saved_coords"]:SetValue(name)
+        Library:Notify("Saved: "..name, 3)
+    end)
+
+    vtpGroup:AddButton("Teleport", function()
+        local sel = Options["tp_saved_coords"].Value
+        if not sel or sel == "" then
+            Library:Notify("Select a coordinate first!", 3)
+            return
+        end
+        local entry = vtel_coords[sel]
+        if not entry or type(entry) ~= "table" or #entry < 12 then
+            Library:Notify("Invalid coordinate data!", 3)
+            return
+        end
+        TeleportVehicle(CFrame.new(
+            entry[1],entry[2],entry[3],
+            entry[4],entry[5],entry[6],
+            entry[7],entry[8],entry[9],
+            entry[10],entry[11],entry[12]
+        ))
+    end)
+
+    vtpGroup:AddButton("Delete Coordinate", function()
+        local sel = Options["tp_saved_coords"].Value
+        if not sel or sel == "" then
+            Library:Notify("Select a coordinate to delete!", 3)
+            return
+        end
+        vtel_coords[sel] = nil
+        vtel_save()
+        local names = vtel_names()
+        Options["tp_saved_coords"]:SetValues(names)
+        Options["tp_saved_coords"]:SetValue(names[1])
+        Library:Notify("Deleted: "..sel, 3)
+    end)
+    -- ───────────────────────────────────────────────────────────────────────────
+
     local tp=TurretPage
     local ts=tp:AddSection({Title="Turret",Side="Left"})
     toggle(ts,"Turret RPM Changer",T,"RPM","turret_rpm_enabled")
@@ -3720,84 +4628,6 @@ do
         Gun.Hook(c,"Equip",function(original) return function(w,...)
             applyGun(w);return original(w,...)
         end end)
-    end
-    -- Gun Aura Kill: fires the real InventoryAction/Discharge event the server
-    -- already trusts for every normal shot, but aimed directly at the selected
-    -- target's part instead of the camera's LookVector. No ADS, no animation,
-    -- no ammo spent, no muzzle flash — the server raycasts whatever CFrame it's
-    -- given, so a CFrame pointed straight at the target resolves as a normal hit.
-    local _gunNet,_bulletSvc=nil,nil
-    local function _gunFindModules()
-        if _gunNet and _bulletSvc then return _gunNet,_bulletSvc end
-        for _,module in ipairs(getloadedmodules()) do
-            if module.Name=="network" and not _gunNet then
-                local ok,net=pcall(require,module)
-                if ok and type(net)=="table" and type(rawget(net,"FireServer"))=="function" then _gunNet=net end
-            elseif module.Name=="BulletService" and not _bulletSvc then
-                local ok,svc=pcall(require,module)
-                if ok and type(svc)=="table" and type(svc.new)=="function" then
-                    local ok2,inst=pcall(svc.new)
-                    if ok2 and inst then _bulletSvc=inst end
-                end
-            end
-            if _gunNet and _bulletSvc then break end
-        end
-        return _gunNet,_bulletSvc
-    end
-    task.spawn(_gunFindModules)
-    local gunAuraRay=RaycastParams.new()
-    gunAuraRay.FilterType=Enum.RaycastFilterType.Exclude
-    gunAuraRay.IgnoreWater=false
-    function Gun.AuraAllowed(target,me)
-        local kind=Combat.Kind(target)
-        return target~=me and kind and Gun.AuraTargets[kind] and Combat.IsAlive(target)
-            and target.Character and target.Character.Parent
-            and not (kind=="Players" and Combat.IsTeammate(target))
-    end
-    function Gun.AuraSelectTarget(me)
-        if not me or not me.CFrame then return nil end
-        local range=Gun.AuraRange
-        if range<=0 then return nil end
-        local origin=me.CFrame:PointToWorldSpace(Vector3.new(0,2.5,0))
-        local service=Combat.Service()
-        local replicator=service and service.Replicator
-        local best,bestPart,bestUID,nearest=nil,nil,nil,range
-        for uid,target in pairs(replicator and replicator.Actors or {}) do
-            if Gun.AuraAllowed(target,me) then
-                local parts=target.Parts
-                local part=(Gun.AuraHeadshot and parts and parts.Head)
-                    or (parts and (parts.Head or parts.UpperTorso))
-                if part and part.Parent then
-                    local distance=(part.Position-origin).Magnitude
-                    if distance>.001 and distance<=nearest then
-                        best=target;bestPart=part;bestUID=uid;nearest=distance
-                    end
-                end
-            end
-        end
-        return best,bestPart,bestUID
-    end
-    function Gun.AuraFire(weapon,targetActor,targetPart,targetUID)
-        local net,bulletSvc=_gunFindModules()
-        if not net or not bulletSvc then Gun.auraError="modules not found";return false end
-        local actorObj=weapon._actor
-        if not actorObj or not actorObj.ViewModel then return false end
-        local firearm=weapon._firearm
-        local tune=firearm and firearm.Tune
-        if not tune then return false end
-        local muzzlePos=(actorObj.ViewModel.WorldMuzzle and actorObj.ViewModel.WorldMuzzle.WorldPosition)
-            or actorObj.CFrame:PointToWorldSpace(Vector3.new(0,1.5,0))
-        local targetPos=targetPart.Position
-        local okCF,aimCFrame=pcall(CFrame.new,muzzlePos,targetPos)
-        if not okCF then return false end
-        gunAuraRay.FilterDescendantsInstances={actorObj.Character}
-        local ok1,bulletUID=pcall(bulletSvc.Discharge,bulletSvc,aimCFrame,tune.Caliber,tune.Barrel,nil,true,true,nil,actorObj.Character,nil,false)
-        if not ok1 then Gun.auraError=tostring(bulletUID);return false end
-        local orientX,orientY=aimCFrame:ToOrientation()
-        local payload={{bulletUID,aimCFrame.X,aimCFrame.Y,aimCFrame.Z,orientX,orientY}}
-        local ok2,err=pcall(function() net:FireServer("InventoryAction","Discharge",payload,false) end)
-        if not ok2 then Gun.auraError=tostring(err);return false end
-        return true
     end
     installers.CharacterCamera=function(c)
         Gun.Hook(c,"Shake",function(original) return function(camera,preset,...)
@@ -3840,12 +4670,6 @@ do
             return original(ctrl,...)
         end end)
     end
-    -- Decoy/teleport RakNet: the server validates real distance on Impact, so a
-    -- hand-built FireServer payload with spoofed coordinates never passes that
-    -- check (confirmed by repeated field testing). Instead the auto-swing block
-    -- below physically moves me.RootPart next to the target, fires the real
-    -- _use() swing, then restores the original CFrame. See that block for the
-    -- full sequence.
     installers.MeleeInventory=function(c) A.class=c end
     local meleeRay=RaycastParams.new()
     meleeRay.FilterType=Enum.RaycastFilterType.Exclude
@@ -3862,7 +4686,7 @@ do
     end
     function A.SelectTarget(me,weapon)
         if not me or not me.CFrame then return nil end
-        local range=A.RakNet and A.RakNetRange or A.Range(weapon)
+        local range=A.Range(weapon)
         if range<=0 then return nil end
         local origin=me.CFrame:PointToWorldSpace(Vector3.new(0,2.5,0))
         local camera=workspace.CurrentCamera
@@ -3874,186 +4698,28 @@ do
         local params=replica and replica._params or meleeRay
         local service=Combat.Service()
         local replicator=service and service.Replicator
-        local best,bestPart,bestUID,nearest=nil,nil,nil,range
+        local best,bestPart,nearest=nil,nil,range
         -- Read the actor registry directly so melee works without any firearm feature enabled.
-        -- uid is the loop KEY from Replicator.Actors — guaranteed correct GUID string.
-        for uid,target in pairs(replicator and replicator.Actors or {}) do
+        for _,target in pairs(replicator and replicator.Actors or {}) do
             if A.Allowed(target,me) then
                 local head=target.Parts and target.Parts.Head
                 if head and head.Parent then
                     local delta=Combat.PartPosition(target,head)-origin
                     local distance=delta.Magnitude
                     if distance>.001 and distance<=nearest then
-                        -- RakNet mode: skip local LOS check entirely — we fire the remote
-                        -- directly, server does its own validation, walls are irrelevant.
-                        local visible=A.RakNet
-                        if not visible then
-                            local hit=workspace:Raycast(origin,delta,params)
-                            visible=not hit or hit.Instance:IsDescendantOf(target.Character)
-                            if not visible and type(replicator.GetFromBodyPart)=="function" then
-                                local u2=replicator:GetFromBodyPart(hit.Instance)
-                                visible=u2==uid
-                            end
+                        local hit=workspace:Raycast(origin,delta,params)
+                        local visible=not hit or hit.Instance:IsDescendantOf(target.Character)
+                        if not visible and type(replicator.GetFromBodyPart)=="function" then
+                            local uid=replicator:GetFromBodyPart(hit.Instance)
+                            visible=uid==target.UID
                         end
-                        if visible then best=target;bestPart=head;bestUID=uid;nearest=distance end
+                        if visible then best=target;bestPart=head;nearest=distance end
                     end
                 end
             end
         end
-        return best,bestPart,bestUID
+        return best,bestPart
     end
-    -- Decoy-position aura step — ported from the confirmed working reference:
-    -- the server reads LocalActor.ForceNextPosition (or SimulatedPosition) on
-    -- every ReplicateMovement tick, so setting it continuously makes the server
-    -- believe the actor is near the target. The real character/RootPart never
-    -- moves, so there's no snap-back and no animation/camera conflict. Reach and
-    -- Impact are both computed against this reported position, not the real one
-    -- — exactly mirroring how the game's own decoy system passes validation.
-    function A.AuraStep(me,weapon)
-        if not me or not A.RakNet then return end
-        if not A.targetActor or not A.target or not A.target.Parent or not A.targetUID then
-            A.reportedPos=nil
-            auraStatus("waiting for a target")
-            return
-        end
-        if not A.Allowed(A.targetActor,me) then
-            A.reportedPos=nil;auraStatus("target no longer allowed");return
-        end
-        local net=_gunNet
-        if not net then local n2=_gunFindModules();net=n2 end
-        if not net then auraStatus("network module not found");return end
-        local targetPos=A.target.Position
-        -- Walk the reported position toward the target each tick (instant, like
-        -- the reference script's DecoyWalkSpeed = math.huge for the aura case).
-        A.reportedPos=targetPos
-        local la=Combat.Service();la=la and la.Replicator and la.Replicator.LocalActor
-        if la then pcall(function() la.ForceNextPosition=A.reportedPos end) end
-        local now=os.clock()
-        if now<A.nextSwing then return end
-        A.nextSwing=now+math.max((weapon and weapon._timer) or .5,.1)
-        local uid=A.targetUID
-        local n=math.random(1,3)
-        local targetName=A.targetActor.Character and A.targetActor.Character.Name or "?"
-        auraStatus(("swinging at %s (%s)"):format(A.Headshot and "Head" or (A.target.Name or "?"),targetName))
-        pcall(function() net:FireServer("InventoryAction","Slash",n) end)
-        local swingDelay=(weapon and weapon._delay) or .3
-        task.delay(swingDelay,function()
-            if not (X.active and A.auraActive and A.RakNet) then return end
-            local part=A.targetUID==uid and A.target
-            if not part or not part.Parent then return end
-            local partName=A.Headshot and "Head" or part.Name
-            local dir=A.reportedPos and (A.reportedPos-part.Position) or Vector3.new(0,0,1)
-            local hit=part.Position+(dir.Magnitude>0 and dir.Unit or Vector3.new(0,0,1))*((part.Size and part.Size.X or 1)/2)
-            pcall(function() net:FireServer("InventoryAction","Impact",{hit.X,hit.Y,hit.Z},uid,partName) end)
-            A.impacts=A.impacts+1
-            if A.impacts%10==0 then auraEvent(("%d impacts sent"):format(A.impacts)) end
-        end)
-        A.swings=A.swings+1
-    end
-    -- Draggable debug menu for the RakNet decoy aura — ported from the reference
-    -- script's buildMenu(). F9 toggles visibility. Shows live status, reported
-    -- position, swing/impact counters, and a scrolling event log.
-    local auraMenuGui,auraMenuUpdate
-    local function buildAuraMenu()
-        local gui=Instance.new("ScreenGui")
-        gui.Name="RakNetAuraDebug";gui.ResetOnSpawn=false;gui.DisplayOrder=999
-        local okParent=pcall(function() gui.Parent=(gethui and gethui()) or game:GetService("CoreGui") end)
-        if not okParent or not gui.Parent then gui.Parent=AimLocalPlayer:WaitForChild("PlayerGui") end
-
-        local frame=Instance.new("Frame")
-        frame.Size=UDim2.fromOffset(340,420)
-        frame.Position=UDim2.fromOffset(20,120)
-        frame.BackgroundColor3=Color3.fromRGB(18,18,22)
-        frame.BackgroundTransparency=.08
-        frame.BorderSizePixel=0;frame.Active=true;frame.Parent=gui
-        Instance.new("UICorner",frame).CornerRadius=UDim.new(0,6)
-
-        local title=Instance.new("TextLabel")
-        title.Size=UDim2.new(1,0,0,26)
-        title.BackgroundColor3=Color3.fromRGB(34,34,42);title.BorderSizePixel=0
-        title.Font=Enum.Font.Code;title.TextSize=13;title.TextColor3=Color3.fromRGB(235,235,240)
-        title.Text="raknet aura debug  (drag me, F9 hides)"
-        title.Parent=frame
-        Instance.new("UICorner",title).CornerRadius=UDim.new(0,6)
-
-        local status=Instance.new("TextLabel")
-        status.Position=UDim2.fromOffset(8,32);status.Size=UDim2.fromOffset(324,142)
-        status.BackgroundTransparency=1;status.Font=Enum.Font.Code;status.TextSize=12
-        status.TextXAlignment=Enum.TextXAlignment.Left;status.TextYAlignment=Enum.TextYAlignment.Top
-        status.TextColor3=Color3.fromRGB(205,210,220);status.Text="";status.Parent=frame
-
-        local function makeButton(text,x,y,w)
-            local b=Instance.new("TextButton")
-            b.Position=UDim2.fromOffset(x,y);b.Size=UDim2.fromOffset(w or 158,26)
-            b.BackgroundColor3=Color3.fromRGB(46,46,58);b.BorderSizePixel=0
-            b.Font=Enum.Font.Code;b.TextSize=12;b.TextColor3=Color3.fromRGB(235,235,240)
-            b.Text=text;b.Parent=frame
-            Instance.new("UICorner",b).CornerRadius=UDim.new(0,4)
-            return b
-        end
-        local rakBtn=makeButton("raknet: OFF",8,180)
-        local headBtn=makeButton("headshot: ON",174,180)
-        rakBtn.MouseButton1Click:Connect(function() A.RakNet=not A.RakNet end)
-        headBtn.MouseButton1Click:Connect(function() A.Headshot=not A.Headshot end)
-
-        local logLabel=Instance.new("TextLabel")
-        logLabel.Position=UDim2.fromOffset(8,212);logLabel.Size=UDim2.fromOffset(324,200)
-        logLabel.BackgroundTransparency=1;logLabel.Font=Enum.Font.Code;logLabel.TextSize=11
-        logLabel.TextWrapped=true;logLabel.TextXAlignment=Enum.TextXAlignment.Left
-        logLabel.TextYAlignment=Enum.TextYAlignment.Bottom;logLabel.TextColor3=Color3.fromRGB(170,215,175)
-        logLabel.Text="";logLabel.Parent=frame
-
-        local dragging,dragStart,startPos
-        title.InputBegan:Connect(function(input)
-            if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
-                dragging=true;dragStart=input.Position;startPos=frame.Position
-                input.Changed:Connect(function()
-                    if input.UserInputState==Enum.UserInputState.End then dragging=false end
-                end)
-            end
-        end)
-        AimUIS.InputChanged:Connect(function(input)
-            if dragging and (input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch) then
-                local d=input.Position-dragStart
-                frame.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+d.X,startPos.Y.Scale,startPos.Y.Offset+d.Y)
-            end
-        end)
-
-        local function onOff(v) return v and "ON" or "OFF" end
-        local function update()
-            local me=actor()
-            local targetName=A.targetActor and A.targetActor.Character and A.targetActor.Character.Name or "-"
-            local reported=A.reportedPos
-            local realPos=me and me.CFrame and me.CFrame.Position
-            local gap=(reported and realPos) and (reported-realPos).Magnitude or -1
-            status.Text=table.concat({
-                ("raknet: %s    headshot: %s"):format(onOff(A.RakNet),onOff(A.Headshot)),
-                ("aura active: %s    target: %s"):format(onOff(A.auraActive),targetName),
-                ("range: %.0f studs    swings: %d    impacts: %d"):format(A.RakNetRange or 0,A.swings or 0,A.impacts or 0),
-                ("reported gap: %s"):format(gap>=0 and ("%.1f studs"):format(gap) or "-"),
-                ("status: %s"):format(A.status or ""),
-            },"\n")
-            rakBtn.Text="raknet: "..onOff(A.RakNet)
-            headBtn.Text="headshot: "..onOff(A.Headshot)
-            local first=math.max(1,#A.log-11)
-            local shown={}
-            for i=first,#A.log do shown[#shown+1]=A.log[i] end
-            logLabel.Text=table.concat(shown,"\n")
-        end
-        return gui,update
-    end
-    do
-        local ok,g,u=pcall(buildAuraMenu)
-        if ok then auraMenuGui,auraMenuUpdate=g,u else warn("[raknet aura] debug menu failed: "..tostring(g)) end
-    end
-    AimUIS.InputBegan:Connect(function(input,processed)
-        if input.KeyCode==Enum.KeyCode.F9 and auraMenuGui then
-            auraMenuGui.Enabled=not auraMenuGui.Enabled
-        end
-    end)
-    table.insert(Combat.connections,AimRunService.RenderStepped:Connect(function()
-        if auraMenuUpdate and auraMenuGui and auraMenuGui.Enabled then pcall(auraMenuUpdate) end
-    end))
     function A.PickReachDirection(self,origin,range)
         local params=RaycastParams.new();params.FilterType=Enum.RaycastFilterType.Exclude
         local exclude={self._actor.Character}
@@ -4103,12 +4769,11 @@ do
     end
     installers.MeleeInventoryReplicator=function(c)
         Gun.Hook(c,"Impact",function(original) return function(self,direction,...)
-            -- Only applies to the non-RakNet aura (A.Aura): RakNet mode fires
-            -- Slash/Impact directly from A.AuraStep and never reaches this hook.
-            if self._actor==actor() and A.auraActive and not A.RakNet then
+            if self._actor==actor() and A.auraActive then
+                -- Recheck after the swing delay: targets can move, die or become occluded.
                 local weapon=Combat.Weapon()
-                if not weapon or weapon._firearm then return end
-                A.targetActor,A.target,A.targetUID=A.SelectTarget(self._actor,weapon)
+                if not weapon or weapon._firearm or X.meleeWeapon~=weapon then return end
+                A.targetActor,A.target=A.SelectTarget(self._actor,weapon)
                 if not A.target then return end
                 local origin=self._actor.CFrame:PointToWorldSpace(Vector3.new(0,2.5,0))
                 direction=Combat.PartPosition(A.targetActor,A.target)-origin
@@ -4145,6 +4810,7 @@ do
         Gun.Hook(c,"Update",function(original) return function(solver,dt,inputs,...)
             local vehicle=solver._vehicle
             if not X.active or not vehicle or not vehicle.Controlling then return original(solver,dt,inputs,...) end
+            V.activeSolver = solver
             local physics=solver._solver;local state=physics and physics.State
             if not state then return original(solver,dt,inputs,...) end
             local heli=vehicle.Rotors~=nil
@@ -4239,7 +4905,7 @@ do
             for name in pairs(installers) do if not X.classes[name] then X.modulesResolved=false;break end end
         end
         V.flyActive=V.Fly and Combat.KeyActive(V.key,V.keyState)
-        A.auraActive=(A.Aura or A.RakNet) and Combat.KeyActive(A.key,A.keyState)
+        A.auraActive=A.Aura and Combat.KeyActive(A.key,A.keyState)
         local me=actor();local w=Combat.Weapon()
         if X.meleeWeapon~=w then
             if X.meleeWeapon then restore(X.meleeWeapon);if X.autoSwing then X.meleeWeapon._swinging=false end end
@@ -4250,35 +4916,22 @@ do
             if A.auraActive and A.class and me and not me.Locked and not me.Sprinting then
                 if os.clock()>=A.nextTargetScan then
                     A.nextTargetScan=os.clock()+.05
-                    A.targetActor,A.target,A.targetUID=A.SelectTarget(me,w)
+                    A.targetActor,A.target=A.SelectTarget(me,w)
                 end
                 if A.targetActor and not A.Allowed(A.targetActor,me) then A.target=nil;A.targetActor=nil end
             else A.target=nil;A.targetActor=nil;A.nextTargetScan=0 end
-            if A.RakNet then
-                -- Decoy aura (RakNet mode) runs entirely through A.AuraStep below,
-                -- which drives its own reported-position illusion and fires
-                -- Slash/Impact directly. Don't touch _use/_swinging here at all —
-                -- mixing the two swing paths is what caused the earlier freeze.
-            elseif A.target and not w._looping and not A.swingPending and os.clock()>=A.nextSwing then
+            if A.target and not w._looping and not A.swingPending and os.clock()>=A.nextSwing then
                 A.nextSwing=os.clock()+math.max(w._timer or .5,.1);X.autoSwing=true
                 A.swingPending=true
                 task.spawn(function()
                     local ok,err=pcall(function()
-                        if X.active and A.auraActive and A.target then A.class._use(w,true) end
+                        if X.active and A.auraActive and A.target and Combat.Weapon()==w then A.class._use(w,true) end
                     end)
                     A.swingPending=false
                     if not ok then X.error=tostring(err);w._swinging=false;w._looping=false end
                 end)
             elseif not A.target and X.autoSwing then w._swinging=false;X.autoSwing=false end
         else A.target=nil;A.targetActor=nil end
-        if A.RakNet then
-            local ok,err=pcall(A.AuraStep,me,w)
-            if not ok then X.error=tostring(err) end
-        elseif A.reportedPos then
-            A.reportedPos=nil
-            local la=Combat.Service();la=la and la.Replicator and la.Replicator.LocalActor
-            if la then pcall(function() la.ForceNextPosition=nil end) end
-        end
         if Gun.Debug then
             if not X.hud then
                 local gui=Instance.new("ScreenGui");gui.Name="LeanGunDebug";gui.ResetOnSpawn=false;gui.Parent=AimLocalPlayer:WaitForChild("PlayerGui")
@@ -4817,72 +5470,35 @@ end
 
 end
 
+do
+    -- Third Person Unlock — right side of the existing Movement page
+    local CharSec=movementPages[1]:AddSection({Title="Character",Side="Right"})
+    local tpEnabled=false
+    CharSec:AddToggle({Text="Third Person Unlock",Flag="thirdperson_enabled",Default=false,
+        Callback=function(v)
+            tpEnabled=v
+            if v then
+                task.spawn(function()
+                    while tpEnabled do
+                        pcall(function()
+                            for _,t in ipairs(getgc(true)) do
+                                if type(t)=="table" and rawget(t,"FIRST_PERSON")~=nil then
+                                    t.FIRST_PERSON=false
+                                end
+                            end
+                        end)
+                        task.wait(0.8)
+                    end
+                end)
+            end
+        end})
+end
+
 addSubtabs('Movement', movementPages)
 addSubtabs('Mods', modPages)
 end
 
 table.insert(Combat.connections, AimRunService.RenderStepped:Connect(Combat.Frame))
-
--- Highlight ESP standalone connection
--- hlObjects/hlSettings/hlZombieColors are declared at outer scope (before the
--- do block above), so they're visible here even though this runs after that
--- block's 'end'.
-table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
-    -- check có cái nào enabled không
-    local anyOn = hlSettings.npc or hlSettings.players or hlSettings.zombies or hlSettings.corpses
-    local c = Sense.Service()
-    local actors = c and c.Replicator and c.Replicator.Actors
-    if not anyOn or not actors then
-        -- tắt hết highlight khi không cần
-        for uid, hl in pairs(hlObjects) do
-            if hl and hl.Parent then hl.Enabled = false end
-        end
-        return
-    end
-    local alive = {}
-    for uid, actor in pairs(actors) do
-        local kind = Sense.Kind(actor)
-        if not kind then continue end
-        local char = actor.Character
-        if not (typeof(char) == "Instance" and char:IsA("Model") and char.Parent) then continue end
-        local on = hlSettings[kind]
-        alive[uid] = true
-        local hl = hlObjects[uid]
-        if not hl or not hl.Parent then
-            -- tạo Highlight mới — giống tipmobile CreateHighlight
-            hl = Instance.new("Highlight")
-            hl.FillTransparency = 0.6
-            hl.OutlineTransparency = 0
-            pcall(function() hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop end)
-            hl.Enabled = on
-            hl.Parent = char
-            hlObjects[uid] = hl
-        else
-            hl.Enabled = on
-        end
-        if on then
-            -- update màu
-            local col
-            if kind == "zombies" or kind == "corpses" then
-                local ab = type(actor.Health) == "table" and actor.Health.Ability
-                col = (ab and hlZombieColors[ab]) or Color3.fromRGB(255, 0, 0)
-            elseif kind == "players" then
-                col = Color3.fromRGB(255, 165, 0)
-            else
-                col = Color3.fromRGB(100, 220, 150)
-            end
-            hl.FillColor = col
-            hl.OutlineColor = col
-        end
-    end
-    -- cleanup actors không còn tồn tại
-    for uid, hl in pairs(hlObjects) do
-        if not alive[uid] then
-            if hl and hl.Parent then hl:Destroy() end
-            hlObjects[uid] = nil
-        end
-    end
-end))
 
 -- Keep overlay visibility independent from text and performance updates.
 local OverlaySettings={Watermark=true,Keybinds=true}
