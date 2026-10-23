@@ -4163,10 +4163,15 @@ do
         range        = 10000,
         rangeMargin  = 0.3,
         impactDelay  = 0.28,
+        -- MTC MeleeInventory._use(): _timer = Melee.lua "Time" field (Tomahawk=1s, dao=0.5s)
+        -- Client thật CHỈ được Slash 1 lần mỗi _timer giây, TOÀN CỤC (không phải theo từng target).
+        -- AK3 cũ bắn maxPerCycle target gần như cùng lúc → server coi là spam, chặn sau 1-2 nhát.
+        globalSwingTimer = 1.0,
         decoyEnabled = true,
         decoyOffset  = 3,
         debug        = false,
         _lastFire    = {},
+        _lastGlobalFire = 0,
     }
     Combat.AK3 = AK3
 
@@ -4321,15 +4326,44 @@ do
             return
         end
 
+        -- MTC: chỉ được vung vũ khí 1 lần mỗi globalSwingTimer giây, TOÀN CỤC —
+        -- không liên quan target nào. Bắn nhiều target cùng lúc = spam, server chặn.
+        if (now - AK3._lastGlobalFire) < AK3.globalSwingTimer then
+            ak3_dbg("skip: global swing cooldown (%.2fs left)", AK3.globalSwingTimer - (now - AK3._lastGlobalFire))
+            return
+        end
+
+        -- MTC MeleeInventory._use(): loop thật chặn hẳn nếu Sprinting hoặc Locked —
+        -- server nhiều khả năng validate y vậy, bắn lúc 2 cờ này true dễ bị bỏ qua.
+        do
+            local myA2 = (ak3_rep() or {}).LocalActor
+            local okS, isSprint = pcall(function() return myA2 and myA2.Sprinting end)
+            local okL, isLock   = pcall(function() return myA2 and myA2.Locked end)
+            if (okS and isSprint) or (okL and isLock) then
+                ak3_dbg("skip: Sprinting=%s Locked=%s", tostring(okS and isSprint), tostring(okL and isLock))
+                return
+            end
+        end
+
         local fired = 0
         for _, entry in ipairs(candidates) do
-            if fired >= AK3.maxPerCycle then break end
+            if fired >= 1 then break end  -- chỉ 1 target mỗi chu kỳ — đúng với giới hạn vung vũ khí thật
             AK3._lastFire[entry.uid] = now
+            AK3._lastGlobalFire = now
 
             local spawnPos = entry.pos + Vector3.new(0, 0.5, 0)
             ak3DecoyPos = spawnPos
             -- set vị trí giả trước Slash — engine tự replicate lên server
             ak3_pushPos(spawnPos)
+
+            -- MTC source: MeleeInventory._use() chỉ chạy khi item cận chiến đang EQUIPPED
+            -- (_equipped trên actor). Server rất có thể bỏ qua Slash/Impact nếu slot
+            -- hiện tại không phải melee — kiểm tra 1 lần và cảnh báo nếu thiếu.
+            local myA = (ak3_rep() or {}).LocalActor
+            local okEq, eqVal = pcall(function() return myA and myA._equipped end)
+            if okEq and eqVal == nil then
+                ak3_dbg("WARNING: actor._equipped = nil — chưa cầm vũ khí cận chiến? Slash/Impact có thể bị server bỏ qua")
+            end
 
             ak3_dbg("fire Slash uid=%s pos=(%.1f,%.1f,%.1f) dist=%.1f", tostring(entry.uid), entry.pos.X, entry.pos.Y, entry.pos.Z, entry.dist)
             AK2_fire(net, "InventoryAction", "Slash", math.random(1, 3))
