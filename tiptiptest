@@ -4147,8 +4147,8 @@ do
     end})
 
     -- ── Aura Kill V3 ──────────────────────────────────────────────────────────
-    -- Position layer (đã xác nhận đúng với MTC game_tree dump):
-    -- ForceNextPosition + SimulatedPosition là property, tự replicate qua ReplicatorService:Update()
+    -- RINGRING position layer: ForceNextPosition + SimulatePosition +
+    -- FireNextPosition + ServerPosition (impact vec) + CheckCharacterControllable
     -- Per-UID cooldown, multi-target sorted by distance.
     -- Reuses AK2_findNet / AK2_fire already defined above.
     local AK3: {[string]: any} = {
@@ -4160,25 +4160,14 @@ do
         headYOffset  = 1.5,
         maxPerCycle  = 4,
         cooldown     = 0.55,
-        range        = 10000,
+        range        = 50,
         rangeMargin  = 0.3,
         impactDelay  = 0.28,
-        -- MTC MeleeInventory._use(): _timer = Melee.lua "Time" field (Tomahawk=1s, dao=0.5s)
-        -- Client thật CHỈ được Slash 1 lần mỗi _timer giây, TOÀN CỤC (không phải theo từng target).
-        -- AK3 cũ bắn maxPerCycle target gần như cùng lúc → server coi là spam, chặn sau 1-2 nhát.
-        globalSwingTimer = 1.0,
         decoyEnabled = true,
         decoyOffset  = 3,
-        debug        = false,
         _lastFire    = {},
-        _lastGlobalFire = 0,
     }
     Combat.AK3 = AK3
-
-    local function ak3_dbg(fmt, ...)
-        if not AK3.debug then return end
-        warn(("[AK3] "..fmt):format(...))
-    end
 
     local ak3DecoyConn = nil
     local ak3DecoyPos: Vector3? = nil
@@ -4195,7 +4184,7 @@ do
             local ok, pos = pcall(function() return a.Position end)
             if ok and typeof(pos) == "Vector3" then return pos end
         end
-        local char = Players.LocalPlayer.Character
+        local char = AimPlayers.LocalPlayer.Character  -- FIX: file này đặt tên AimPlayers, không phải Players
         local root = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
         if root then return root.Position end
         return nil
@@ -4220,28 +4209,17 @@ do
         return true
     end
 
-    -- ĐỌC TỪ MTC game_tree DUMP THẬT (ReplicatorService.lua / CharacterController.lua / ActorClass.lua):
-    -- ForceNextPosition và SimulatedPosition (có "d") là PROPERTY, KHÔNG phải method.
-    -- Không hề có hàm "SimulatePosition()" hay "FireNextPosition()" nào tồn tại trong game —
-    -- gọi chúng như method chính là nguyên nhân lỗi "attempt to index nil".
-    -- ReplicatorService:Update() (chạy mỗi frame qua ClientHandler PreRender) tự đọc
-    -- v136.ForceNextPosition or v136.SimulatedPosition, tự FireUnreliableServer("ReplicateMovement",...),
-    -- rồi tự xóa ForceNextPosition — ta chỉ cần SET property, engine tự lo phần gửi.
-    -- ServerPosition là field SERVER ghi vào actor để báo vị trí của actor cho người khác biết —
-    -- không phải thứ client nên ghi để spoof, ghi vào đó không ảnh hưởng tới hit validation.
-    local function ak3_holdPos(pos)
-        local rep = ak3_rep(); local a = rep and rep.LocalActor
-        if not a then ak3_dbg("holdPos: no LocalActor"); return end
-        local ok1, err1 = pcall(function() a.ForceNextPosition = pos end)
-        if not ok1 then ak3_dbg("ForceNextPosition failed: %s", tostring(err1)) end
-        local ok2, err2 = pcall(function() a.SimulatedPosition = pos end)
-        if not ok2 then ak3_dbg("SimulatedPosition failed: %s", tostring(err2)) end
-    end
-
-    -- Không còn "push" riêng — ForceNextPosition/SimulatedPosition tự được
-    -- ReplicatorService:Update() gửi lên server mỗi frame, throttle 0.1s (xem _lastReplicate).
+    -- ĐÃ ĐỐI CHIẾU VỚI MTC game_tree DUMP THẬT (ReplicatorService.lua):
+    -- ForceNextPosition và SimulatedPosition (có "d") là PROPERTY — set thẳng bằng "=".
+    -- Không hề tồn tại hàm SimulatePosition()/FireNextPosition() nào trong game (grep 0 kết quả) —
+    -- bản cũ gọi chúng như method, pcall nuốt lỗi âm thầm, không crash nhưng cũng không làm gì.
+    -- ReplicatorService:Update() (chạy mỗi frame) tự đọc property này và gửi
+    -- FireUnreliableServer("ReplicateMovement", ...) lên server — không cần tự "fire" gì cả.
     local function ak3_pushPos(pos)
-        ak3_holdPos(pos)
+        local rep = ak3_rep(); local a = rep and rep.LocalActor
+        if not a then return end
+        pcall(function() a.ForceNextPosition = pos end)
+        pcall(function() a.SimulatedPosition = pos end)
     end
 
     local function ak3_tearDecoy()
@@ -4251,49 +4229,15 @@ do
         if a then pcall(function() a.ForceNextPosition = nil end) end
     end
 
-    -- Decoy heartbeat — set ForceNextPosition + SimulatedPosition mỗi frame
-    -- ReplicatorService:Update() của game tự đọc và gửi ReplicateMovement lên server (throttle 0.1s)
-    table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
-        if not AK3.enabled or not ak3DecoyPos then return end
-        ak3_holdPos(ak3DecoyPos)  -- local only, an toàn để gọi mọi frame
-    end))
-
     -- Main aura loop
-    local ak3_lastClean = 0
     table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
         if not AK3.enabled then return end
-        local net = AK2_findNet()
-        if not net then ak3_dbg("main loop: AK2_findNet() returned nil"); return end
-        local rep = ak3_rep()
-        if not rep then ak3_dbg("main loop: Replicator not found"); return end
-        local registry = rep.Actors
-        if not registry then ak3_dbg("main loop: rep.Actors not found"); return end
-
-        -- RINGRING fix: dùng HumanoidRootPart thay vì myActor.Position
-        -- myActor.Position bị ảnh hưởng bởi ForceNextPosition đang được set
-        -- HumanoidRootPart là vị trí thật không bị spoof
-        local char = Players.LocalPlayer.Character
-        local hrp = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
-        local from = hrp and hrp.Position
-        if not from then
-            -- fallback: myActor nếu không có hrp
-            local myActor = rep.LocalActor
-            from = myActor and typeof(myActor.Position)=="Vector3" and myActor.Position
-        end
-        if not from then ak3_dbg("main loop: could not resolve 'from' position"); return end
-
+        if not ak3_isControllable() then return end
+        local net = AK2_findNet(); if not net then return end
+        local rep = ak3_rep(); if not rep then return end
+        local registry = rep.Actors; if not registry then return end
+        local from = ak3_reportedPos(); if not from then return end
         local now = os.clock()
-        -- cleanup _lastFire mỗi 2 giây: xóa uid dead hoặc không còn trong registry
-        if now - ak3_lastClean > 2 then
-            ak3_lastClean = now
-            for uid, t in pairs(AK3._lastFire) do
-                local a = registry[uid]
-                -- xóa nếu không còn trong registry, hoặc dead và cooldown đã qua
-                if not a or (not Combat.IsAlive(a) and (now-t) > AK3.cooldown) then
-                    AK3._lastFire[uid] = nil
-                end
-            end
-        end
 
         local candidates = {}
         for uid, a in pairs(registry) do
@@ -4312,85 +4256,33 @@ do
             table.insert(candidates, {uid=uid, pos=pos, dist=dist})
         end
         table.sort(candidates, function(x, y) return x.dist < y.dist end)
-        ak3_dbg("scan: registry=%d candidates=%d from=(%.1f,%.1f,%.1f)",
-            (function() local n=0; for _ in pairs(registry) do n+=1 end; return n end)(),
-            #candidates, from.X, from.Y, from.Z)
-
-        -- không có target: dọn decoy cũ để khỏi spoof sai vị trí mãi
-        if #candidates == 0 then
-            if ak3DecoyPos then
-                ak3DecoyPos = nil
-                local r = ak3_rep(); local la = r and r.LocalActor
-                if la then pcall(function() la.ForceNextPosition = nil end) end
-            end
-            return
-        end
-
-        -- MTC: chỉ được vung vũ khí 1 lần mỗi globalSwingTimer giây, TOÀN CỤC —
-        -- không liên quan target nào. Bắn nhiều target cùng lúc = spam, server chặn.
-        if (now - AK3._lastGlobalFire) < AK3.globalSwingTimer then
-            ak3_dbg("skip: global swing cooldown (%.2fs left)", AK3.globalSwingTimer - (now - AK3._lastGlobalFire))
-            return
-        end
-
-        -- MTC MeleeInventory._use(): loop thật chặn hẳn nếu Sprinting hoặc Locked —
-        -- server nhiều khả năng validate y vậy, bắn lúc 2 cờ này true dễ bị bỏ qua.
-        do
-            local myA2 = (ak3_rep() or {}).LocalActor
-            local okS, isSprint = pcall(function() return myA2 and myA2.Sprinting end)
-            local okL, isLock   = pcall(function() return myA2 and myA2.Locked end)
-            if (okS and isSprint) or (okL and isLock) then
-                ak3_dbg("skip: Sprinting=%s Locked=%s", tostring(okS and isSprint), tostring(okL and isLock))
-                return
-            end
-        end
 
         local fired = 0
         for _, entry in ipairs(candidates) do
-            if fired >= 1 then break end  -- chỉ 1 target mỗi chu kỳ — đúng với giới hạn vung vũ khí thật
+            if fired >= AK3.maxPerCycle then break end
             AK3._lastFire[entry.uid] = now
-            AK3._lastGlobalFire = now
-
+            -- RINGRING: spoof position to target before Slash
             local spawnPos = entry.pos + Vector3.new(0, 0.5, 0)
-            ak3DecoyPos = spawnPos
-            -- set vị trí giả trước Slash — engine tự replicate lên server
             ak3_pushPos(spawnPos)
-
-            -- MTC source: MeleeInventory._use() chỉ chạy khi item cận chiến đang EQUIPPED
-            -- (_equipped trên actor). Server rất có thể bỏ qua Slash/Impact nếu slot
-            -- hiện tại không phải melee — kiểm tra 1 lần và cảnh báo nếu thiếu.
-            local myA = (ak3_rep() or {}).LocalActor
-            local okEq, eqVal = pcall(function() return myA and myA._equipped end)
-            if okEq and eqVal == nil then
-                ak3_dbg("WARNING: actor._equipped = nil — chưa cầm vũ khí cận chiến? Slash/Impact có thể bị server bỏ qua")
-            end
-
-            ak3_dbg("fire Slash uid=%s pos=(%.1f,%.1f,%.1f) dist=%.1f", tostring(entry.uid), entry.pos.X, entry.pos.Y, entry.pos.Z, entry.dist)
             AK2_fire(net, "InventoryAction", "Slash", math.random(1, 3))
-
-            local uid2    = entry.uid
-            local hitPos  = {entry.pos.X, entry.pos.Y + AK3.headYOffset, entry.pos.Z}
-            local decoySnap = spawnPos
-
+            local uid2 = entry.uid
+            local hitPos = {entry.pos.X, entry.pos.Y + AK3.headYOffset, entry.pos.Z}
+            local sp2 = spawnPos
             task.delay(AK3.impactDelay, function()
                 if not AK3.enabled then return end
-                local n2 = AK2_findNet()
-                if not n2 then ak3_dbg("impact: AK2_findNet() returned nil"); return end
-                -- set lại lần nữa trước Impact — phòng trường hợp decoy heartbeat bị trễ frame
-                ak3_pushPos(decoySnap)
-                ak3_dbg("fire Impact uid=%s", tostring(uid2))
+                local n2 = AK2_findNet(); if not n2 then return end
+                -- RINGRING: spoof position again for Impact validation
+                ak3_pushPos(sp2)
                 AK2_fire(n2, "InventoryAction", "Impact", hitPos, uid2, AK3.hitPart)
-                -- Xóa decoy sau 0.1s buffer
-                task.delay(0.1, function()
-                    if ak3DecoyPos == decoySnap then
-                        ak3DecoyPos = nil
-                        local r = ak3_rep(); local la = r and r.LocalActor
-                        if la then pcall(function() la.ForceNextPosition = nil end) end
-                    end
-                end)
             end)
             fired += 1
         end
+    end))
+
+    -- Decoy heartbeat — push position every frame
+    table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
+        if not AK3.enabled or not AK3.decoyEnabled or not ak3DecoyPos then return end
+        ak3_pushPos(ak3DecoyPos)
     end))
 
     -- AK3 lives on its own subtab: Mods → "Aura Kill V3"
@@ -4416,8 +4308,8 @@ do
         Min=0.05,Max=2.0,Default=0.55,Rounding=0.05,Suffix=" s",
         Callback=function(v) AK3.cooldown=math.clamp(v,0.05,2.0) end})
     ak3l:AddSlider({Text="Range",Flag="ak3_range",
-        Min=3,Max=10000,Default=10000,Rounding=100,Suffix=" st",
-        Callback=function(v) AK3.range=math.clamp(v,3,10000) end})
+        Min=3,Max=100,Default=50,Rounding=1,Suffix=" st",
+        Callback=function(v) AK3.range=math.clamp(v,3,100) end})
     ak3l:AddSlider({Text="Impact Delay",Flag="ak3_impact_delay",
         Min=0,Max=1,Default=0.28,Rounding=0.02,Suffix=" s",
         Callback=function(v) AK3.impactDelay=math.clamp(v,0,1) end})
@@ -4445,8 +4337,6 @@ do
         AK2._net=nil; AK2._remote=nil; AK2._netRetry=0
         task.spawn(function() AK2_findNet(); AK2_getRemote() end)
     end})
-    ak3r:AddToggle({Text="Debug Log (xem Output/Console)",Flag="ak3_debug",Default=false,
-        Callback=function(v) AK3.debug=v end})
 
     local vp=VehiclePage
     local vl=vp:AddSection({Title="Driving",Side="Left"});local vr=vp:AddSection({Title="Flight",Side="Right"})
