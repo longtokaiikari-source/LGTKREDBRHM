@@ -1,224 +1,1545 @@
--- ============================================================================
--- Standalone Melee Aura Test — no Linoria, no tabs, just the aura + status panel.
--- Auto-targets the nearest valid NPC/zombie in range, fires the real
--- InventoryAction Slash/Impact remote events (RINGRING's approach), with a
--- one-shot LocalActor.ForceNextPosition set at swing start (confirmed against
--- ReplicatorService.lua — Update() reads-and-clears that field on its own
--- ~0.1s cycle, so setting it once per swing is correct; setting it every
--- frame fights that cycle and freezes the character).
--- Press B to toggle. Panel shows live status + a short event log.
--- ============================================================================
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 
-local Players=game:GetService("Players")
-local RunService=game:GetService("RunService")
-local UIS=game:GetService("UserInputService")
-local LocalPlayer=Players.LocalPlayer
+local CONFIG = {
+    Enabled = true,
+    ToggleKey = Enum.KeyCode.F6,
+    SummaryKey = Enum.KeyCode.F7,
+    MenuKey = Enum.KeyCode.F8,
+    DropKey = Enum.KeyCode.RightBracket,
+    RecallKey = Enum.KeyCode.LeftBracket,
+    ToggleDecoyKey = Enum.KeyCode.BackSlash,
+    RestoreIgnoresDistance = true,
+    KeepFirstSpot = true,
+    ClearSavedKey = Enum.KeyCode.Equals,
 
-local A={
-    on=false,
-    range=80,
-    headshot=true,
-    nextSwing=0,
-    targetActor=nil,
-    target=nil,
-    targetUID=nil,
-    swings=0,
-    impacts=0,
-    status="idle",
-    log={},
+    SelectKey = Enum.KeyCode.T,
+    FollowKey = Enum.KeyCode.O,
+    SelectColor = Color3.fromRGB(255, 150, 40),
+    FollowColor = Color3.fromRGB(90, 255, 120),
+    AuraKey = Enum.KeyCode.B,
+    AuraPart = "Head",
+    AuraAutoFollow = true,
+    AuraNeedsMelee = false,
+    AuraAnimate = true,
+    AuraReachMargin = 0.4,
+    AuraTime = 0.5,
+    AuraDelay = 0.25,
+    AuraReach = 5,
+    AuraLongRange = true,    -- bypass proximity via ForceNextPosition spoof
+    AuraSpoofOffset = 2.0,   -- studs from target when spoofing (must be < AuraReach)
+    AuraSpoofWait = 0.05,    -- seconds after ForceNextPosition before firing
+    AuraSpoofReset = 0.18,   -- seconds before restoring ForceNextPosition
+
+    HoverEnabled = true,
+    HoverColor = Color3.fromRGB(255, 235, 90),
+    SelectStartsFollow = true,
+    NpcNames = { Male = true },
+    NpcNeedsHumanoid = true,
+    FollowFeetDrop = 1.2,
+    FollowOffset = Vector3.new(0, 0, 0),
+    FollowIgnoresDistance = false,
+
+    StreamAroundDecoy = true,
+    StreamInterval = 2,
+    StreamTimeout = 3,
+
+    ScanInterval = 0.15,
+    PickupSpacing = 0.12,
+    RetryDelay = 0.75,
+    MaxRetries = 4,
+    BackoffDelay = 6,
+    ConfirmWindow = 3,
+
+    PlacedMaxTime = math.huge,
+    RecallWhenFar = false,
+    RecallOnNoResponse = false,
+    DecoyWalkSpeed = math.huge,
+    GhostColor = Color3.fromRGB(80, 200, 255),
+    GhostRadius = 5.5,
+
+    DecoyEnabled = true,
+    MaxDecoyDistance = 3333333333333333333333333333,
+    DecoyOffset = Vector3.new(0, 3, 0),
+    DecoyDelay = 0.05,
+    DecoyMaxTime = 1.5,
+    DecoyCooldown = 0.8,
+    MaxBatch = 8,
+    BatchMargin = 0.5,
+    MaxDecoyFailures = 3,
+
+    LogToFile = true,
+    LogFile = "autopickup_log.txt",
+    Debug = false,
 }
 
-local function logEvent(text)
-    local line=("[%s] %s"):format(os.date("%H:%M:%S"),text)
-    A.log[#A.log+1]=line
-    if #A.log>12 then table.remove(A.log,1) end
-end
-local function setStatus(text)
-    if A.status~=text then A.status=text;logEvent(text) end
+local env = (getgenv and getgenv()) or _G
+local token = {}
+env.AutoPickupToken = token
+
+local localPlayer = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+local dropContainer = workspace.Terrain
+
+local logEntries = {}
+local totals = {}
+local stats = { picked = 0, decoyPicked = 0, rejected = 0, maxDistance = 0, decoySessions = 0, placedDrops = 0 }
+local info = { prompts = 0, nearest = -1, source = "?", failStreak = 0, placedFails = 0, busy = false }
+local menuLines = {}
+
+local function appendFile(line)
+    if not CONFIG.LogToFile or not writefile then
+        return
+    end
+    pcall(function()
+        local exists = isfile and isfile(CONFIG.LogFile)
+        if exists and appendfile then
+            appendfile(CONFIG.LogFile, line .. "\n")
+        elseif exists and readfile then
+            writefile(CONFIG.LogFile, readfile(CONFIG.LogFile) .. line .. "\n")
+        else
+            writefile(CONFIG.LogFile, line .. "\n")
+        end
+    end)
 end
 
--- ---------------------------------------------------------------------------
--- Module discovery — same verified pattern as BRM5: scan getloadedmodules(),
--- require by name, cache the result.
--- ---------------------------------------------------------------------------
-local _service,_net
-local function findService()
-    if _service then return _service end
-    for _,m in ipairs(getloadedmodules()) do
-        if m.Name=="ClientService" then
-            local ok,value=pcall(require,m)
-            if ok and type(value)=="table" and value.Replicator then _service=value;break end
-        end
+local function event(text)
+    local line = ("[%s] %s"):format(os.date("%H:%M:%S"), text)
+    print("[autopickup] " .. line)
+    appendFile(line)
+    table.insert(menuLines, line)
+    if #menuLines > 40 then
+        table.remove(menuLines, 1)
     end
-    return _service
 end
+
+local function record(kind, name, uid, distance, tries)
+    table.insert(logEntries, {
+        time = os.time(),
+        kind = kind,
+        name = name,
+        uid = uid,
+        distance = distance,
+        tries = tries,
+    })
+    event(("%s %s (%s) dist=%.1f tries=%d"):format(kind, name, uid, distance, tries))
+end
+
+local function debugLog(...)
+    if CONFIG.Debug then
+        print("[autopickup]", ...)
+    end
+end
+
+local function printSummary()
+    print(("[autopickup] summary: %d picked (%d via decoy), %d blocked, farthest pickup %.1f studs, %d hop sessions, %d decoys dropped"):format(
+        stats.picked, stats.decoyPicked, stats.rejected, stats.maxDistance, stats.decoySessions, stats.placedDrops))
+    local names = {}
+    for name in totals do
+        table.insert(names, name)
+    end
+    table.sort(names)
+    for _, name in names do
+        print(("[autopickup]   %dx %s"):format(totals[name], name))
+    end
+end
+
+env.AutoPickup = {
+    Log = logEntries,
+    Totals = totals,
+    Stats = stats,
+    Config = CONFIG,
+    Summary = printSummary,
+}
+
 local function findNetwork()
-    if _net then return _net end
-    for _,m in ipairs(getloadedmodules()) do
-        if m.Name=="network" then
-            local ok,value=pcall(require,m)
-            if ok and type(value)=="table" and type(rawget(value,"FireServer"))=="function" then
-                _net=value;break
-            end
+    for _, t in getgc(true) do
+        if type(t) == "table"
+            and rawget(t, "_events") ~= nil
+            and rawget(t, "_functions") ~= nil
+            and rawget(t, "_code") ~= nil
+            and rawget(t, "_key") ~= nil
+            and type(t.FireServer) == "function"
+        then
+            return t
         end
     end
-    return _net
+    return nil
 end
 
--- ---------------------------------------------------------------------------
--- Classification — verified against ActorClass.lua / ReplicatorService.lua:
--- actor.UID is never a real property, only a dictionary key. Classify off the
--- actor's own real fields instead (Owner, Zombie, IsLocalPlayer).
--- ---------------------------------------------------------------------------
-local function actorKind(actor)
-    if not actor then return nil end
-    local service=findService()
-    local replicator=service and service.Replicator
-    if actor.IsLocalPlayer or actor.Owner==LocalPlayer or (replicator and actor==replicator.LocalActor) then
-        return nil
-    end
-    if actor.Zombie==true then return "Zombies" end
-    if actor.Owner==nil then return "NPCs" end
-    if typeof(actor.Owner)=="Instance" and actor.Owner:IsA("Player") then return "Players" end
-end
-local function isAlive(actor)
-    if not actor or actor.Alive==false then return false end
-    if actor.Zombie then
-        return type(actor.Health)=="table" or (type(actor.Health)=="number" and actor.Health>0)
-    end
-    return true
-end
-local function allowed(actor)
-    local kind=actorKind(actor)
-    return kind=="Zombies" or kind=="NPCs"
-end
-
-local function myActor()
-    local service=findService()
-    return service and service.Replicator and service.Replicator.LocalActor
-end
-
--- ---------------------------------------------------------------------------
--- Target selection — nearest valid actor's Head (or UpperTorso fallback)
--- within A.range studs. uid comes from the Replicator.Actors loop KEY, which
--- is the only place a correct UID actually exists.
--- ---------------------------------------------------------------------------
-local function selectTarget(me)
-    if not me or not me.CFrame then return nil end
-    local service=findService()
-    local replicator=service and service.Replicator
-    local origin=me.CFrame.Position
-    local best,bestPart,bestUID,nearest=nil,nil,nil,A.range
-    for uid,target in pairs(replicator and replicator.Actors or {}) do
-        if allowed(target) and isAlive(target) then
-            local parts=target.Parts
-            local part=(A.headshot and parts and parts.Head) or (parts and (parts.Head or parts.UpperTorso))
-            if part and part.Parent then
-                local distance=(part.Position-origin).Magnitude
-                if distance>.001 and distance<=nearest then
-                    best=target;bestPart=part;bestUID=uid;nearest=distance
+local function findReplicator()
+    for _, t in getgc(true) do
+        if type(t) == "table" then
+            local actors = rawget(t, "Actors")
+            local localActor = rawget(t, "LocalActor")
+            if type(actors) == "table" and type(localActor) == "table" then
+                local ok, cf = pcall(function()
+                    return localActor.CFrame
+                end)
+                if ok and typeof(cf) == "CFrame" then
+                    return t
                 end
             end
         end
     end
-    return best,bestPart,bestUID
+    return nil
 end
 
--- ---------------------------------------------------------------------------
--- The aura step itself.
--- ---------------------------------------------------------------------------
-local function auraStep()
-    if not A.on then return end
-    local me=myActor()
-    if not me then setStatus("waiting for local actor");return end
+local network
+for _ = 1, 15 do
+    network = findNetwork()
+    if network then
+        break
+    end
+    task.wait(1)
+end
 
-    A.targetActor,A.target,A.targetUID=selectTarget(me)
-    if not A.targetActor or not A.target or not A.targetUID then
-        setStatus("waiting for a target");return
+if not network then
+    warn("[autopickup] network object not found; is getgc available and the game fully loaded?")
+    return
+end
+
+local replicator
+for _ = 1, 15 do
+    replicator = findReplicator()
+    if replicator then
+        break
+    end
+    task.wait(1)
+end
+
+if not replicator then
+    warn("[autopickup] replicator not found; position falls back to camera/character and decoys are unavailable")
+    CONFIG.DecoyEnabled = false
+end
+
+local function getOrigin()
+    local source, position
+
+    local actor = replicator and replicator.LocalActor
+    if actor then
+        local ok, pos = pcall(function()
+            return actor.CFrame.Position
+        end)
+        if ok and typeof(pos) == "Vector3" then
+            source, position = "actor.CFrame", pos
+        else
+            local character = actor.Character
+            if typeof(character) == "Instance" then
+                local ok2, pivot = pcall(character.GetPivot, character)
+                if ok2 then
+                    source, position = "actor.Character", pivot.Position
+                end
+            end
+        end
     end
 
-    local net=findNetwork()
-    if not net then setStatus("network module not found");return end
+    if not position then
+        local character = localPlayer.Character
+        local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
+        if root then
+            source, position = "player.Character", root.Position
+        elseif camera then
+            source, position = "camera", camera.CFrame.Position
+        end
+    end
 
-    local now=os.clock()
-    if now<A.nextSwing then return end
-    A.nextSwing=now+.5 -- fixed swing pace; adjust to taste
+    info.source = source or "none"
+    return position
+end
 
-    local uid=A.targetUID
-    local part=A.target
-    local targetName=A.targetActor.Character and A.targetActor.Character.Name or "?"
-    setStatus(("swinging at %s (%s)"):format(A.headshot and "Head" or (part.Name or "?"),targetName))
+local state = {}
+local lastFire = 0
+local nextDecoy = 0
+local busy = false
+local placed = nil
+local hold = nil
+local savedDecoy = nil
 
-    -- One-shot ForceNextPosition at swing start — see header note.
-    local la=myActor()
-    if la then pcall(function() la.ForceNextPosition=part.Position end) end
+local following = false
+local selectedNpc = nil
+local selectedHL = nil
+local selectedFeetDrop = CONFIG.FollowFeetDrop
+local selectedUid = nil
+local auraOn = false
+local auraNext = 0
+local auraFollowAt = 0
+local rebinding = nil
+local auraStats = { swings = 0, status = "" }
+local auraSpoofing = false
+local hoveredNpc = nil
+local hoverHL = nil
 
-    pcall(function() net:FireServer("InventoryAction","Slash",math.random(1,3)) end)
-    A.swings=A.swings+1
+local function npcRoot(model)
+    return model.PrimaryPart
+        or model:FindFirstChild("Root")
+        or model:FindFirstChild("HumanoidRootPart")
+        or model:FindFirstChildWhichIsA("BasePart")
+end
 
-    task.delay(.3,function()
-        if not (A.on and part.Parent) then return end
-        local partName=A.headshot and "Head" or part.Name
-        local pos=part.Position
-        pcall(function() net:FireServer("InventoryAction","Impact",{pos.X,pos.Y,pos.Z},uid,partName) end)
-        A.impacts=A.impacts+1
-        if A.impacts%5==0 then logEvent(("%d impacts sent"):format(A.impacts)) end
+local function npcFeetDrop(model, root)
+    local lowest
+    for _, name in { "LeftFoot", "RightFoot" } do
+        local p = model:FindFirstChild(name)
+        if p and p:IsA("BasePart") then
+            local y = p.Position.Y - p.Size.Y / 2
+            lowest = lowest and math.min(lowest, y) or y
+        end
+    end
+    if lowest then
+        return math.clamp(root.Position.Y - lowest, 0, 6)
+    end
+    return root.Name == "HumanoidRootPart" and 3 or CONFIG.FollowFeetDrop
+end
+
+local function itemName(prompt)
+    local text = prompt.ActionText or ""
+    return (text:gsub("^[Pp]ick up ", ""))
+end
+
+local function getState(attachment, prompt)
+    local uid = attachment.Name
+    local s = state[uid]
+    if not s then
+        s = {
+            name = itemName(prompt),
+            consecutive = 0,
+            decoyTries = 0,
+            total = 0,
+            nextTry = 0,
+            firedAt = 0,
+            distance = 0,
+            viaDecoy = false,
+            blocked = false,
+        }
+        s.conn = attachment.Destroying:Connect(function()
+
+            if s.firedAt > 0 and os.clock() - s.firedAt <= CONFIG.ConfirmWindow then
+                stats.picked += 1
+                stats.maxDistance = math.max(stats.maxDistance, s.distance)
+                totals[s.name] = (totals[s.name] or 0) + 1
+                if s.viaDecoy then
+                    stats.decoyPicked += 1
+                    info.placedFails = 0
+                    if placed then
+                        placed.picked += 1
+                    end
+                end
+                record(s.viaDecoy and "PICKED(decoy)" or "PICKED", s.name, uid, s.distance, s.total)
+            end
+        end)
+        state[uid] = s
+    end
+    return s
+end
+
+local function fireOne(attachment, prompt, realDistance, viaDecoy)
+    local s = getState(attachment, prompt)
+    s.total += 1
+    s.distance = realDistance
+    s.firedAt = os.clock()
+    s.viaDecoy = viaDecoy
+    lastFire = s.firedAt
+    debugLog("fire", s.name, attachment.Name, realDistance, viaDecoy and "decoy" or "direct")
+    network:FireServer("InventoryPickUp", attachment.Name)
+end
+
+local function runDecoy(actor, target, all)
+    local decoyPos = target.pos + CONFIG.DecoyOffset
+    local now = os.clock()
+    local batch = {}
+
+    for _, c in all do
+        local s = getState(c.attachment, c.prompt)
+        if not s.blocked and now >= s.nextTry
+            and (c.pos - decoyPos).Magnitude <= c.prompt.MaxActivationDistance - CONFIG.BatchMargin
+        then
+            if s.decoyTries >= CONFIG.MaxRetries then
+                s.blocked = true
+                s.decoyTries = 0
+                stats.rejected += 1
+                record("BLOCKED", s.name, c.attachment.Name, c.real, s.total)
+            else
+                table.insert(batch, c)
+                if #batch >= CONFIG.MaxBatch then
+                    break
+                end
+            end
+        end
+    end
+
+    if #batch == 0 then
+        return
+    end
+
+    stats.decoySessions += 1
+    local before = stats.decoyPicked
+    local deadline = os.clock() + CONFIG.DecoyMaxTime
+    event(("HOP #%d -> %d item(s), %.1f studs away"):format(stats.decoySessions, #batch, target.real))
+
+    local function arm()
+        actor.ForceNextPosition = decoyPos
+    end
+
+    arm()
+    while actor.ForceNextPosition ~= nil and os.clock() < deadline do
+        task.wait()
+    end
+    arm()
+    task.wait(CONFIG.DecoyDelay)
+
+    for _, c in batch do
+        if os.clock() > deadline or env.AutoPickupToken ~= token then
+            break
+        end
+        if actor.ForceNextPosition == nil then
+            arm()
+        end
+        local s = getState(c.attachment, c.prompt)
+        s.decoyTries += 1
+        s.nextTry = os.clock() + CONFIG.RetryDelay
+        fireOne(c.attachment, c.prompt, c.real, true)
+        task.wait(CONFIG.PickupSpacing)
+    end
+
+    task.wait(CONFIG.DecoyDelay)
+    actor.ForceNextPosition = nil
+
+    task.wait(0.5)
+    if stats.decoyPicked == before then
+        info.failStreak += 1
+        if info.failStreak >= CONFIG.MaxDecoyFailures then
+            CONFIG.DecoyEnabled = false
+            event(("HOP DECOYS DISABLED: %d sessions in a row picked nothing, the server is rejecting them"):format(info.failStreak))
+        end
+    else
+        info.failStreak = 0
+    end
+end
+
+local function startDecoy(target, all)
+    local actor = replicator and replicator.LocalActor
+    if not actor or actor.Alive == false or actor.Downed or actor.ForceNextPosition ~= nil then
+        return false
+    end
+    busy = true
+    info.busy = true
+    task.spawn(function()
+        local ok, err = pcall(runDecoy, actor, target, all)
+        pcall(function()
+            actor.ForceNextPosition = nil
+        end)
+        if not ok then
+            event("HOP ERROR " .. tostring(err))
+        end
+        nextDecoy = os.clock() + CONFIG.DecoyCooldown
+        busy = false
+        info.busy = false
+    end)
+    return true
+end
+
+local function leftText()
+    if not placed then
+        return "-"
+    end
+    if placed.expires == math.huge then
+        return "until recalled"
+    end
+    return ("%ds left"):format(math.max(0, math.floor(placed.expires - os.clock())))
+end
+
+local function aimPoint(skipInvisible)
+    local ray
+    if UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter then
+        local viewport = camera.ViewportSize
+        ray = camera:ViewportPointToRay(viewport.X / 2, viewport.Y / 2)
+    else
+        local m = UserInputService:GetMouseLocation()
+        ray = camera:ViewportPointToRay(m.X, m.Y)
+    end
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local ignore = { camera }
+    if localPlayer.Character then
+        table.insert(ignore, localPlayer.Character)
+    end
+    local actor = replicator and replicator.LocalActor
+    if actor and typeof(actor.Character) == "Instance" then
+        table.insert(ignore, actor.Character)
+    end
+    params.FilterDescendantsInstances = ignore
+
+    local result = workspace:Raycast(ray.Origin, ray.Direction * 500, params)
+    if skipInvisible then
+
+        local function belongsToNpc(inst)
+            local m = inst:FindFirstAncestorOfClass("Model")
+            while m do
+                if CONFIG.NpcNames[m.Name] then
+                    return true
+                end
+                m = m:FindFirstAncestorOfClass("Model")
+            end
+            return false
+        end
+        for _ = 1, 8 do
+            if not (result and result.Instance.Transparency >= 1 and not belongsToNpc(result.Instance)) then
+                break
+            end
+            table.insert(ignore, result.Instance)
+            params.FilterDescendantsInstances = ignore
+            result = workspace:Raycast(ray.Origin, ray.Direction * 500, params)
+        end
+    end
+    return result and result.Position or nil, result and result.Instance or nil
+end
+
+local function buildGhost(feet)
+    local model = Instance.new("Model")
+    model.Name = "AutoPickupDecoy"
+
+    local function part(size, cf, shape)
+        local p = Instance.new("Part")
+        p.Anchored = true
+        p.CanCollide = false
+        p.CanQuery = false
+        p.CanTouch = false
+        p.CastShadow = false
+        p.Material = Enum.Material.ForceField
+        p.Color = CONFIG.GhostColor
+        p.Transparency = 0.55
+        if shape then
+            p.Shape = shape
+        end
+        p.Size = size
+        p.CFrame = cf
+        p.Parent = model
+        return p
+    end
+
+    local upright = CFrame.Angles(0, 0, math.rad(90))
+    part(Vector3.new(3.2, 1.9, 1.9), CFrame.new(feet + Vector3.new(0, 2.2, 0)) * upright, Enum.PartType.Cylinder)
+    local head = part(Vector3.new(1.3, 1.3, 1.3), CFrame.new(feet + Vector3.new(0, 4.5, 0)), Enum.PartType.Ball)
+
+    local diameter = CONFIG.GhostRadius * 2
+    local ring = part(Vector3.new(0.1, diameter, diameter), CFrame.new(feet + Vector3.new(0, 0.1, 0)) * upright, Enum.PartType.Cylinder)
+    ring.Material = Enum.Material.Neon
+    ring.Transparency = 0.75
+
+    local highlight = Instance.new("Highlight")
+    highlight.Adornee = model
+    highlight.FillColor = CONFIG.GhostColor
+    highlight.FillTransparency = 0.65
+    highlight.OutlineColor = Color3.new(1, 1, 1)
+    highlight.OutlineTransparency = 0.1
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.Parent = model
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Size = UDim2.fromOffset(190, 34)
+    billboard.StudsOffset = Vector3.new(0, 2, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Adornee = head
+    billboard.Parent = head
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.fromScale(1, 1)
+    label.BackgroundTransparency = 1
+    label.Font = Enum.Font.Code
+    label.TextSize = 14
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.TextStrokeTransparency = 0.4
+    label.Text = "decoy"
+    label.Parent = billboard
+
+    model.Parent = camera
+    return model, label
+end
+
+local function teardownDecoy(reason)
+    following = false
+    if hold then
+        hold:Disconnect()
+        hold = nil
+    end
+    if placed then
+        if placed.model then
+            placed.model:Destroy()
+        end
+        placed = nil
+    end
+    local actor = replicator and replicator.LocalActor
+    if actor then
+        pcall(function()
+            actor.ForceNextPosition = nil
+        end)
+    end
+    if reason then
+        event("DECOY " .. reason)
+    end
+end
+
+local function stopDecoy(reason, instant)
+    following = false
+    local actor = replicator and replicator.LocalActor
+    if placed and hold and not instant and not placed.returning
+        and CONFIG.DecoyWalkSpeed ~= math.huge
+        and actor and actor.Alive ~= false and not actor.Downed
+    then
+        placed.returning = true
+        if placed.model then
+            placed.model:Destroy()
+            placed.model = nil
+            placed.label = nil
+        end
+        event("DECOY RECALLED: " .. (reason or "recalled") .. ", walking the reported position back")
+        return
+    end
+    teardownDecoy(reason and ("RECALLED: " .. reason) or nil)
+end
+
+local function placeDecoyAt(feet, restoring, noSave)
+    if not replicator then
+        event("cannot drop a decoy: replicator not found")
+        return
+    end
+    local actor = replicator.LocalActor
+    if not actor or actor.Alive == false or actor.Downed then
+        event("cannot drop a decoy while dead or downed")
+        return
+    end
+    if busy then
+        event("a hop session is running, try again in a second")
+        return
+    end
+
+    local real = getOrigin()
+    local distance = real and (feet - real).Magnitude or 0
+    local ignoreDistance = (restoring and CONFIG.RestoreIgnoresDistance) or (noSave and CONFIG.FollowIgnoresDistance)
+    if distance > CONFIG.MaxDecoyDistance and not ignoreDistance then
+        event(("decoy refused: %.0f studs away, max is %d"):format(distance, CONFIG.MaxDecoyDistance))
+        return
+    end
+
+    local startPos = placed and placed.reported or getOrigin()
+    teardownDecoy()
+
+    if not noSave and not (CONFIG.KeepFirstSpot and savedDecoy) then
+        savedDecoy = { feet = feet }
+        event("saved this spot for remove / restore")
+    end
+
+    local model, label = buildGhost(feet)
+    local goal = feet + CONFIG.DecoyOffset
+    placed = {
+        feet = feet,
+        goal = goal,
+        reported = startPos or goal,
+        expires = os.clock() + CONFIG.PlacedMaxTime,
+        model = model,
+        label = label,
+        picked = 0,
+        returning = false,
+    }
+    info.placedFails = 0
+    stats.placedDrops += 1
+
+    local nearby, nearest = 0, math.huge
+    for _, child in dropContainer:GetChildren() do
+        if child:IsA("Attachment") then
+            local prompt = child:FindFirstChild("PickUp")
+            if prompt and prompt:IsA("ProximityPrompt") then
+                local d = (child.WorldPosition - goal).Magnitude
+                nearest = math.min(nearest, d)
+                if d <= prompt.MaxActivationDistance - CONFIG.BatchMargin then
+                    nearby += 1
+                end
+            end
+        end
+    end
+    event(("DECOY %s %.1f studs away, %d item(s) in pickup range of it (nearest %.1f studs)"):format(
+        restoring and "RESTORED" or "DROPPED", distance, nearby, nearest == math.huge and -1 or nearest))
+    if nearby == 0 and not noSave then
+        event("nothing is in pickup range of the ghost, aim at the ground right next to the items")
+    end
+
+    hold = RunService.Heartbeat:Connect(function(dt)
+        if auraSpoofing then return end  -- aura is briefly owning ForceNextPosition
+        if env.AutoPickupToken ~= token then
+            teardownDecoy()
+            return
+        end
+        local a = replicator.LocalActor
+        if not placed or not a then
+            return
+        end
+        if a.Alive == false or a.Downed then
+            teardownDecoy("RECALLED: you died or were downed")
+            return
+        end
+
+        local here = getOrigin()
+        local target = placed.goal
+        if placed.returning then
+            target = here or placed.reported
+        elseif os.clock() > placed.expires then
+            stopDecoy("expired")
+        elseif CONFIG.RecallWhenFar and here and (here - placed.reported).Magnitude > CONFIG.MaxDecoyDistance * 1.5 then
+            stopDecoy("you moved too far from it")
+        end
+        if not placed then
+            return
+        end
+
+        if following and not placed.returning then
+            local npc = selectedNpc
+            local root = npc and npc.Parent and npcRoot(npc)
+            if root then
+                local newFeet = root.Position - Vector3.new(0, selectedFeetDrop, 0) + CONFIG.FollowOffset
+                if placed.model then
+                    placed.model:PivotTo(placed.model:GetPivot() + (newFeet - placed.feet))
+                end
+                placed.feet = newFeet
+                placed.goal = newFeet + CONFIG.DecoyOffset
+                target = placed.goal
+            end
+        end
+
+        local delta = target - placed.reported
+        local speed = CONFIG.DecoyWalkSpeed
+        if speed == math.huge or delta.Magnitude <= speed * dt then
+            placed.reported = target
+        else
+            placed.reported = placed.reported + delta.Unit * (speed * dt)
+        end
+
+        if placed.returning and here and (placed.reported - here).Magnitude < 1 then
+            teardownDecoy("returned, your real position resumed")
+            return
+        end
+
+        a.ForceNextPosition = placed.reported
     end)
 end
 
--- ---------------------------------------------------------------------------
--- Simple status panel — no buttons, no drag logic, just a readout.
--- ---------------------------------------------------------------------------
-local gui=Instance.new("ScreenGui")
-gui.Name="MeleeAuraTest";gui.ResetOnSpawn=false;gui.DisplayOrder=999
-pcall(function() gui.Parent=(gethui and gethui()) or game:GetService("CoreGui") end)
-if not gui.Parent then gui.Parent=LocalPlayer:WaitForChild("PlayerGui") end
+local function dropDecoy()
+    local feet = aimPoint()
+    if not feet then
+        event("no surface under the crosshair, aim at the ground or a wall")
+        return
+    end
+    placeDecoyAt(feet, false)
+end
 
-local frame=Instance.new("Frame")
-frame.Size=UDim2.fromOffset(280,190);frame.Position=UDim2.fromOffset(20,120)
-frame.BackgroundColor3=Color3.fromRGB(18,18,22);frame.BackgroundTransparency=.1
-frame.BorderSizePixel=0;frame.Parent=gui
-Instance.new("UICorner",frame).CornerRadius=UDim.new(0,6)
+local function restoreDecoy()
+    if placed and not placed.returning then
+        event("decoy is already placed")
+        return
+    end
+    if not savedDecoy then
+        event("no saved decoy yet, drop one first")
+        return
+    end
 
-local statusLabel=Instance.new("TextLabel")
-statusLabel.Position=UDim2.fromOffset(8,8);statusLabel.Size=UDim2.fromOffset(264,70)
-statusLabel.BackgroundTransparency=1;statusLabel.Font=Enum.Font.Code;statusLabel.TextSize=12
-statusLabel.TextXAlignment=Enum.TextXAlignment.Left;statusLabel.TextYAlignment=Enum.TextYAlignment.Top
-statusLabel.TextColor3=Color3.fromRGB(210,215,225);statusLabel.Text="";statusLabel.Parent=frame
+    placeDecoyAt(savedDecoy.feet, true)
+end
 
-local logLabel=Instance.new("TextLabel")
-logLabel.Position=UDim2.fromOffset(8,82);logLabel.Size=UDim2.fromOffset(264,100)
-logLabel.BackgroundTransparency=1;logLabel.Font=Enum.Font.Code;logLabel.TextSize=11
-logLabel.TextWrapped=true;logLabel.TextXAlignment=Enum.TextXAlignment.Left
-logLabel.TextYAlignment=Enum.TextYAlignment.Bottom;logLabel.TextColor3=Color3.fromRGB(170,215,175)
-logLabel.Text="";logLabel.Parent=frame
+local function toggleDecoy()
+    if placed and not placed.returning then
+        stopDecoy("removed (saved, press again to restore it)")
+    else
+        restoreDecoy()
+    end
+end
 
-RunService.RenderStepped:Connect(function()
-    local targetName=A.targetActor and A.targetActor.Character and A.targetActor.Character.Name or "-"
-    statusLabel.Text=table.concat({
-        ("melee aura: %s    headshot: %s"):format(A.on and "ON" or "OFF",A.headshot and "ON" or "OFF"),
-        ("target: %s    range: %d studs"):format(targetName,A.range),
-        ("swings: %d    impacts: %d"):format(A.swings,A.impacts),
-        ("status: %s"):format(A.status),
-    },"\n")
-    logLabel.Text=table.concat(A.log,"\n")
-end)
+local streamBusy = false
+local streamWarned = false
 
-RunService.Heartbeat:Connect(function()
-    local ok,err=pcall(auraStep)
-    if not ok then setStatus("error: "..tostring(err)) end
-end)
-
-UIS.InputBegan:Connect(function(input,processed)
-    if processed then return end
-    if input.KeyCode==Enum.KeyCode.B then
-        A.on=not A.on
-        setStatus(A.on and "enabled" or "disabled")
-        if not A.on then
-            local la=myActor()
-            if la then pcall(function() la.ForceNextPosition=nil end) end
+local function requestStream()
+    if streamBusy or not placed or placed.returning then
+        return
+    end
+    streamBusy = true
+    local center = placed.goal
+    task.spawn(function()
+        local ok, err = pcall(function()
+            localPlayer:RequestStreamAroundAsync(center, CONFIG.StreamTimeout)
+        end)
+        if not ok and not streamWarned then
+            streamWarned = true
+            event("stream request failed: " .. tostring(err) .. " (the map may already be fully loaded)")
         end
+        streamBusy = false
+    end)
+end
+
+local function noteDecoyFail(s)
+    info.placedFails += 1
+    event(("no response for %s at the placed decoy (%d/%d)"):format(s.name, info.placedFails, CONFIG.MaxDecoyFailures))
+    if info.placedFails >= CONFIG.MaxDecoyFailures then
+        if CONFIG.RecallOnNoResponse then
+            stopDecoy("no server response (it may reject the spoofed position, or your inventory is full)")
+        else
+            event(("%d unanswered pickups in a row; decoy kept active (it may be rejected, or your inventory is full)"):format(info.placedFails))
+            info.placedFails = 0
+        end
+    end
+end
+
+env.AutoPickup.Drop = dropDecoy
+env.AutoPickup.Recall = stopDecoy
+env.AutoPickup.Restore = restoreDecoy
+env.AutoPickup.Toggle = toggleDecoy
+
+local function clearSavedDecoy()
+    savedDecoy = nil
+    event("saved spot cleared, your next drop becomes the new saved spot")
+end
+env.AutoPickup.ClearSaved = clearSavedDecoy
+
+local function actorOfModel(model)
+    if not replicator then
+        return nil
+    end
+    for uid, a in replicator.Actors do
+        if type(a) == "table" and a.Character == model then
+            return a, uid
+        end
+    end
+    return nil
+end
+
+local function isNpc(model)
+    if not model:IsA("Model") or model.Name == "AutoPickupDecoy" then
+        return false
+    end
+    local me = replicator and replicator.LocalActor
+    if model == localPlayer.Character or (me and model == me.Character) then
+        return false
+    end
+
+    if actorOfModel(model) then
+        return npcRoot(model) ~= nil
+    end
+
+    if next(CONFIG.NpcNames) ~= nil and not CONFIG.NpcNames[model.Name] then
+        return false
+    end
+    if CONFIG.NpcNeedsHumanoid and not model:FindFirstChildOfClass("Humanoid") then
+        return false
+    end
+    return npcRoot(model) ~= nil
+end
+
+local function npcFromInstance(inst)
+    local m = inst and inst:FindFirstAncestorOfClass("Model")
+    while m do
+        if isNpc(m) then
+            return m
+        end
+        m = m:FindFirstAncestorOfClass("Model")
+    end
+    return nil
+end
+
+local function clearSelection()
+    if selectedHL then
+        selectedHL:Destroy()
+        selectedHL = nil
+    end
+    selectedNpc = nil
+    selectedUid = nil
+    following = false
+end
+
+local toggleFollow
+
+local function selectNpc()
+    local npc = hoveredNpc
+    if not (npc and npc.Parent) then
+        local _, inst = aimPoint(true)
+        npc = npcFromInstance(inst)
+    end
+    if not npc then
+        event("no NPC under the crosshair")
+        return
+    end
+    if npc == selectedNpc then
+        clearSelection()
+        event("NPC deselected")
+        return
+    end
+    if selectedHL then
+        selectedHL:Destroy()
+    end
+    selectedNpc = npc
+    selectedFeetDrop = npcFeetDrop(npc, npcRoot(npc))
+    local _, uid = actorOfModel(npc)
+    selectedUid = uid
+
+    local hl = Instance.new("Highlight")
+    hl.Adornee = npc
+    hl.FillColor = following and CONFIG.FollowColor or CONFIG.SelectColor
+    hl.FillTransparency = 0.5
+    hl.OutlineColor = hl.FillColor
+    hl.OutlineTransparency = 0
+    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    hl.Parent = camera
+    selectedHL = hl
+
+    if following then
+        event(("NPC re-targeted: %s (decoy follows it now)"):format(npc.Name))
+    else
+        event(("NPC selected: %s%s, press %s to follow it"):format(npc.Name, uid and (" (" .. uid .. ")") or " (not a networked actor)", CONFIG.FollowKey.Name))
+        if CONFIG.SelectStartsFollow then
+            toggleFollow()
+        end
+    end
+end
+
+toggleFollow = function()
+    if following then
+        following = false
+        event("stopped following, decoy holds its last spot")
+        return
+    end
+    local root = selectedNpc and selectedNpc.Parent and npcRoot(selectedNpc)
+    if not root then
+        event(("select an NPC first (aim and press %s)"):format(CONFIG.SelectKey.Name))
+        return
+    end
+    if not (placed and not placed.returning) then
+        placeDecoyAt(root.Position - Vector3.new(0, selectedFeetDrop, 0) + CONFIG.FollowOffset, false, true)
+        if not placed then
+            return
+        end
+    end
+    following = true
+    event("decoy following " .. selectedNpc.Name)
+end
+
+env.AutoPickup.Select = selectNpc
+env.AutoPickup.Follow = toggleFollow
+
+local meleeConfig
+do
+    local ok, result = pcall(function()
+        return require(game:GetService("ReplicatedStorage").Shared.Configs.Melee)
+    end)
+    if ok and type(result) == "table" then
+        meleeConfig = result
+    end
+end
+
+local function equippedMelee()
+    local a = replicator and replicator.LocalActor
+    if not a then
+        return nil
+    end
+    local ok, item = pcall(function()
+        local eq = a._equipped
+        return eq and a._inventory and a._inventory[eq]
+    end)
+    if not (ok and type(item) == "table") then
+        return nil
+    end
+    local okb, build = pcall(function()
+        return item._build
+    end)
+    if not (okb and build) then
+        return nil
+    end
+    local cfg = meleeConfig and meleeConfig[build]
+    if meleeConfig and not cfg then
+        return nil
+    end
+    return item, (cfg and cfg.Time) or CONFIG.AuraTime, (cfg and cfg.Delay) or CONFIG.AuraDelay, (cfg and cfg.Reach) or CONFIG.AuraReach
+end
+
+local function setAuraStatus(text)
+    if auraStats.status ~= text then
+        auraStats.status = text
+        event("AURA " .. text)
+    end
+end
+
+local function reportedPosition()
+    if placed and not placed.returning then
+        return placed.reported
+    end
+    return getOrigin()
+end
+
+local function targetPart(uid)
+    local t = replicator.Actors[uid]
+    if not t or t.Alive == false then
+        return nil, nil
+    end
+    local char = t.Character
+    local part = typeof(char) == "Instance" and char:FindFirstChild(CONFIG.AuraPart)
+    return part or nil, t
+end
+
+local function auraStep()
+    local me = replicator and replicator.LocalActor
+    if not me or me.Alive == false or me.Downed then
+        setAuraStatus("paused: dead or downed")
+        return
+    end
+    if not selectedUid then
+        setAuraStatus(selectedNpc and "paused: target has no UID" or ("waiting for target (" .. CONFIG.SelectKey.Name .. ")"))
+        return
+    end
+    local part, target = targetPart(selectedUid)
+    if not part then
+        setAuraStatus(target and ("paused: target has no " .. CONFIG.AuraPart) or "paused: target gone")
+        return
+    end
+
+    local item, swingTime, swingDelay, reach = equippedMelee()
+    if not item and CONFIG.AuraNeedsMelee then
+        setAuraStatus("paused: equip a melee weapon")
+        return
+    end
+    swingTime = swingTime or CONFIG.AuraTime
+    swingDelay = swingDelay or CONFIG.AuraDelay
+    reach = reach or CONFIG.AuraReach
+
+    if not CONFIG.AuraLongRange then
+        if CONFIG.AuraAutoFollow and not following and selectedNpc and os.clock() >= auraFollowAt then
+            auraFollowAt = os.clock() + 2
+            toggleFollow()
+        end
+        local from = reportedPosition()
+        if not from then return end
+        local dist = (part.Position - from).Magnitude
+        if dist > reach - CONFIG.AuraReachMargin then
+            setAuraStatus(("closing in (%.1f / %.1f studs)"):format(dist, reach))
+            return
+        end
+    end
+
+    local now = os.clock()
+    if now < auraNext then return end
+    auraNext = now + swingTime
+
+    local modeTag = CONFIG.AuraLongRange and " [∞ range]" or (" reach " .. ("%.1f"):format(reach))
+    setAuraStatus(("swinging → %s (%s)%s"):format(
+        CONFIG.AuraPart, selectedNpc and selectedNpc.Name or "?", modeTag))
+
+    local uid = selectedUid
+    local capturedItem = item
+
+    if CONFIG.AuraLongRange then
+        -- Long-range path: spoof ForceNextPosition near target, fire slash+impact there
+        local tPos = part.Position
+        local spoofOffset = math.min(CONFIG.AuraSpoofOffset, reach - CONFIG.AuraReachMargin - 0.1)
+        local spoofPos = tPos + Vector3.new(spoofOffset, 0, 0)
+
+        task.spawn(function()
+            auraSpoofing = true
+            me.ForceNextPosition = spoofPos
+            task.wait(CONFIG.AuraSpoofWait)
+
+            if not auraOn or env.AutoPickupToken ~= token then
+                me.ForceNextPosition = nil
+                auraSpoofing = false
+                return
+            end
+
+            -- Fire slash at spoofed position
+            local n = math.random(1, 3)
+            network:FireServer("InventoryAction", "Slash", n)
+            if CONFIG.AuraAnimate and capturedItem and capturedItem.Slash then
+                pcall(capturedItem.Slash, capturedItem, n)
+            end
+
+            task.wait(swingDelay)
+
+            if not auraOn or env.AutoPickupToken ~= token then
+                me.ForceNextPosition = nil
+                auraSpoofing = false
+                return
+            end
+
+            local p2 = targetPart(uid)
+            if not p2 then
+                me.ForceNextPosition = nil
+                auraSpoofing = false
+                return
+            end
+
+            -- Compute hit point on target surface facing spoofed position
+            local dir = spoofPos - p2.Position
+            local hitDir = dir.Magnitude > 0.001 and dir.Unit or Vector3.new(1, 0, 0)
+            local hit = p2.Position + hitDir * (p2.Size.X / 2)
+            network:FireServer("InventoryAction", "Impact", { hit.X, hit.Y, hit.Z }, uid, p2.Name)
+            auraStats.swings += 1
+
+            -- Restore ForceNextPosition
+            task.wait(CONFIG.AuraSpoofReset)
+            if me.ForceNextPosition == spoofPos then
+                if placed and not placed.returning then
+                    me.ForceNextPosition = placed.reported
+                else
+                    me.ForceNextPosition = nil
+                end
+            end
+            auraSpoofing = false
+
+            debugLog("impact[LR]", uid, p2.Name, "spoofed @", spoofPos)
+            if auraStats.swings % 10 == 0 then
+                event(("AURA %d swings sent"):format(auraStats.swings))
+            end
+        end)
+    else
+        -- Proximity path: original logic
+        local n = math.random(1, 3)
+        network:FireServer("InventoryAction", "Slash", n)
+        if CONFIG.AuraAnimate and capturedItem and capturedItem.Slash then
+            pcall(capturedItem.Slash, capturedItem, n)
+        end
+
+        task.delay(swingDelay, function()
+            if env.AutoPickupToken ~= token or not auraOn then return end
+            local p2 = targetPart(uid)
+            local f2 = reportedPosition()
+            if not p2 or not f2 then return end
+            if (p2.Position - f2).Magnitude > reach - CONFIG.AuraReachMargin + 0.3 then return end
+            local dir = f2 - p2.Position
+            local hit = p2.Position + (dir.Magnitude > 0 and dir.Unit or Vector3.zero) * (p2.Size.X / 2)
+            network:FireServer("InventoryAction", "Impact", { hit.X, hit.Y, hit.Z }, uid, p2.Name)
+            auraStats.swings += 1
+            debugLog("impact", uid, p2.Name, (p2.Position - f2).Magnitude)
+            if auraStats.swings % 10 == 0 then
+                event(("AURA %d swings sent"):format(auraStats.swings))
+            end
+        end)
+    end
+end
+
+local function toggleAura()
+    auraOn = not auraOn
+    auraStats.status = ""
+    event("melee aura " .. (auraOn and "ON" or "OFF"))
+end
+env.AutoPickup.Aura = toggleAura
+
+local function scan()
+    if busy then
+        return
+    end
+
+    local real = getOrigin()
+    if not real then
+        return
+    end
+
+    local origin = real
+    if placed then
+        origin = placed.reported
+    end
+
+    local seen = {}
+    local all = {}
+
+    for _, child in dropContainer:GetChildren() do
+        if child:IsA("Attachment") then
+            local prompt = child:FindFirstChild("PickUp")
+            if prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled then
+                seen[child.Name] = true
+                local pos = child.WorldPosition
+                table.insert(all, {
+                    attachment = child,
+                    prompt = prompt,
+                    pos = pos,
+                    distance = (pos - origin).Magnitude,
+                    real = (pos - real).Magnitude,
+                })
+            end
+        end
+    end
+
+    table.sort(all, function(a, b)
+        return a.distance < b.distance
+    end)
+
+    info.prompts = #all
+    info.nearest = all[1] and all[1].distance or -1
+
+    local now = os.clock()
+    for _, c in all do
+        local s = getState(c.attachment, c.prompt)
+        local normal = c.prompt.MaxActivationDistance
+        local limit = placed and (normal - CONFIG.BatchMargin) or normal
+
+        if s.blocked and c.distance <= limit then
+            s.blocked = false
+            s.consecutive = 0
+            s.decoyTries = 0
+            s.nextTry = 0
+        end
+
+        if not s.blocked and now >= s.nextTry then
+            if c.distance <= limit then
+                if now - lastFire >= CONFIG.PickupSpacing then
+                    s.consecutive += 1
+                    if s.consecutive >= CONFIG.MaxRetries then
+                        s.consecutive = 0
+                        s.nextTry = now + CONFIG.BackoffDelay
+                        if placed then
+                            noteDecoyFail(s)
+                        end
+                    else
+                        s.nextTry = now + CONFIG.RetryDelay
+                    end
+                    fireOne(c.attachment, c.prompt, c.real, placed ~= nil)
+                end
+                break
+            elseif not placed and CONFIG.DecoyEnabled and c.distance <= CONFIG.MaxDecoyDistance and now >= nextDecoy then
+                if startDecoy(c, all) then
+                    break
+                end
+            end
+        end
+    end
+
+    for uid, s in state do
+        if not seen[uid] then
+            if s.conn then
+                s.conn:Disconnect()
+            end
+            state[uid] = nil
+        end
+    end
+end
+
+local function buildMenu()
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "AutoPickupDebug"
+    gui.ResetOnSpawn = false
+    gui.DisplayOrder = 999
+
+    local parent = (gethui and gethui()) or game:GetService("CoreGui")
+    local ok = pcall(function()
+        gui.Parent = parent
+    end)
+    if not ok or not gui.Parent then
+        gui.Parent = localPlayer:WaitForChild("PlayerGui")
+    end
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.fromOffset(340, 472)
+    frame.Position = UDim2.fromOffset(20, 120)
+    frame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+    frame.BackgroundTransparency = 0.08
+    frame.BorderSizePixel = 0
+    frame.Active = true
+    frame.Parent = gui
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 6)
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, 0, 0, 26)
+    title.BackgroundColor3 = Color3.fromRGB(34, 34, 42)
+    title.BorderSizePixel = 0
+    title.Font = Enum.Font.Code
+    title.TextSize = 13
+    title.TextColor3 = Color3.fromRGB(235, 235, 240)
+    title.Text = "autopickup debug  (drag me, F8 hides)"
+    title.Parent = frame
+    Instance.new("UICorner", title).CornerRadius = UDim.new(0, 6)
+
+    local status = Instance.new("TextLabel")
+    status.Position = UDim2.fromOffset(8, 32)
+    status.Size = UDim2.fromOffset(324, 112)
+    status.BackgroundTransparency = 1
+    status.Font = Enum.Font.Code
+    status.TextSize = 12
+    status.TextXAlignment = Enum.TextXAlignment.Left
+    status.TextYAlignment = Enum.TextYAlignment.Top
+    status.TextColor3 = Color3.fromRGB(205, 210, 220)
+    status.Text = ""
+    status.Parent = frame
+
+    local function makeButton(text, x, y)
+        local b = Instance.new("TextButton")
+        b.Position = UDim2.fromOffset(x, y)
+        b.Size = UDim2.fromOffset(158, 26)
+        b.BackgroundColor3 = Color3.fromRGB(46, 46, 58)
+        b.BorderSizePixel = 0
+        b.Font = Enum.Font.Code
+        b.TextSize = 12
+        b.TextColor3 = Color3.fromRGB(235, 235, 240)
+        b.Text = text
+        b.Parent = frame
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
+        return b
+    end
+
+    local toggleBtn = makeButton("autopickup", 8, 148)
+    local hopBtn = makeButton("hop decoy", 174, 148)
+    local dropBtn = makeButton("drop decoy  ( ] )", 8, 178)
+    local recallBtn = makeButton("recall decoy  ( [ )", 174, 178)
+    local toggleDecoyBtn = makeButton("remove / restore  ( \\ )", 8, 208)
+    toggleDecoyBtn.Size = UDim2.fromOffset(324, 26)
+
+    toggleBtn.MouseButton1Click:Connect(function()
+        CONFIG.Enabled = not CONFIG.Enabled
+    end)
+    hopBtn.MouseButton1Click:Connect(function()
+        CONFIG.DecoyEnabled = replicator ~= nil and not CONFIG.DecoyEnabled
+        info.failStreak = 0
+    end)
+    dropBtn.MouseButton1Click:Connect(dropDecoy)
+    recallBtn.MouseButton1Click:Connect(function()
+        stopDecoy("recalled from the menu")
+    end)
+    toggleDecoyBtn.MouseButton1Click:Connect(toggleDecoy)
+
+    local auraBtn = makeButton("melee aura", 8, 238)
+    local followBtn = makeButton("follow target", 174, 238)
+    local function makeKeyButton(x, configName, label)
+        local b = makeButton(label, x, 268)
+        b.Size = UDim2.fromOffset(104, 26)
+        b.TextScaled = true
+        b.MouseButton1Click:Connect(function()
+            rebinding = (rebinding ~= configName) and configName or nil
+        end)
+        return b
+    end
+    local selectKeyBtn = makeKeyButton(8, "SelectKey", "select")
+    local followKeyBtn = makeKeyButton(118, "FollowKey", "follow")
+    local auraKeyBtn = makeKeyButton(228, "AuraKey", "aura")
+
+    auraBtn.MouseButton1Click:Connect(toggleAura)
+    followBtn.MouseButton1Click:Connect(toggleFollow)
+
+    local logLabel = Instance.new("TextLabel")
+    logLabel.Position = UDim2.fromOffset(8, 302)
+    logLabel.Size = UDim2.fromOffset(324, 162)
+    logLabel.BackgroundTransparency = 1
+    logLabel.Font = Enum.Font.Code
+    logLabel.TextSize = 11
+    logLabel.TextWrapped = true
+    logLabel.TextXAlignment = Enum.TextXAlignment.Left
+    logLabel.TextYAlignment = Enum.TextYAlignment.Bottom
+    logLabel.TextColor3 = Color3.fromRGB(170, 215, 175)
+    logLabel.Text = ""
+    logLabel.Parent = frame
+
+    local dragging, dragStart, startPos
+    title.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local d = input.Position - dragStart
+            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+
+    local function onOff(v)
+        return v and "ON" or "OFF"
+    end
+
+    local function update()
+        local decoyLine
+        if placed then
+            local gap = (placed.goal - placed.reported).Magnitude
+            local phase = placed.returning and "returning" or (gap > 1 and ("walking, %.0f studs to go"):format(gap) or "holding")
+            decoyLine = ("decoy: %s, %s, %d picked, fails %d/%d"):format(
+                phase, leftText(), placed.picked, info.placedFails, CONFIG.MaxDecoyFailures)
+        elseif savedDecoy then
+            decoyLine = "placed decoy: none (saved spot ready, \\ restores)"
+        else
+            decoyLine = "placed decoy: none"
+        end
+        status.Text = table.concat({
+            ("autopickup: %s    hop: %s    busy: %s"):format(onOff(CONFIG.Enabled), onOff(CONFIG.DecoyEnabled), info.busy and "yes" or "no"),
+            ("origin: %s    npc: %s%s"):format(
+                placed and "placed decoy" or info.source,
+                selectedNpc and selectedNpc.Name or "-",
+                following and " (following)" or ""),
+            ("prompts: %d    nearest: %s"):format(info.prompts, info.nearest >= 0 and ("%.1f studs"):format(info.nearest) or "-"),
+            ("picked: %d (decoy %d)    blocked: %d"):format(stats.picked, stats.decoyPicked, stats.rejected),
+            ("farthest: %.1f studs   aura: %s (%d)"):format(stats.maxDistance, onOff(auraOn), auraStats.swings),
+            ("hop sessions: %d    fail streak: %d/%d"):format(stats.decoySessions, info.failStreak, CONFIG.MaxDecoyFailures),
+            decoyLine,
+        }, "\n")
+        toggleBtn.Text = "autopickup: " .. onOff(CONFIG.Enabled)
+        hopBtn.Text = "hop decoy: " .. onOff(CONFIG.DecoyEnabled)
+        auraBtn.Text = "melee aura: " .. onOff(auraOn) .. (CONFIG.AuraLongRange and " [∞]" or "")
+        followBtn.Text = "follow target: " .. onOff(following)
+        selectKeyBtn.Text = rebinding == "SelectKey" and "press a key..." or ("select: " .. CONFIG.SelectKey.Name)
+        followKeyBtn.Text = rebinding == "FollowKey" and "press a key..." or ("follow: " .. CONFIG.FollowKey.Name)
+        auraKeyBtn.Text = rebinding == "AuraKey" and "press a key..." or ("aura: " .. CONFIG.AuraKey.Name)
+
+        local first = math.max(1, #menuLines - 11)
+        local shown = {}
+        for i = first, #menuLines do
+            table.insert(shown, menuLines[i])
+        end
+        logLabel.Text = table.concat(shown, "\n")
+    end
+
+    return gui, update
+end
+
+local menuGui, menuUpdate
+do
+    local ok, g, u = pcall(buildMenu)
+    if ok then
+        menuGui, menuUpdate = g, u
+    else
+        warn("[autopickup] debug menu failed to build: " .. tostring(g))
+    end
+end
+
+UserInputService.InputBegan:Connect(function(input, processed)
+    if env.AutoPickupToken ~= token then
+        return
+    end
+
+    if rebinding then
+        if input.UserInputType == Enum.UserInputType.Keyboard then
+            if input.KeyCode ~= Enum.KeyCode.Escape then
+                CONFIG[rebinding] = input.KeyCode
+                event(("%s rebound to %s"):format(rebinding, input.KeyCode.Name))
+            end
+            rebinding = nil
+        end
+        return
+    end
+    if input.KeyCode == CONFIG.ToggleKey then
+        CONFIG.Enabled = not CONFIG.Enabled
+        event("autopickup " .. (CONFIG.Enabled and "enabled" or "disabled"))
+    elseif input.KeyCode == CONFIG.SummaryKey then
+        printSummary()
+    elseif input.KeyCode == CONFIG.MenuKey and menuGui then
+        menuGui.Enabled = not menuGui.Enabled
+    elseif input.KeyCode == CONFIG.DropKey then
+        dropDecoy()
+    elseif input.KeyCode == CONFIG.RecallKey then
+        stopDecoy("recalled")
+    elseif input.KeyCode == CONFIG.ToggleDecoyKey then
+        toggleDecoy()
+    elseif input.KeyCode == CONFIG.ClearSavedKey then
+        clearSavedDecoy()
+    elseif input.KeyCode == CONFIG.SelectKey then
+        selectNpc()
+    elseif input.KeyCode == CONFIG.FollowKey then
+        toggleFollow()
+    elseif input.KeyCode == CONFIG.AuraKey then
+        toggleAura()
     end
 end)
 
-logEvent("melee aura test loaded — press B to toggle")
+task.spawn(function()
+    while env.AutoPickupToken == token do
+        if CONFIG.Enabled then
+            local ok, err = pcall(scan)
+            if not ok then
+                debugLog("scan error", err)
+            end
+        end
+        task.wait(CONFIG.ScanInterval)
+    end
+end)
+
+task.spawn(function()
+    while env.AutoPickupToken == token do
+        if CONFIG.StreamAroundDecoy then
+            pcall(requestStream)
+        end
+        task.wait(CONFIG.StreamInterval)
+    end
+end)
+
+task.spawn(function()
+    while env.AutoPickupToken == token do
+        if auraOn then
+            local ok, err = pcall(auraStep)
+            if not ok then
+                debugLog("aura error", err)
+            end
+        end
+        task.wait(0.05)
+    end
+end)
+
+task.spawn(function()
+    hoverHL = Instance.new("Highlight")
+    hoverHL.FillColor = CONFIG.HoverColor
+    hoverHL.FillTransparency = 0.6
+    hoverHL.OutlineColor = CONFIG.HoverColor
+    hoverHL.OutlineTransparency = 0
+    hoverHL.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    hoverHL.Parent = camera
+
+    while env.AutoPickupToken == token do
+        local npc = nil
+        if CONFIG.HoverEnabled then
+            local ok, _, inst = pcall(aimPoint, true)
+            if ok then
+                npc = npcFromInstance(inst)
+            end
+        end
+        hoveredNpc = npc
+        local show = npc ~= nil and npc ~= selectedNpc
+        hoverHL.Adornee = show and npc or nil
+        hoverHL.FillColor = CONFIG.HoverColor
+        hoverHL.OutlineColor = CONFIG.HoverColor
+        task.wait(0.03)
+    end
+    hoverHL:Destroy()
+end)
+
+task.spawn(function()
+    while env.AutoPickupToken == token do
+
+        if selectedHL then
+            if not (selectedNpc and selectedNpc.Parent) then
+                if following then
+                    following = false
+                    event("followed NPC is gone, decoy holds its last spot")
+                end
+                clearSelection()
+            else
+                selectedHL.FillColor = following and CONFIG.FollowColor or CONFIG.SelectColor
+                selectedHL.OutlineColor = selectedHL.FillColor
+            end
+        end
+        if placed and placed.label then
+            placed.label.Text = ("decoy  %s  (%d picked)"):format(
+                following and "following" or leftText(), placed.picked)
+        end
+        if menuUpdate and menuGui and menuGui.Enabled then
+            pcall(menuUpdate)
+        end
+        task.wait(0.25)
+    end
+    stopDecoy(nil, true)
+    if selectedHL then
+        selectedHL:Destroy()
+    end
+    if menuGui then
+        menuGui:Destroy()
+    end
+end)
+
+print(("[autopickup] running. %s toggle, %s summary, %s menu, %s drop decoy, %s recall, %s remove/restore, %s select NPC, %s follow. log file: %s"):format(
+    CONFIG.ToggleKey.Name, CONFIG.SummaryKey.Name, CONFIG.MenuKey.Name,
+    CONFIG.DropKey.Name, CONFIG.RecallKey.Name, CONFIG.ToggleDecoyKey.Name,
+    CONFIG.SelectKey.Name, CONFIG.FollowKey.Name, CONFIG.LogFile))
