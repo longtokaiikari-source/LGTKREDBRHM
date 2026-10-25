@@ -1,4 +1,4 @@
--- MTC Long-Range Aura Melee v4.1
+-- MTC Long-Range Aura Melee v5
 -- Source đọc: MeleeInventory.lua, ReplicatorService.lua, ActorClass.lua,
 --             CharacterController.lua, MeleeInventoryReplicator.lua, Melee.lua
 --
@@ -6,40 +6,50 @@
 -- │  ReplicatorService.Update() (10Hz / 0.1s):                             │
 -- │    v138 = actor.ForceNextPosition OR actor.SimulatedPosition            │
 -- │    FireUnreliableServer("ReplicateMovement", uid, v138.X,Y,Z, ...)     │
--- │    actor.ForceNextPosition = nil  ← cleared sau mỗi tick               │
+-- │    actor.ForceNextPosition = nil  ← cleared SAU mỗi tick               │
 -- │                                                                         │
--- │  Server nhận ReplicateMovement → actor.ServerPosition = v138           │
--- │  Melee Impact check: (actor.ServerPosition - hitPos).Magnitude ≤ Reach │
+-- │  ReplicateActor handler (server → client):                              │
+-- │    if uid == localUID: chỉ update Health — KHÔNG update position       │
+-- │    → server broadcast position KHÔNG gây teleport cho local actor      │
 -- │                                                                         │
--- │  FIX v4.1: CHỈ set ForceNextPosition, KHÔNG set SimulatedPosition      │
--- │  SimulatedPosition = CharacterController render pos → đụng vào = tele  │
--- │  ForceNextPosition = PRIORITY trong RS, chỉ gửi lên server, ko render  │
--- │  → Character đứng yên, server nghĩ ta đứng cạnh target → HIT           │
+-- │  Teleport bug root cause v4.x:                                          │
+-- │    Loop 6+ tick gửi spoofPos → server lưu spoofPos ~0.6s               │
+-- │    → actor state machine phía server dispatch move event về client      │
+-- │    → character bị kéo về spoofPos                                       │
 -- └────────────────────────────────────────────────────────────────────────┘
 --
--- ┌─ MeleeInventory._use() timing (từ source) ─────────────────────────────┐
--- │  t=0.000 → FireServer("InventoryAction", "Slash", n)                   │
--- │  t=Delay  → actor:Action("Impact", dir)  → raycast → hitPos           │
--- │             FireServer("InventoryAction", "Impact", {x,y,z}, uid, bp)  │
--- │  Delay = 0.25s, Reach = 5–7st (Melee.lua)                             │
+-- ┌─ Fix v5: ONE-SHOT FNP ─────────────────────────────────────────────────┐
+-- │                                                                         │
+-- │  t=0.000  : Slash fired                                                 │
+-- │  t=0.120  : ForceNextPosition = spoofPos  (ĐẶT 1 LẦN DUY NHẤT)        │
+-- │  t≈0.12+  : RS tick đọc FNP → gửi spoofPos → tự clear FNP             │
+-- │             Server.actor.ServerPosition ← spoofPos (1 tick only)       │
+-- │  t=0.250  : Impact fired — server thấy ta "đứng cạnh" target → HIT     │
+-- │  t≈0.250+ : RS tick tiếp gửi real pos → server correct về real pos     │
+-- │                                                                         │
+-- │  Kết quả: server chỉ lưu spoofPos ≤ 0.1s (1 tick) thay vì 0.6s       │
+-- │  → KHÔNG đủ thời gian trigger server-side position correction           │
+-- │  → Character ĐỨNG YÊN suốt quá trình                                   │
+-- │                                                                         │
+-- │  SimulatedPosition KHÔNG bị đụng (CharacterController.Update()         │
+-- │    line 1549 set SimulatedPosition = real_physics_pos mỗi frame)       │
 -- └────────────────────────────────────────────────────────────────────────┘
 --
--- Strategy v4.1:
---   1. Spoof: CHỈ ForceNextPosition=spoofPos @ 0.05s (KHÔNG đụng SimulatedPosition)
---      → RS ưu tiên ForceNextPosition → server nhận spoofPos
---      → SimulatedPosition giữ nguyên thật → character ĐỨNG YÊN
---   2. Slash ngay lập tức (server ghi nhận swing bắt đầu)
---   3. Chờ MeleeDelay=0.25s → RS tick ≥2 lần với spoofPos → server.ServerPosition=spoofPos
---   4. Impact với hitPos mới nhất. Server check: (spoofPos–hitPos).Magnitude=1.5 < 5 → PASS
+-- ┌─ Fix v5: Dead NPC check ───────────────────────────────────────────────┐
+-- │  Layer 1: actor.Alive == false → skip                                  │
+-- │  Layer 2: actor.Health != nil && <= 0 → skip                           │
+-- │  Layer 3: Character không tồn tại hoặc bị destroy → skip              │
+-- │  Layer 4: Humanoid.Health <= 0 → skip                                  │
+-- └────────────────────────────────────────────────────────────────────────┘
 
 -- ============================================================
 -- SINGLETON
 -- ============================================================
-if getgenv().LRM4_Conns then
-    for _, c in ipairs(getgenv().LRM4_Conns) do pcall(function() c:Disconnect() end) end
+if getgenv().LRM5_Conns then
+    for _, c in ipairs(getgenv().LRM5_Conns) do pcall(function() c:Disconnect() end) end
 end
-getgenv().LRM4_Conns = {}
-local function Track(c) table.insert(getgenv().LRM4_Conns, c); return c end
+getgenv().LRM5_Conns = {}
+local function Track(c) table.insert(getgenv().LRM5_Conns, c); return c end
 
 -- ============================================================
 -- SERVICES
@@ -71,7 +81,7 @@ local function DoScan()
         then
             ReplicatorService = obj
         end
-        -- Network: _code (UUID) + _key (5 numbers) + _events + FireServer
+        -- Network: _code (UUID) + _key (5+ numbers) + _events + FireServer
         if not Network then
             local fs = rawget(obj, "FireServer")
             local ev = rawget(obj, "_events")
@@ -198,21 +208,56 @@ local function GetUID(actor)
 end
 
 -- ============================================================
+-- IsActorDead — multi-layer dead check
+-- ============================================================
+local function IsActorDead(actor)
+    -- Layer 1: Alive flag (MTC sets Alive=false khi NPC chết)
+    local alive = rawget(actor, "Alive")
+    if alive == false then return true end
+
+    -- Layer 2: Health field
+    local health = rawget(actor, "Health")
+    if health ~= nil and health <= 0 then return true end
+
+    -- Layer 3: Character không tồn tại
+    local char = rawget(actor, "Character")
+    if not char then return true end
+    -- Character bị destroy (Parent = nil)
+    local ok, parent = pcall(function() return char.Parent end)
+    if not ok or not parent then return true end
+
+    -- Layer 4: Humanoid.Health (fallback cho legacy NPC)
+    local ok2, hum = pcall(function()
+        return char:FindFirstChildOfClass("Humanoid")
+    end)
+    if ok2 and hum then
+        local ok3, hp = pcall(function() return hum.Health end)
+        if ok3 and hp ~= nil and hp <= 0 then return true end
+    end
+
+    return false
+end
+
+-- ============================================================
 -- CONFIG
 -- ============================================================
 local AK = {
     Enabled     = false,
     Range       = 9999,    -- studs, 9999 = toàn map
     Interval    = 0.1,     -- giây giữa mỗi batch tick
-    BatchSize   = 5,       -- target mỗi batch
+    BatchSize   = 5,       -- targets mỗi batch
 
     -- Spoof config — từ source analysis
-    -- Reach min=5st (Melee.lua), offset=1.5st → 1.5 < 5 → luôn PASS
-    SpoofOffset  = 1.5,    -- khoảng cách spoofPos–hitPos (studs)
+    -- Reach min=5st (Melee.lua), offset=1.5st → luôn < Reach → PASS
+    SpoofOffset  = 1.5,   -- khoảng cách spoofPos–hitPos (studs)
 
     -- MeleeDelay: từ Melee.lua Delay field = 0.25s
-    -- Slash → task.delay(Delay, Impact) — phải đúng với legit timing
+    -- Slash → task.delay(Delay, Impact) — phải match legit timing
     MeleeDelay   = 0.25,
+
+    -- FNP lead time: đặt FNP trước Impact bao lâu để RS kịp tick
+    -- RS 10Hz = 0.1s/tick. Lead = 0.13s → ít nhất 1 tick trong window
+    FNPLead      = 0.13,
 
     TargetPart   = "Head",
     _lastFire    = 0,
@@ -222,119 +267,104 @@ local AK = {
 }
 
 -- ============================================================
--- AK_Fire — chuỗi spoof + Slash→delay→Impact
+-- AK_FindPart — helper tìm body part của actor
+-- ============================================================
+local function AK_FindPart(char, partName)
+    return char:FindFirstChild(partName)
+        or char:FindFirstChild("Head")
+        or char:FindFirstChild("UpperTorso")
+        or char:FindFirstChild("HumanoidRootPart")
+        or char.PrimaryPart
+end
+
+-- ============================================================
+-- AK_Fire — ONE-SHOT spoof + Slash → Impact
 --
--- Timeline:
---   t=0.000  : Set ForceNextPosition=spoofPos + SimulatedPosition=spoofPos
---   t=0.000  : FireServer Slash (server ghi nhận swing)
---   t=0.050  : Re-set ForceNextPosition + SimulatedPosition
---   t=0.100  : ReplicatorService.Update() tick #1 → gửi spoofPos lên server
---              server.actor.ServerPosition ← spoofPos
---   t=0.150  : Re-set ForceNextPosition + SimulatedPosition
---   t=0.200  : ReplicatorService.Update() tick #2 → confirm spoofPos
---   t=0.250  : FireServer Impact với hitPos tươi
---              server check: (spoofPos–hitPos).Magnitude = SpoofOffset ≤ Reach → HIT
+-- Timeline (MeleeDelay=0.25, FNPLead=0.13):
+--   t=0.000  : Slash fired
+--   t=0.120  : Set ForceNextPosition = spoofPos (ĐÚ́NG 1 LẦN)
+--   t≈0.12+  : RS tick đọc FNP → gửi spoofPos lên server → clear FNP
+--              → server.actor.ServerPosition ← spoofPos
+--              → SimulatedPosition = KHÔNG bị đụng → character ĐỨNG YÊN
+--   t=0.250  : Impact fired (fresh hitPos)
+--              → server check: (spoofPos–hitPos).Magnitude = ~1.5st ≤ 5st → PASS
+--   t≈0.250+ : RS tick tiếp gửi real pos → server correct lại
+--              → character KHÔNG bị kéo đi đâu cả
 -- ============================================================
 local function AK_Fire(actor)
     local net = AK_FindNet()
     if not net then return false end
     local remote = AK_GetRemote()
     if not remote then return false end
-
     local myActor = ReplicatorService and ReplicatorService.LocalActor
     if not myActor then return false end
 
+    -- Dead check trước khi fire (fail-fast)
+    if IsActorDead(actor) then return false end
+
     -- Target validation
-    local char = rawget(actor, "Character") or (pcall(function() return actor.Character end) and actor.Character)
+    local char = rawget(actor, "Character")
     if not char then return false end
-
-    local part = char:FindFirstChild(AK.TargetPart)
-               or char:FindFirstChild("Head")
-               or char:FindFirstChild("UpperTorso")
-               or char.PrimaryPart
+    local part = AK_FindPart(char, AK.TargetPart)
     if not part then return false end
-
     local uid = GetUID(actor)
     if not uid then return false end
 
-    -- Lấy hit position ban đầu
-    local hitPos = part.Position
-
-    -- spoofPos: đặt ngay cạnh target, cách hitPos đúng SpoofOffset
-    -- → (spoofPos - hitPos).Magnitude = SpoofOffset = 1.5 < Reach 5–7 → PASS
-    local spoofPos = hitPos + Vector3.new(0, AK.SpoofOffset, 0)
-
-    -- ── Spoof loop ──────────────────────────────────────────
-    -- CHỈ set ForceNextPosition — KHÔNG đụng SimulatedPosition
-    --
-    -- Tại sao ForceNextPosition thôi?
-    --   SimulatedPosition = CharacterController dùng để RENDER character
-    --   → set SimulatedPosition = spoofPos → character teleport về gần target (bug v3/v4)
-    --
-    --   ForceNextPosition = PRIORITY trong ReplicatorService.Update()
-    --   → RS đọc FNP trước SimulatedPosition, gửi FNP lên server, xong clear FNP
-    --   → SimulatedPosition không bị đụng → character ĐỨNG YÊN
-    --
-    -- Re-set FNP mỗi 0.05s vì RS clear nó mỗi 0.1s (10Hz)
-    -- → mỗi RS tick đều thấy FNP=spoofPos → server nhận spoofPos
-    local spoofDeadline = tick() + AK.MeleeDelay + 0.35
-    task.spawn(function()
-        while tick() < spoofDeadline do
-            pcall(function()
-                myActor.ForceNextPosition = spoofPos
-            end)
-            task.wait(0.05)
-        end
-        -- Clear FNP khi xong
-        pcall(function() myActor.ForceNextPosition = nil end)
-    end)
-
-    -- ── Slash ───────────────────────────────────────────────
-    -- Fire Slash ngay (t=0), trước khi chờ delay
-    -- MeleeInventory._use(): FireServer("InventoryAction","Slash",n) tại t=0
+    -- Slash tại t=0
     local n = math.random(1, 3)
     local encSlash = Encrypt({net._code, "InventoryAction", "Slash", n}, net)
     if encSlash then
         pcall(function() remote:FireServer(encSlash) end)
     end
 
-    -- ── Wait MeleeDelay ─────────────────────────────────────
-    -- Trong thời gian này:
-    --   - ReplicatorService tick ít nhất 2 lần với ForceNextPosition=spoofPos
-    --   - Server actor.ServerPosition ← spoofPos
-    -- Đây cũng match với legit timing: Impact chỉ fire sau _delay từ Slash
-    task.wait(AK.MeleeDelay)
+    -- ── ONE-SHOT FNP tại t = (MeleeDelay - FNPLead) ─────────
+    -- Đặt ForceNextPosition = spoofPos DUY NHẤT 1 LẦN
+    -- RS sẽ đọc nó trong khoảng 0.13s tới và tự clear
+    -- Server chỉ thấy spoofPos ≤ 1 RS tick (~0.1s) → KHÔNG đủ để trigger correction
+    local fnpDelay = math.max(0.01, AK.MeleeDelay - AK.FNPLead)
+    task.delay(fnpDelay, function()
+        -- Check lại alive ngay trước khi spoof
+        if IsActorDead(actor) then return end
 
-    -- Re-read hitPos sau delay — target có thể đã di chuyển
-    local freshPos = part.Position
-    hitPos = freshPos
+        -- Re-read fresh part pos tại thời điểm set FNP
+        local p2 = AK_FindPart(char, AK.TargetPart)
+        if not p2 then return end
+        local h2    = p2.Position
+        local spoof = h2 + Vector3.new(0, AK.SpoofOffset, 0)
 
-    -- Update spoofPos theo hitPos mới để đảm bảo distance check pass
-    spoofPos = hitPos + Vector3.new(0, AK.SpoofOffset, 0)
-
-    -- Re-force FNP một lần nữa trước Impact (double-ensure)
-    -- Vẫn KHÔNG đụng SimulatedPosition
-    pcall(function()
-        myActor.ForceNextPosition = spoofPos
+        -- Set FNP — RS sẽ đọc + clear trong tick tiếp theo
+        pcall(function()
+            myActor.ForceNextPosition = spoof
+        end)
     end)
 
-    -- ── Impact ──────────────────────────────────────────────
-    -- MeleeInventory._use(): FireServer("InventoryAction","Impact",{x,y,z},uid,bodyPart)
-    -- {x,y,z} = hitPos world space (từ MeleeInventoryReplicator.Impact raycast result)
-    local encImpact = Encrypt(
-        {net._code, "InventoryAction", "Impact",
-         {hitPos.X, hitPos.Y, hitPos.Z}, uid, part.Name},
-        net
-    )
-    if encImpact then
-        pcall(function() remote:FireServer(encImpact) end)
-    end
+    -- ── Impact tại t = MeleeDelay ─────────────────────────────
+    -- FNP đã được RS clear, server đã lưu spoofPos
+    -- Fire Impact với fresh hitPos
+    task.delay(AK.MeleeDelay, function()
+        -- Dead check lần cuối
+        if IsActorDead(actor) then return end
+
+        -- Fresh hit pos tại thời điểm Impact
+        local p3 = AK_FindPart(char, AK.TargetPart)
+        if not p3 then return end
+        local h3 = p3.Position
+
+        local encImpact = Encrypt(
+            {net._code, "InventoryAction", "Impact",
+             {h3.X, h3.Y, h3.Z}, uid, p3.Name},
+            net
+        )
+        if encImpact then
+            pcall(function() remote:FireServer(encImpact) end)
+        end
+    end)
 
     return true
 end
 
 -- ============================================================
--- AK_Tick — sequential lock để tránh ForceNextPosition race
+-- AK_Tick — sequential lock để tránh FNP race
 -- ============================================================
 local function AK_Tick()
     if not AK.Enabled then return end
@@ -353,31 +383,28 @@ local function AK_Tick()
         myPos = cam and cam.CFrame.Position or Vector3.new(0, 0, 0)
     end
 
-    -- Scan enemies từ ReplicatorService.Actors (bảng keyed theo UID)
+    -- Scan enemies từ ReplicatorService.Actors
     local candidates = {}
     if rawget(ReplicatorService, "Actors") then
         for _, actor in pairs(ReplicatorService.Actors) do
             if type(actor) ~= "table" then continue end
             if actor == myActor then continue end
 
-            -- Bỏ qua actor đã chết
-            local alive = rawget(actor, "Alive")
-            if alive == false then continue end
+            -- ── Multi-layer dead check ──────────────────────
+            if IsActorDead(actor) then continue end
 
-            -- Bỏ qua actor không có Character
-            local char = rawget(actor, "Character")
-            if not char then continue end
-
-            -- Lấy vị trí
+            -- Lấy vị trí target
             local aPos
             pcall(function() aPos = actor.Position end)
             if not aPos then
-                -- Fallback: ServerPosition
                 pcall(function() aPos = actor.ServerPosition end)
             end
             if not aPos then
-                local pp = char.PrimaryPart
-                if pp then pcall(function() aPos = pp.Position end) end
+                local char = rawget(actor, "Character")
+                if char then
+                    local pp = char.PrimaryPart
+                    if pp then pcall(function() aPos = pp.Position end) end
+                end
             end
             if not aPos then continue end
 
@@ -401,8 +428,7 @@ local function AK_Tick()
         for i = 1, count do
             if not AK.Enabled then break end
             AK_Fire(candidates[i].Actor)
-            -- Delay ngắn giữa các target để tránh spam server
-            task.wait(0.05)
+            task.wait(0.06)  -- delay ngắn giữa targets
         end
         AK._lock = false
     end)
@@ -412,7 +438,7 @@ function AK.Start()
     if AK._running then return end
     AK._running = true
     AK._conn = Track(RunService.Heartbeat:Connect(AK_Tick))
-    print("[LRM4] Started — Delay:", AK.MeleeDelay, "Offset:", AK.SpoofOffset, "Range:", AK.Range)
+    print("[LRM5] Started — Delay:", AK.MeleeDelay, "FNPLead:", AK.FNPLead, "Range:", AK.Range)
 end
 
 function AK.Stop()
@@ -422,7 +448,12 @@ function AK.Stop()
         pcall(function() AK._conn:Disconnect() end)
         AK._conn = nil
     end
-    print("[LRM4] Stopped")
+    -- Clear FNP khi stop (safety)
+    local myActor = ReplicatorService and ReplicatorService.LocalActor
+    if myActor then
+        pcall(function() myActor.ForceNextPosition = nil end)
+    end
+    print("[LRM5] Stopped")
 end
 
 -- ============================================================
@@ -430,21 +461,21 @@ end
 -- ============================================================
 pcall(function()
     local target = gethui and gethui() or game:GetService("CoreGui")
-    local old = target:FindFirstChild("LRM41_GUI")
+    local old = target:FindFirstChild("LRM5_GUI")
     if old then old:Destroy() end
 end)
 
 local gui = Instance.new("ScreenGui")
-gui.Name = "LRM41_GUI"
+gui.Name = "LRM5_GUI"
 gui.ResetOnSpawn = false
 pcall(function()
     gui.Parent = gethui and gethui() or game:GetService("CoreGui")
 end)
 
 local frame = Instance.new("Frame", gui)
-frame.Size         = UDim2.new(0, 270, 0, 260)
-frame.Position     = UDim2.new(0, 16, 0.5, -130)
-frame.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
+frame.Size         = UDim2.new(0, 280, 0, 280)
+frame.Position     = UDim2.new(0, 16, 0.5, -140)
+frame.BackgroundColor3 = Color3.fromRGB(10, 10, 13)
 frame.BorderSizePixel  = 0
 frame.Active   = true
 frame.Draggable = true
@@ -453,7 +484,7 @@ Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
 -- Header bar
 local hdr = Instance.new("Frame", frame)
 hdr.Size           = UDim2.new(1, 0, 0, 30)
-hdr.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
+hdr.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
 hdr.BorderSizePixel  = 0
 Instance.new("UICorner", hdr).CornerRadius = UDim.new(0, 8)
 
@@ -463,7 +494,7 @@ ttl.BackgroundTransparency = 1
 ttl.Font               = Enum.Font.GothamBold
 ttl.TextSize           = 12
 ttl.TextColor3         = Color3.fromRGB(200, 200, 220)
-ttl.Text               = "  MTC  ·  LONG RANGE MELEE  ·  v4.1"
+ttl.Text               = "  MTC  ·  LONG RANGE MELEE  ·  v5"
 ttl.TextXAlignment     = Enum.TextXAlignment.Left
 
 -- Label helper
@@ -485,7 +516,7 @@ local function Btn(y, txt, cb)
     local b = Instance.new("TextButton", frame)
     b.Size               = UDim2.new(1, -16, 0, 28)
     b.Position           = UDim2.new(0, 8, 0, y)
-    b.BackgroundColor3   = Color3.fromRGB(32, 32, 40)
+    b.BackgroundColor3   = Color3.fromRGB(28, 28, 38)
     b.BorderSizePixel    = 0
     b.Font               = Enum.Font.GothamBold
     b.TextSize           = 12
@@ -501,9 +532,9 @@ local lblNet    = Lbl(56,  "Network: --")
 local lblActors = Lbl(72,  "Actors : --")
 local lblDelay  = Lbl(88,  string.format("Delay  : %.3fs   Offset: %.1fst", AK.MeleeDelay, AK.SpoofOffset))
 local lblRange  = Lbl(104, string.format("Range  : %.0fst  Batch: %d", AK.Range, AK.BatchSize))
-local lblHint   = Lbl(225, "F3=On/Off  F1/F2=Delay±0.05  F4/F5=Range", Color3.fromRGB(80, 80, 95))
+local lblLead   = Lbl(120, string.format("FNPLead: %.2fs  (FNP window trước Impact)", AK.FNPLead))
 
-local toggleBtn = Btn(122, "[ OFF ]  Toggle Aura Kill", function()
+local toggleBtn = Btn(140, "[ OFF ]  Toggle Aura Kill", function()
     AK.Enabled = not AK.Enabled
     if AK.Enabled then
         AK.Start()
@@ -520,7 +551,7 @@ local toggleBtn = Btn(122, "[ OFF ]  Toggle Aura Kill", function()
     end
 end)
 
-Btn(158, "Rescan Network + Remote", function()
+Btn(176, "Rescan Network + Remote", function()
     Network = nil; _remote = nil; ReplicatorService = nil
     task.spawn(function()
         DoScan()
@@ -533,7 +564,7 @@ Btn(158, "Rescan Network + Remote", function()
     end)
 end)
 
-Btn(192, "Rescan Actors (RS)", function()
+Btn(212, "Rescan Actors (RS)", function()
     ReplicatorService = nil
     task.spawn(function()
         DoScan()
@@ -565,7 +596,7 @@ Track(UserInputService.InputBegan:Connect(function(inp, gpe)
             lblStatus.TextColor3 = Color3.fromRGB(210, 65, 65)
         end
     elseif kc == Enum.KeyCode.F1 then
-        AK.MeleeDelay = math.max(0.05, AK.MeleeDelay - 0.05)
+        AK.MeleeDelay = math.max(0.10, AK.MeleeDelay - 0.05)
         lblDelay.Text = string.format("Delay  : %.3fs   Offset: %.1fst", AK.MeleeDelay, AK.SpoofOffset)
     elseif kc == Enum.KeyCode.F2 then
         AK.MeleeDelay = math.min(1.0, AK.MeleeDelay + 0.05)
@@ -576,6 +607,14 @@ Track(UserInputService.InputBegan:Connect(function(inp, gpe)
     elseif kc == Enum.KeyCode.F5 then
         AK.Range = math.min(9999, AK.Range + 50)
         lblRange.Text = string.format("Range  : %.0fst  Batch: %d", AK.Range, AK.BatchSize)
+    elseif kc == Enum.KeyCode.F6 then
+        -- F6: tăng FNPLead (gửi FNP sớm hơn — nếu server lag)
+        AK.FNPLead = math.min(AK.MeleeDelay - 0.02, AK.FNPLead + 0.02)
+        lblLead.Text = string.format("FNPLead: %.2fs  (FNP window trước Impact)", AK.FNPLead)
+    elseif kc == Enum.KeyCode.F7 then
+        -- F7: giảm FNPLead (gửi FNP muộn hơn — giảm teleport nếu vẫn còn)
+        AK.FNPLead = math.max(0.02, AK.FNPLead - 0.02)
+        lblLead.Text = string.format("FNPLead: %.2fs  (FNP window trước Impact)", AK.FNPLead)
     end
 end))
 
@@ -599,7 +638,7 @@ end))
 -- ============================================================
 -- INIT
 -- ============================================================
-print("[LRM4] Scanning GC for Network + ReplicatorService...")
+print("[LRM5] Scanning GC for Network + ReplicatorService...")
 task.spawn(function()
     for attempt = 1, 30 do
         DoScan()
@@ -609,21 +648,23 @@ task.spawn(function()
     end
     local net = Network
     if net then
-        print("[LRM4] Network OK — code:", net._code:sub(1, 8), "key[1]:", net._key[1])
+        print("[LRM5] Network OK — code:", net._code:sub(1, 8), "key[1]:", net._key[1])
         lblNet.Text = "Network: OK  key[1]=" .. tostring(net._key[1])
     else
-        print("[LRM4] Network FAIL — bấm Rescan sau khi vào game")
+        print("[LRM5] Network FAIL — bấm Rescan sau khi vào game")
     end
     if ReplicatorService then
         local n = 0
         for _ in pairs(ReplicatorService.Actors) do n = n + 1 end
-        print("[LRM4] ReplicatorService OK — actors:", n)
+        print("[LRM5] ReplicatorService OK — actors:", n)
     else
-        print("[LRM4] ReplicatorService FAIL — bấm Rescan Actors")
+        print("[LRM5] ReplicatorService FAIL — bấm Rescan Actors")
     end
 end)
 
-print("[LRM4] Ready")
-print("[LRM4] F3=Toggle  F1=Delay-0.05  F2=Delay+0.05  F4=Range-50  F5=Range+50")
-print("[LRM4] Default: Delay=0.25s  Offset=1.5st  Range=9999st  Batch=5")
-print("[LRM4] Nếu không dính từ xa: tăng Delay (F2) — mặc định 0.25s")
+print("[LRM5] Ready — v5 (one-shot FNP, multi-layer dead check)")
+print("[LRM5] F3=Toggle  F1=Delay-0.05  F2=Delay+0.05")
+print("[LRM5] F4=Range-50  F5=Range+50  F6=FNPLead+0.02  F7=FNPLead-0.02")
+print("[LRM5] Default: Delay=0.25s  Offset=1.5st  Range=9999st  FNPLead=0.13s")
+print("[LRM5] Nếu không dính từ xa: tăng Delay (F2)")
+print("[LRM5] Nếu vẫn teleport: giảm FNPLead (F7) → bớt thời gian FNP trên server")
