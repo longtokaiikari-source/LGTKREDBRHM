@@ -243,9 +243,9 @@ end
 -- ============================================================
 local AK = {
     Enabled     = false,
-    Range       = 9999,    -- studs, 9999 = toàn map
-    Interval    = 0.1,     -- giây giữa mỗi batch tick
-    BatchSize   = 5,       -- targets mỗi batch
+    Range       = 1000,    -- studs
+    Interval    = 0.05,    -- giây giữa mỗi batch tick
+    BatchSize   = 15,      -- targets mỗi batch
 
     -- Spoof config — từ source analysis
     -- Reach min=5st (Melee.lua), offset=1.5st → luôn < Reach → PASS
@@ -428,7 +428,7 @@ local function AK_Tick()
         for i = 1, count do
             if not AK.Enabled then break end
             AK_Fire(candidates[i].Actor)
-            task.wait(0.06)  -- delay ngắn giữa targets
+            task.wait(0.10)  -- 1 RS tick/target — đảm bảo mỗi FNP vào đúng tick riêng
         end
         AK._lock = false
     end)
@@ -494,7 +494,7 @@ ttl.BackgroundTransparency = 1
 ttl.Font               = Enum.Font.GothamBold
 ttl.TextSize           = 12
 ttl.TextColor3         = Color3.fromRGB(200, 200, 220)
-ttl.Text               = "  MTC  ·  LONG RANGE MELEE  ·  v5"
+ttl.Text               = "  MTC  ·  LONG RANGE MELEE  ·  v5.1"
 ttl.TextXAlignment     = Enum.TextXAlignment.Left
 
 -- Label helper
@@ -531,7 +531,7 @@ local lblStatus = Lbl(38,  "Status : OFF",  Color3.fromRGB(210, 65, 65))
 local lblNet    = Lbl(56,  "Network: --")
 local lblActors = Lbl(72,  "Actors : --")
 local lblDelay  = Lbl(88,  string.format("Delay  : %.3fs   Offset: %.1fst", AK.MeleeDelay, AK.SpoofOffset))
-local lblRange  = Lbl(104, string.format("Range  : %.0fst  Batch: %d", AK.Range, AK.BatchSize))
+local lblRange  = Lbl(104, string.format("Range  : %.0fst  Batch: %d  Interval: %.2fs", AK.Range, AK.BatchSize, AK.Interval))
 local lblLead   = Lbl(120, string.format("FNPLead: %.2fs  (FNP window trước Impact)", AK.FNPLead))
 
 local toggleBtn = Btn(140, "[ OFF ]  Toggle Aura Kill", function()
@@ -662,9 +662,9 @@ task.spawn(function()
     end
 end)
 
-print("[LRM5] Ready — v5 (one-shot FNP, multi-layer dead check)")
+print("[LRM5] Ready — v5.1 (one-shot FNP, multi-layer dead check, faster kill)")
 print("[LRM5] F3=Toggle  F1=Delay-0.05  F2=Delay+0.05")
 print("[LRM5] F4=Range-50  F5=Range+50  F6=FNPLead+0.02  F7=FNPLead-0.02")
-print("[LRM5] Default: Delay=0.25s  Offset=1.5st  Range=9999st  FNPLead=0.13s")
+print("[LRM5] Default: Delay=0.25s  Offset=1.5st  Range=1000st  Batch=15  FNPLead=0.13s")
 print("[LRM5] Nếu không dính từ xa: tăng Delay (F2)")
 print("[LRM5] Nếu vẫn teleport: giảm FNPLead (F7) → bớt thời gian FNP trên server")
