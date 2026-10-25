@@ -29,7 +29,7 @@ local LocalPlayer=Players.LocalPlayer
 
 local AuraKill={
     Enabled=false,
-    Range=1000,
+    Range=80,
     Interval=0,
     BatchSize=10,
     TargetPart="Head",
@@ -52,8 +52,12 @@ end
 -- Find network object: table with _code (UUID) + _key (array of 5 numbers)
 -- + _events. Ported from AK_FindNet exactly.
 -- ---------------------------------------------------------------------------
+local _netNextScan=0
 local function AK_FindNet()
     if AuraKill._net then return AuraKill._net end
+    local now=os.clock()
+    if now<_netNextScan then return nil end -- don't hammer the GC scan every tick
+    _netNextScan=now+2
 
     -- Method 1: shared.import("network")
     if shared and type(shared.import)=="function" then
@@ -62,7 +66,13 @@ local function AK_FindNet()
             AuraKill._net=net
             logEvent("net via shared.import, code: "..tostring(net._code):sub(1,8))
             return net
+        elseif not ok then
+            logEvent("shared.import failed: "..tostring(net))
+        elseif net then
+            logEvent("shared.import('network') returned something without _key/_code")
         end
+    else
+        logEvent("shared.import not available on this executor")
     end
 
     -- Method 2: GC scan
@@ -86,6 +96,11 @@ local function AK_FindNet()
                 end
             end
         end
+        logEvent(("GC scan: %d tables, no match"):format((function()
+            local n=0;for _ in pairs(gc) do n=n+1 end;return n
+        end)()))
+    else
+        logEvent("GC scan unavailable: "..tostring(gc))
     end
     return nil
 end
@@ -197,12 +212,17 @@ end
 -- (ClientService/Replicator) since this standalone script has no ActorManager
 -- of its own to piggy-back on.
 -- ---------------------------------------------------------------------------
-local _service
+local _service,_serviceNextScan=nil,0
 local SERVICE_NAMES={ClientService=true,["Client"]=true,["ClientHandler"]=true}
 local function findService()
     if _service and _service.Replicator then return _service end
+    local now=os.clock()
+    if now<_serviceNextScan then return nil end -- don't hammer getloadedmodules() every tick
+    _serviceNextScan=now+2
     for _,m in ipairs(getloadedmodules()) do
-        if SERVICE_NAMES[m.Name] then
+        -- m.Parent==nil means the ModuleScript was destroyed — require() on it
+        -- throws a loud engine warning even inside pcall, so skip it first.
+        if m.Parent and SERVICE_NAMES[m.Name] then
             local ok,value=pcall(require,m)
             if ok and type(value)=="table" and type(value.Replicator)=="table" then
                 _service=value;return _service
@@ -210,10 +230,12 @@ local function findService()
         end
     end
     for _,m in ipairs(getloadedmodules()) do
-        local ok,value=pcall(require,m)
-        if ok and type(value)=="table" and type(value.Replicator)=="table"
-            and type(value.Replicator.Actors)=="table" then
-            _service=value;return _service
+        if m.Parent then
+            local ok,value=pcall(require,m)
+            if ok and type(value)=="table" and type(value.Replicator)=="table"
+                and type(value.Replicator.Actors)=="table" then
+                _service=value;return _service
+            end
         end
     end
     return nil
