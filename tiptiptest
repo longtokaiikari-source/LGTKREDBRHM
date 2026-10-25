@@ -29,7 +29,7 @@ local LocalPlayer=Players.LocalPlayer
 
 local AuraKill={
     Enabled=false,
-    Range=80,
+    Range=1000,
     Interval=0,
     BatchSize=10,
     TargetPart="Head",
