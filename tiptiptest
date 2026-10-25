@@ -1,20 +1,20 @@
--- MTC Long-Range Aura Melee v4
+-- MTC Long-Range Aura Melee v4.1
 -- Source đọc: MeleeInventory.lua, ReplicatorService.lua, ActorClass.lua,
 --             CharacterController.lua, MeleeInventoryReplicator.lua, Melee.lua
 --
 -- ┌─ Spoof chain (từ source) ──────────────────────────────────────────────┐
--- │  CharacterController._teleport():                                       │
--- │    actor.ForceNextPosition = targetPos                                  │
--- │    actor.SimulatedPosition = targetPos                                  │
--- │                                                                         │
 -- │  ReplicatorService.Update() (10Hz / 0.1s):                             │
 -- │    v138 = actor.ForceNextPosition OR actor.SimulatedPosition            │
 -- │    FireUnreliableServer("ReplicateMovement", uid, v138.X,Y,Z, ...)     │
 -- │    actor.ForceNextPosition = nil  ← cleared sau mỗi tick               │
 -- │                                                                         │
 -- │  Server nhận ReplicateMovement → actor.ServerPosition = v138           │
--- │                                                                         │
 -- │  Melee Impact check: (actor.ServerPosition - hitPos).Magnitude ≤ Reach │
+-- │                                                                         │
+-- │  FIX v4.1: CHỈ set ForceNextPosition, KHÔNG set SimulatedPosition      │
+-- │  SimulatedPosition = CharacterController render pos → đụng vào = tele  │
+-- │  ForceNextPosition = PRIORITY trong RS, chỉ gửi lên server, ko render  │
+-- │  → Character đứng yên, server nghĩ ta đứng cạnh target → HIT           │
 -- └────────────────────────────────────────────────────────────────────────┘
 --
 -- ┌─ MeleeInventory._use() timing (từ source) ─────────────────────────────┐
