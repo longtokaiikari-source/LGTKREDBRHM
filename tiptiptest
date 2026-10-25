@@ -24,11 +24,12 @@
 -- │  Delay = 0.25s, Reach = 5–7st (Melee.lua)                             │
 -- └────────────────────────────────────────────────────────────────────────┘
 --
--- Strategy v4:
---   1. Start spoof: ForceNextPosition=spoofPos + SimulatedPosition=spoofPos @ 0.05s
+-- Strategy v4.1:
+--   1. Spoof: CHỈ ForceNextPosition=spoofPos @ 0.05s (KHÔNG đụng SimulatedPosition)
+--      → RS ưu tiên ForceNextPosition → server nhận spoofPos
+--      → SimulatedPosition giữ nguyên thật → character ĐỨNG YÊN
 --   2. Slash ngay lập tức (server ghi nhận swing bắt đầu)
---   3. Chờ MeleeDelay=0.25s  → trong thời gian này server nhận ReplicateMovement
---      với spoofPos (10Hz × 0.25s = ~2 ticks)
+--   3. Chờ MeleeDelay=0.25s → RS tick ≥2 lần với spoofPos → server.ServerPosition=spoofPos
 --   4. Impact với hitPos mới nhất. Server check: (spoofPos–hitPos).Magnitude=1.5 < 5 → PASS
 
 -- ============================================================
@@ -263,32 +264,29 @@ local function AK_Fire(actor)
     -- → (spoofPos - hitPos).Magnitude = SpoofOffset = 1.5 < Reach 5–7 → PASS
     local spoofPos = hitPos + Vector3.new(0, AK.SpoofOffset, 0)
 
-    -- Lưu SimulatedPosition thật để restore sau khi spoof kết thúc
-    local realSimPos
-    pcall(function() realSimPos = myActor.SimulatedPosition end)
-
     -- ── Spoof loop ──────────────────────────────────────────
-    -- Chạy trong MeleeDelay + 0.35s để cover cả sau khi Impact fire
-    -- ForceNextPosition priority > SimulatedPosition trong ReplicatorService.Update()
-    -- SimulatedPosition làm fallback giữa các tick (khi FNP=nil do RS clear)
-    -- CharacterController ghi đè SimulatedPosition mỗi frame → ta re-set 0.05s
+    -- CHỈ set ForceNextPosition — KHÔNG đụng SimulatedPosition
+    --
+    -- Tại sao ForceNextPosition thôi?
+    --   SimulatedPosition = CharacterController dùng để RENDER character
+    --   → set SimulatedPosition = spoofPos → character teleport về gần target (bug v3/v4)
+    --
+    --   ForceNextPosition = PRIORITY trong ReplicatorService.Update()
+    --   → RS đọc FNP trước SimulatedPosition, gửi FNP lên server, xong clear FNP
+    --   → SimulatedPosition không bị đụng → character ĐỨNG YÊN
+    --
+    -- Re-set FNP mỗi 0.05s vì RS clear nó mỗi 0.1s (10Hz)
+    -- → mỗi RS tick đều thấy FNP=spoofPos → server nhận spoofPos
     local spoofDeadline = tick() + AK.MeleeDelay + 0.35
     task.spawn(function()
         while tick() < spoofDeadline do
             pcall(function()
                 myActor.ForceNextPosition = spoofPos
-                myActor.SimulatedPosition = spoofPos
             end)
             task.wait(0.05)
         end
-        -- Restore: CharacterController sẽ tự update SimulatedPosition về thật
-        -- nhưng restore ngay để sạch hơn
-        pcall(function()
-            myActor.ForceNextPosition = nil
-            if realSimPos then
-                myActor.SimulatedPosition = realSimPos
-            end
-        end)
+        -- Clear FNP khi xong
+        pcall(function() myActor.ForceNextPosition = nil end)
     end)
 
     -- ── Slash ───────────────────────────────────────────────
@@ -314,10 +312,10 @@ local function AK_Fire(actor)
     -- Update spoofPos theo hitPos mới để đảm bảo distance check pass
     spoofPos = hitPos + Vector3.new(0, AK.SpoofOffset, 0)
 
-    -- Re-force spoofPos một lần nữa trước Impact (double-ensure)
+    -- Re-force FNP một lần nữa trước Impact (double-ensure)
+    -- Vẫn KHÔNG đụng SimulatedPosition
     pcall(function()
         myActor.ForceNextPosition = spoofPos
-        myActor.SimulatedPosition = spoofPos
     end)
 
     -- ── Impact ──────────────────────────────────────────────
@@ -432,12 +430,12 @@ end
 -- ============================================================
 pcall(function()
     local target = gethui and gethui() or game:GetService("CoreGui")
-    local old = target:FindFirstChild("LRM4_GUI")
+    local old = target:FindFirstChild("LRM41_GUI")
     if old then old:Destroy() end
 end)
 
 local gui = Instance.new("ScreenGui")
-gui.Name = "LRM4_GUI"
+gui.Name = "LRM41_GUI"
 gui.ResetOnSpawn = false
 pcall(function()
     gui.Parent = gethui and gethui() or game:GetService("CoreGui")
@@ -465,7 +463,7 @@ ttl.BackgroundTransparency = 1
 ttl.Font               = Enum.Font.GothamBold
 ttl.TextSize           = 12
 ttl.TextColor3         = Color3.fromRGB(200, 200, 220)
-ttl.Text               = "  MTC  ·  LONG RANGE MELEE  ·  v4"
+ttl.Text               = "  MTC  ·  LONG RANGE MELEE  ·  v4.1"
 ttl.TextXAlignment     = Enum.TextXAlignment.Left
 
 -- Label helper
