@@ -1,43 +1,55 @@
--- MTC Long-Range Aura Melee v6 — MAXIMUM SPEED
+-- MTC Long-Range Aura Melee v5
 -- Source đọc: MeleeInventory.lua, ReplicatorService.lua, ActorClass.lua,
 --             CharacterController.lua, MeleeInventoryReplicator.lua, Melee.lua
 --
--- ┌─ v6 Speed Upgrade ────────────────────────────────────────────────────────┐
--- │                                                                             │
--- │  v5.1: sequential loop — task.wait(0.10) giữa mỗi target                 │
--- │         → 15 targets = 15 * 0.10 = 1.5s wait + 0.25s Impact = ~1.75s     │
--- │                                                                             │
--- │  v6:   parallel coroutines — task.delay((i-1)*0.032) offset               │
--- │         → 15 targets = 14 * 0.032 = 0.45s stagger + 0.25s Impact = ~0.7s │
--- │         → 2.5x faster                                                      │
--- │                                                                             │
--- │  Key trick: _lastReplicate = 0 trước FNP set                              │
--- │    RS.Update() checks: if _lastReplicate < tick() then send               │
--- │    → Set = 0 → luôn true → RS fire trên HEARTBEAT TIẾP THEO (~16ms)       │
--- │    → Thay vì chờ RS natural cycle (0-100ms avg = 50ms)                    │
--- │    → FNP chắc chắn gửi lên server trong vòng 2 frames (32ms)             │
--- │                                                                             │
--- │  Per-target timeline:                                                       │
--- │    t = (i-1)*0.032   : Slash fired                                         │
--- │    t + 0.218         : FNP set + _lastReplicate = 0  (MeleeDelay-0.032)   │
--- │    t + ~0.218+16ms   : RS Heartbeat → gửi spoofPos → clear FNP           │
--- │    t + ~0.218+32ms   : RS đã sent, safe to Impact                          │
--- │    t + 0.250         : Impact fired (= Slash + MeleeDelay)                 │
--- │                                                                             │
--- │  Tất cả fix từ v5 được giữ nguyên:                                         │
--- │    - ONE-SHOT FNP (không loop → không teleport)                            │
--- │    - Multi-layer IsActorDead (Alive, Health, Character, Humanoid)          │
--- │    - SimulatedPosition KHÔNG bị đụng                                       │
--- └─────────────────────────────────────────────────────────────────────────────┘
+-- ┌─ Spoof chain (từ source) ──────────────────────────────────────────────┐
+-- │  ReplicatorService.Update() (10Hz / 0.1s):                             │
+-- │    v138 = actor.ForceNextPosition OR actor.SimulatedPosition            │
+-- │    FireUnreliableServer("ReplicateMovement", uid, v138.X,Y,Z, ...)     │
+-- │    actor.ForceNextPosition = nil  ← cleared SAU mỗi tick               │
+-- │                                                                         │
+-- │  ReplicateActor handler (server → client):                              │
+-- │    if uid == localUID: chỉ update Health — KHÔNG update position       │
+-- │    → server broadcast position KHÔNG gây teleport cho local actor      │
+-- │                                                                         │
+-- │  Teleport bug root cause v4.x:                                          │
+-- │    Loop 6+ tick gửi spoofPos → server lưu spoofPos ~0.6s               │
+-- │    → actor state machine phía server dispatch move event về client      │
+-- │    → character bị kéo về spoofPos                                       │
+-- └────────────────────────────────────────────────────────────────────────┘
+--
+-- ┌─ Fix v5: ONE-SHOT FNP ─────────────────────────────────────────────────┐
+-- │                                                                         │
+-- │  t=0.000  : Slash fired                                                 │
+-- │  t=0.120  : ForceNextPosition = spoofPos  (ĐẶT 1 LẦN DUY NHẤT)        │
+-- │  t≈0.12+  : RS tick đọc FNP → gửi spoofPos → tự clear FNP             │
+-- │             Server.actor.ServerPosition ← spoofPos (1 tick only)       │
+-- │  t=0.250  : Impact fired — server thấy ta "đứng cạnh" target → HIT     │
+-- │  t≈0.250+ : RS tick tiếp gửi real pos → server correct về real pos     │
+-- │                                                                         │
+-- │  Kết quả: server chỉ lưu spoofPos ≤ 0.1s (1 tick) thay vì 0.6s       │
+-- │  → KHÔNG đủ thời gian trigger server-side position correction           │
+-- │  → Character ĐỨNG YÊN suốt quá trình                                   │
+-- │                                                                         │
+-- │  SimulatedPosition KHÔNG bị đụng (CharacterController.Update()         │
+-- │    line 1549 set SimulatedPosition = real_physics_pos mỗi frame)       │
+-- └────────────────────────────────────────────────────────────────────────┘
+--
+-- ┌─ Fix v5: Dead NPC check ───────────────────────────────────────────────┐
+-- │  Layer 1: actor.Alive == false → skip                                  │
+-- │  Layer 2: actor.Health != nil && <= 0 → skip                           │
+-- │  Layer 3: Character không tồn tại hoặc bị destroy → skip              │
+-- │  Layer 4: Humanoid.Health <= 0 → skip                                  │
+-- └────────────────────────────────────────────────────────────────────────┘
 
 -- ============================================================
 -- SINGLETON
 -- ============================================================
-if getgenv().LRM6_Conns then
-    for _, c in ipairs(getgenv().LRM6_Conns) do pcall(function() c:Disconnect() end) end
+if getgenv().LRM5_Conns then
+    for _, c in ipairs(getgenv().LRM5_Conns) do pcall(function() c:Disconnect() end) end
 end
-getgenv().LRM6_Conns = {}
-local function Track(c) table.insert(getgenv().LRM6_Conns, c); return c end
+getgenv().LRM5_Conns = {}
+local function Track(c) table.insert(getgenv().LRM5_Conns, c); return c end
 
 -- ============================================================
 -- SERVICES
@@ -146,7 +158,7 @@ local function AK_GetRemote()
 end
 
 -- ============================================================
--- CIPHER — AK_NetEncode từ Flux_client.lua (verified)
+-- CIPHER — AK_NetEncode từ Flux_client.lua (tipmobile verified)
 -- ============================================================
 local function NetEncode(jsonStr, key)
     local result = {}
@@ -172,7 +184,7 @@ local function Encrypt(data, net)
 end
 
 -- ============================================================
--- UID CACHE — weak keys
+-- UID CACHE — weak keys, tránh giữ actor sống
 -- ============================================================
 local _uidCache = setmetatable({}, {__mode = "k"})
 local function GetUID(actor)
@@ -196,20 +208,25 @@ local function GetUID(actor)
 end
 
 -- ============================================================
--- IsActorDead — multi-layer dead check (v5 fix)
+-- IsActorDead — multi-layer dead check
 -- ============================================================
 local function IsActorDead(actor)
+    -- Layer 1: Alive flag (MTC sets Alive=false khi NPC chết)
     local alive = rawget(actor, "Alive")
     if alive == false then return true end
 
+    -- Layer 2: Health field
     local health = rawget(actor, "Health")
     if health ~= nil and health <= 0 then return true end
 
+    -- Layer 3: Character không tồn tại
     local char = rawget(actor, "Character")
     if not char then return true end
+    -- Character bị destroy (Parent = nil)
     local ok, parent = pcall(function() return char.Parent end)
     if not ok or not parent then return true end
 
+    -- Layer 4: Humanoid.Health (fallback cho legacy NPC)
     local ok2, hum = pcall(function()
         return char:FindFirstChildOfClass("Humanoid")
     end)
@@ -226,27 +243,31 @@ end
 -- ============================================================
 local AK = {
     Enabled     = false,
-    Range       = 1000,  -- studs
-    Interval    = 0.05,  -- giây giữa mỗi batch
-    BatchSize   = 15,    -- targets mỗi batch
+    Range       = 1000,    -- studs
+    Interval    = 0.05,    -- giây giữa mỗi batch tick
+    BatchSize   = 15,      -- targets mỗi batch
 
-    SpoofOffset = 1.5,   -- studs
-    MeleeDelay  = 0.25,  -- Slash → Impact (từ Melee.lua Delay field)
+    -- Spoof config — từ source analysis
+    -- Reach min=5st (Melee.lua), offset=1.5st → luôn < Reach → PASS
+    SpoofOffset  = 1.5,   -- khoảng cách spoofPos–hitPos (studs)
 
-    -- v6: stagger giữa các target
-    -- 0.032s = 2 frames @ 60fps
-    -- Đủ để FNP + _lastReplicate=0 → RS fire → server nhận trước Impact
-    Stagger     = 0.032,
+    -- MeleeDelay: từ Melee.lua Delay field = 0.25s
+    -- Slash → task.delay(Delay, Impact) — phải match legit timing
+    MeleeDelay   = 0.25,
 
-    TargetPart  = "Head",
-    _lastFire   = 0,
-    _conn       = nil,
-    _running    = false,
-    _lock       = false,
+    -- FNP lead time: đặt FNP trước Impact bao lâu để RS kịp tick
+    -- RS 10Hz = 0.1s/tick. Lead = 0.13s → ít nhất 1 tick trong window
+    FNPLead      = 0.13,
+
+    TargetPart   = "Head",
+    _lastFire    = 0,
+    _conn        = nil,
+    _running     = false,
+    _lock        = false,
 }
 
 -- ============================================================
--- AK_FindPart
+-- AK_FindPart — helper tìm body part của actor
 -- ============================================================
 local function AK_FindPart(char, partName)
     return char:FindFirstChild(partName)
@@ -257,109 +278,93 @@ local function AK_FindPart(char, partName)
 end
 
 -- ============================================================
--- AK_Tick — PARALLEL coroutines, 32ms stagger
+-- AK_Fire — ONE-SHOT spoof + Slash → Impact
 --
--- Với BatchSize=15, Stagger=0.032:
---   Target 1  fires at t=0.000s
---   Target 2  fires at t=0.032s
---   ...
---   Target 15 fires at t=0.448s
---   Last Impact lands at t=0.448+0.25 = 0.698s
---
--- Tổng: ~0.7s cho 15 targets (vs 1.75s ở v5.1)
---
--- Per-target coroutine timeline:
---   t=offset          : Slash fired
---   t=offset+0.218    : FNP set + ReplicatorService._lastReplicate = 0
---   t=offset+0.218+~16ms: RS Heartbeat fires, gửi spoofPos, clear FNP
---   t=offset+0.218+~32ms: 2nd frame safety pass
---   t=offset+0.250    : Impact fired (offset + MeleeDelay)
---
--- _lastReplicate = 0 trick:
---   RS.Update() checks: if _lastReplicate < tick() then
---   tick() luôn > 0 → check luôn pass → RS fire NGAY HEARTBEAT TIẾP THEO
---   Thay vì chờ natural cycle: _lastReplicate = now+0.1 → avg wait 50ms
+-- Timeline (MeleeDelay=0.25, FNPLead=0.13):
+--   t=0.000  : Slash fired
+--   t=0.120  : Set ForceNextPosition = spoofPos (ĐÚ́NG 1 LẦN)
+--   t≈0.12+  : RS tick đọc FNP → gửi spoofPos lên server → clear FNP
+--              → server.actor.ServerPosition ← spoofPos
+--              → SimulatedPosition = KHÔNG bị đụng → character ĐỨNG YÊN
+--   t=0.250  : Impact fired (fresh hitPos)
+--              → server check: (spoofPos–hitPos).Magnitude = ~1.5st ≤ 5st → PASS
+--   t≈0.250+ : RS tick tiếp gửi real pos → server correct lại
+--              → character KHÔNG bị kéo đi đâu cả
 -- ============================================================
-local function AK_FireBatch(candidates, count, net, remote, myActor)
-    -- Spawn parallel coroutine cho mỗi target
-    for i = 1, count do
-        local offset = (i - 1) * AK.Stagger
-        task.delay(offset, function()
-            if not AK.Enabled then return end
+local function AK_Fire(actor)
+    local net = AK_FindNet()
+    if not net then return false end
+    local remote = AK_GetRemote()
+    if not remote then return false end
+    local myActor = ReplicatorService and ReplicatorService.LocalActor
+    if not myActor then return false end
 
-            local actor = candidates[i].Actor
-            if IsActorDead(actor) then return end
+    -- Dead check trước khi fire (fail-fast)
+    if IsActorDead(actor) then return false end
 
-            local char = rawget(actor, "Character")
-            if not char then return end
+    -- Target validation
+    local char = rawget(actor, "Character")
+    if not char then return false end
+    local part = AK_FindPart(char, AK.TargetPart)
+    if not part then return false end
+    local uid = GetUID(actor)
+    if not uid then return false end
 
-            local part = AK_FindPart(char, AK.TargetPart)
-            if not part then return end
-
-            local uid = GetUID(actor)
-            if not uid then return end
-
-            -- Slash tại t = offset
-            local encSlash = Encrypt(
-                {net._code, "InventoryAction", "Slash", math.random(1, 3)},
-                net
-            )
-            if encSlash then
-                pcall(function() remote:FireServer(encSlash) end)
-            end
-
-            -- Chờ đến ngay trước Impact để set FNP
-            -- MeleeDelay - Stagger = 0.25 - 0.032 = 0.218s
-            -- Dùng Stagger thay vì hardcode để tự động scale
-            task.wait(math.max(0.01, AK.MeleeDelay - AK.Stagger))
-
-            -- Dead check trước FNP
-            if IsActorDead(actor) then return end
-
-            -- Set FNP + force RS fire ngay frame tiếp theo
-            local hitPos = part.Position
-            local spoof  = hitPos + Vector3.new(0, AK.SpoofOffset, 0)
-
-            pcall(function()
-                myActor.ForceNextPosition = spoof
-            end)
-            -- _lastReplicate = 0 → RS.Update() condition: 0 < tick() → TRUE
-            -- → RS fire trên HEARTBEAT TIẾP THEO (~16ms) thay vì đợi cycle
-            pcall(function()
-                ReplicatorService._lastReplicate = 0
-            end)
-
-            -- 2 frames: đảm bảo RS đã gửi FNP trước khi Impact fire
-            task.wait()  -- frame 1: RS picks up FNP, fires, clears FNP
-            task.wait()  -- frame 2: safety margin
-
-            -- Dead check cuối
-            if IsActorDead(actor) then return end
-
-            -- Impact — server đã thấy spoofPos → distance check pass
-            local freshPos = part.Position
-            local encImpact = Encrypt(
-                {net._code, "InventoryAction", "Impact",
-                 {freshPos.X, freshPos.Y, freshPos.Z}, uid, part.Name},
-                net
-            )
-            if encImpact then
-                pcall(function() remote:FireServer(encImpact) end)
-            end
-        end)
+    -- Slash tại t=0
+    local n = math.random(1, 3)
+    local encSlash = Encrypt({net._code, "InventoryAction", "Slash", n}, net)
+    if encSlash then
+        pcall(function() remote:FireServer(encSlash) end)
     end
 
-    -- Giải phóng lock sau khi target cuối hoàn thành
-    -- (count-1)*Stagger = thời gian đến coroutine cuối
-    -- + MeleeDelay = thời gian Impact trong coroutine cuối
-    -- + 0.1 = buffer
-    task.delay((count - 1) * AK.Stagger + AK.MeleeDelay + 0.10, function()
-        AK._lock = false
+    -- ── ONE-SHOT FNP tại t = (MeleeDelay - FNPLead) ─────────
+    -- Đặt ForceNextPosition = spoofPos DUY NHẤT 1 LẦN
+    -- RS sẽ đọc nó trong khoảng 0.13s tới và tự clear
+    -- Server chỉ thấy spoofPos ≤ 1 RS tick (~0.1s) → KHÔNG đủ để trigger correction
+    local fnpDelay = math.max(0.01, AK.MeleeDelay - AK.FNPLead)
+    task.delay(fnpDelay, function()
+        -- Check lại alive ngay trước khi spoof
+        if IsActorDead(actor) then return end
+
+        -- Re-read fresh part pos tại thời điểm set FNP
+        local p2 = AK_FindPart(char, AK.TargetPart)
+        if not p2 then return end
+        local h2    = p2.Position
+        local spoof = h2 + Vector3.new(0, AK.SpoofOffset, 0)
+
+        -- Set FNP — RS sẽ đọc + clear trong tick tiếp theo
+        pcall(function()
+            myActor.ForceNextPosition = spoof
+        end)
     end)
+
+    -- ── Impact tại t = MeleeDelay ─────────────────────────────
+    -- FNP đã được RS clear, server đã lưu spoofPos
+    -- Fire Impact với fresh hitPos
+    task.delay(AK.MeleeDelay, function()
+        -- Dead check lần cuối
+        if IsActorDead(actor) then return end
+
+        -- Fresh hit pos tại thời điểm Impact
+        local p3 = AK_FindPart(char, AK.TargetPart)
+        if not p3 then return end
+        local h3 = p3.Position
+
+        local encImpact = Encrypt(
+            {net._code, "InventoryAction", "Impact",
+             {h3.X, h3.Y, h3.Z}, uid, p3.Name},
+            net
+        )
+        if encImpact then
+            pcall(function() remote:FireServer(encImpact) end)
+        end
+    end)
+
+    return true
 end
 
 -- ============================================================
--- AK_Tick — main loop
+-- AK_Tick — sequential lock để tránh FNP race
 -- ============================================================
 local function AK_Tick()
     if not AK.Enabled then return end
@@ -370,11 +375,6 @@ local function AK_Tick()
     local myActor = ReplicatorService and ReplicatorService.LocalActor
     if not myActor then return end
 
-    local net = AK_FindNet()
-    if not net then return end
-    local remote = AK_GetRemote()
-    if not remote then return end
-
     -- Vị trí của mình
     local myPos
     pcall(function() myPos = myActor.Position end)
@@ -383,14 +383,17 @@ local function AK_Tick()
         myPos = cam and cam.CFrame.Position or Vector3.new(0, 0, 0)
     end
 
-    -- Scan enemies
+    -- Scan enemies từ ReplicatorService.Actors
     local candidates = {}
     if rawget(ReplicatorService, "Actors") then
         for _, actor in pairs(ReplicatorService.Actors) do
             if type(actor) ~= "table" then continue end
             if actor == myActor then continue end
+
+            -- ── Multi-layer dead check ──────────────────────
             if IsActorDead(actor) then continue end
 
+            -- Lấy vị trí target
             local aPos
             pcall(function() aPos = actor.Position end)
             if not aPos then
@@ -414,25 +417,28 @@ local function AK_Tick()
 
     if #candidates == 0 then return end
 
+    -- Sort gần nhất trước
     table.sort(candidates, function(a, b) return a.Dist < b.Dist end)
 
     AK._lastFire = now
     AK._lock     = true
 
     local count = math.min(AK.BatchSize, #candidates)
-    AK_FireBatch(candidates, count, net, remote, myActor)
+    task.spawn(function()
+        for i = 1, count do
+            if not AK.Enabled then break end
+            AK_Fire(candidates[i].Actor)
+            task.wait(0.10)  -- 1 RS tick/target — đảm bảo mỗi FNP vào đúng tick riêng
+        end
+        AK._lock = false
+    end)
 end
 
 function AK.Start()
     if AK._running then return end
     AK._running = true
     AK._conn = Track(RunService.Heartbeat:Connect(AK_Tick))
-    print("[LRM6] Started — Stagger:", AK.Stagger, "Delay:", AK.MeleeDelay, "Range:", AK.Range)
-    print(string.format("[LRM6] Batch %d targets in %.3fs (vs %.3fs in v5)",
-        AK.BatchSize,
-        (AK.BatchSize - 1) * AK.Stagger + AK.MeleeDelay,
-        (AK.BatchSize - 1) * 0.10       + AK.MeleeDelay
-    ))
+    print("[LRM5] Started — Delay:", AK.MeleeDelay, "FNPLead:", AK.FNPLead, "Range:", AK.Range)
 end
 
 function AK.Stop()
@@ -442,11 +448,12 @@ function AK.Stop()
         pcall(function() AK._conn:Disconnect() end)
         AK._conn = nil
     end
+    -- Clear FNP khi stop (safety)
     local myActor = ReplicatorService and ReplicatorService.LocalActor
     if myActor then
         pcall(function() myActor.ForceNextPosition = nil end)
     end
-    print("[LRM6] Stopped")
+    print("[LRM5] Stopped")
 end
 
 -- ============================================================
@@ -454,54 +461,57 @@ end
 -- ============================================================
 pcall(function()
     local target = gethui and gethui() or game:GetService("CoreGui")
-    local old = target:FindFirstChild("LRM6_GUI")
+    local old = target:FindFirstChild("LRM5_GUI")
     if old then old:Destroy() end
 end)
 
 local gui = Instance.new("ScreenGui")
-gui.Name = "LRM6_GUI"
+gui.Name = "LRM5_GUI"
 gui.ResetOnSpawn = false
 pcall(function()
     gui.Parent = gethui and gethui() or game:GetService("CoreGui")
 end)
 
 local frame = Instance.new("Frame", gui)
-frame.Size               = UDim2.new(0, 290, 0, 290)
-frame.Position           = UDim2.new(0, 16, 0.5, -145)
-frame.BackgroundColor3   = Color3.fromRGB(10, 10, 13)
-frame.BorderSizePixel    = 0
-frame.Active             = true
-frame.Draggable          = true
+frame.Size         = UDim2.new(0, 280, 0, 280)
+frame.Position     = UDim2.new(0, 16, 0.5, -140)
+frame.BackgroundColor3 = Color3.fromRGB(10, 10, 13)
+frame.BorderSizePixel  = 0
+frame.Active   = true
+frame.Draggable = true
 Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
 
+-- Header bar
 local hdr = Instance.new("Frame", frame)
-hdr.Size               = UDim2.new(1, 0, 0, 30)
-hdr.BackgroundColor3   = Color3.fromRGB(20, 20, 28)
-hdr.BorderSizePixel    = 0
+hdr.Size           = UDim2.new(1, 0, 0, 30)
+hdr.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
+hdr.BorderSizePixel  = 0
 Instance.new("UICorner", hdr).CornerRadius = UDim.new(0, 8)
 
 local ttl = Instance.new("TextLabel", hdr)
-ttl.Size                   = UDim2.new(1, 0, 1, 0)
+ttl.Size               = UDim2.new(1, 0, 1, 0)
 ttl.BackgroundTransparency = 1
-ttl.Font                   = Enum.Font.GothamBold
-ttl.TextSize               = 12
-ttl.TextColor3             = Color3.fromRGB(200, 200, 220)
-ttl.Text                   = "  MTC  ·  LONG RANGE MELEE  ·  v6  ·  MAX SPEED"
-ttl.TextXAlignment         = Enum.TextXAlignment.Left
+ttl.Font               = Enum.Font.GothamBold
+ttl.TextSize           = 12
+ttl.TextColor3         = Color3.fromRGB(200, 200, 220)
+ttl.Text               = "  MTC  ·  LONG RANGE MELEE  ·  v5.1"
+ttl.TextXAlignment     = Enum.TextXAlignment.Left
 
+-- Label helper
 local function Lbl(y, txt, col)
     local l = Instance.new("TextLabel", frame)
-    l.Size                   = UDim2.new(1, -16, 0, 16)
-    l.Position               = UDim2.new(0, 8, 0, y)
+    l.Size               = UDim2.new(1, -16, 0, 16)
+    l.Position           = UDim2.new(0, 8, 0, y)
     l.BackgroundTransparency = 1
-    l.Font                   = Enum.Font.Gotham
-    l.TextSize               = 11
-    l.TextColor3             = col or Color3.fromRGB(160, 160, 170)
-    l.TextXAlignment         = Enum.TextXAlignment.Left
-    l.Text                   = txt
+    l.Font               = Enum.Font.Gotham
+    l.TextSize           = 11
+    l.TextColor3         = col or Color3.fromRGB(160, 160, 170)
+    l.TextXAlignment     = Enum.TextXAlignment.Left
+    l.Text               = txt
     return l
 end
 
+-- Button helper
 local function Btn(y, txt, cb)
     local b = Instance.new("TextButton", frame)
     b.Size               = UDim2.new(1, -16, 0, 28)
@@ -517,31 +527,26 @@ local function Btn(y, txt, cb)
     return b
 end
 
-local lblStatus  = Lbl(38,  "Status : OFF", Color3.fromRGB(210, 65, 65))
-local lblNet     = Lbl(56,  "Network: --")
-local lblActors  = Lbl(72,  "Actors : --")
-local lblDelay   = Lbl(88,  string.format("Delay  : %.3fs   Offset: %.1fst", AK.MeleeDelay, AK.SpoofOffset))
-local lblRange   = Lbl(104, string.format("Range  : %.0fst  Batch: %d  Stagger: %dms",
-    AK.Range, AK.BatchSize, AK.Stagger * 1000))
-local lblSpeed   = Lbl(120, string.format("Speed  : %d targets in ~%.2fs  (v5: ~%.2fs)",
-    AK.BatchSize,
-    (AK.BatchSize - 1) * AK.Stagger + AK.MeleeDelay,
-    (AK.BatchSize - 1) * 0.10       + AK.MeleeDelay
-))
+local lblStatus = Lbl(38,  "Status : OFF",  Color3.fromRGB(210, 65, 65))
+local lblNet    = Lbl(56,  "Network: --")
+local lblActors = Lbl(72,  "Actors : --")
+local lblDelay  = Lbl(88,  string.format("Delay  : %.3fs   Offset: %.1fst", AK.MeleeDelay, AK.SpoofOffset))
+local lblRange  = Lbl(104, string.format("Range  : %.0fst  Batch: %d  Interval: %.2fs", AK.Range, AK.BatchSize, AK.Interval))
+local lblLead   = Lbl(120, string.format("FNPLead: %.2fs  (FNP window trước Impact)", AK.FNPLead))
 
 local toggleBtn = Btn(140, "[ OFF ]  Toggle Aura Kill", function()
     AK.Enabled = not AK.Enabled
     if AK.Enabled then
         AK.Start()
-        toggleBtn.Text       = "[ ON ]  Toggle Aura Kill"
+        toggleBtn.Text      = "[ ON ]  Toggle Aura Kill"
         toggleBtn.TextColor3 = Color3.fromRGB(65, 210, 100)
-        lblStatus.Text       = "Status : ON"
+        lblStatus.Text      = "Status : ON"
         lblStatus.TextColor3 = Color3.fromRGB(65, 210, 100)
     else
         AK.Stop()
-        toggleBtn.Text       = "[ OFF ]  Toggle Aura Kill"
+        toggleBtn.Text      = "[ OFF ]  Toggle Aura Kill"
         toggleBtn.TextColor3 = Color3.fromRGB(200, 200, 220)
-        lblStatus.Text       = "Status : OFF"
+        lblStatus.Text      = "Status : OFF"
         lblStatus.TextColor3 = Color3.fromRGB(210, 65, 65)
     end
 end)
@@ -579,49 +584,41 @@ Track(UserInputService.InputBegan:Connect(function(inp, gpe)
         AK.Enabled = not AK.Enabled
         if AK.Enabled then
             AK.Start()
-            toggleBtn.Text       = "[ ON ]  Toggle Aura Kill"
+            toggleBtn.Text      = "[ ON ]  Toggle Aura Kill"
             toggleBtn.TextColor3 = Color3.fromRGB(65, 210, 100)
-            lblStatus.Text       = "Status : ON"
+            lblStatus.Text      = "Status : ON"
             lblStatus.TextColor3 = Color3.fromRGB(65, 210, 100)
         else
             AK.Stop()
-            toggleBtn.Text       = "[ OFF ]  Toggle Aura Kill"
+            toggleBtn.Text      = "[ OFF ]  Toggle Aura Kill"
             toggleBtn.TextColor3 = Color3.fromRGB(200, 200, 220)
-            lblStatus.Text       = "Status : OFF"
+            lblStatus.Text      = "Status : OFF"
             lblStatus.TextColor3 = Color3.fromRGB(210, 65, 65)
         end
     elseif kc == Enum.KeyCode.F1 then
-        -- F1: giảm stagger (nhanh hơn nhưng risk FNP race nếu < 2 frames)
-        AK.Stagger = math.max(0.016, AK.Stagger - 0.008)
-        lblRange.Text = string.format("Range  : %.0fst  Batch: %d  Stagger: %dms",
-            AK.Range, AK.BatchSize, AK.Stagger * 1000)
-        lblSpeed.Text = string.format("Speed  : %d targets in ~%.2fs",
-            AK.BatchSize, (AK.BatchSize - 1) * AK.Stagger + AK.MeleeDelay)
-    elseif kc == Enum.KeyCode.F2 then
-        -- F2: tăng stagger (chậm hơn nhưng stable hơn)
-        AK.Stagger = math.min(0.10, AK.Stagger + 0.008)
-        lblRange.Text = string.format("Range  : %.0fst  Batch: %d  Stagger: %dms",
-            AK.Range, AK.BatchSize, AK.Stagger * 1000)
-        lblSpeed.Text = string.format("Speed  : %d targets in ~%.2fs",
-            AK.BatchSize, (AK.BatchSize - 1) * AK.Stagger + AK.MeleeDelay)
-    elseif kc == Enum.KeyCode.F4 then
-        AK.Range = math.max(5, AK.Range - 50)
-        lblRange.Text = string.format("Range  : %.0fst  Batch: %d  Stagger: %dms",
-            AK.Range, AK.BatchSize, AK.Stagger * 1000)
-    elseif kc == Enum.KeyCode.F5 then
-        AK.Range = math.min(9999, AK.Range + 50)
-        lblRange.Text = string.format("Range  : %.0fst  Batch: %d  Stagger: %dms",
-            AK.Range, AK.BatchSize, AK.Stagger * 1000)
-    elseif kc == Enum.KeyCode.F6 then
         AK.MeleeDelay = math.max(0.10, AK.MeleeDelay - 0.05)
         lblDelay.Text = string.format("Delay  : %.3fs   Offset: %.1fst", AK.MeleeDelay, AK.SpoofOffset)
-    elseif kc == Enum.KeyCode.F7 then
+    elseif kc == Enum.KeyCode.F2 then
         AK.MeleeDelay = math.min(1.0, AK.MeleeDelay + 0.05)
         lblDelay.Text = string.format("Delay  : %.3fs   Offset: %.1fst", AK.MeleeDelay, AK.SpoofOffset)
+    elseif kc == Enum.KeyCode.F4 then
+        AK.Range = math.max(5, AK.Range - 50)
+        lblRange.Text = string.format("Range  : %.0fst  Batch: %d", AK.Range, AK.BatchSize)
+    elseif kc == Enum.KeyCode.F5 then
+        AK.Range = math.min(9999, AK.Range + 50)
+        lblRange.Text = string.format("Range  : %.0fst  Batch: %d", AK.Range, AK.BatchSize)
+    elseif kc == Enum.KeyCode.F6 then
+        -- F6: tăng FNPLead (gửi FNP sớm hơn — nếu server lag)
+        AK.FNPLead = math.min(AK.MeleeDelay - 0.02, AK.FNPLead + 0.02)
+        lblLead.Text = string.format("FNPLead: %.2fs  (FNP window trước Impact)", AK.FNPLead)
+    elseif kc == Enum.KeyCode.F7 then
+        -- F7: giảm FNPLead (gửi FNP muộn hơn — giảm teleport nếu vẫn còn)
+        AK.FNPLead = math.max(0.02, AK.FNPLead - 0.02)
+        lblLead.Text = string.format("FNPLead: %.2fs  (FNP window trước Impact)", AK.FNPLead)
     end
 end))
 
--- Info ticker
+-- Info ticker — cập nhật UI mỗi 1s
 local _lastTick2 = 0
 Track(RunService.Heartbeat:Connect(function()
     local now = tick()
@@ -641,7 +638,7 @@ end))
 -- ============================================================
 -- INIT
 -- ============================================================
-print("[LRM6] Scanning GC for Network + ReplicatorService...")
+print("[LRM5] Scanning GC for Network + ReplicatorService...")
 task.spawn(function()
     for attempt = 1, 30 do
         DoScan()
@@ -651,29 +648,23 @@ task.spawn(function()
     end
     local net = Network
     if net then
-        print("[LRM6] Network OK — code:", net._code:sub(1, 8), "key[1]:", net._key[1])
+        print("[LRM5] Network OK — code:", net._code:sub(1, 8), "key[1]:", net._key[1])
         lblNet.Text = "Network: OK  key[1]=" .. tostring(net._key[1])
     else
-        print("[LRM6] Network FAIL — bấm Rescan sau khi vào game")
+        print("[LRM5] Network FAIL — bấm Rescan sau khi vào game")
     end
     if ReplicatorService then
         local n = 0
         for _ in pairs(ReplicatorService.Actors) do n = n + 1 end
-        print("[LRM6] ReplicatorService OK — actors:", n)
+        print("[LRM5] ReplicatorService OK — actors:", n)
     else
-        print("[LRM6] ReplicatorService FAIL — bấm Rescan Actors")
+        print("[LRM5] ReplicatorService FAIL — bấm Rescan Actors")
     end
 end)
 
-print("[LRM6] Ready — v6 MAX SPEED")
-print(string.format("[LRM6] %d targets in ~%.0fms  (Stagger=%dms, parallel coroutines)",
-    AK.BatchSize,
-    ((AK.BatchSize - 1) * AK.Stagger + AK.MeleeDelay) * 1000,
-    AK.Stagger * 1000
-))
-print("[LRM6] F3=Toggle")
-print("[LRM6] F1=Stagger-8ms (faster)  F2=Stagger+8ms (stable)")
-print("[LRM6] F4=Range-50  F5=Range+50")
-print("[LRM6] F6=Delay-0.05  F7=Delay+0.05")
-print("[LRM6] Nếu vẫn teleport: F2 vài lần (tăng stagger)")
-print("[LRM6] Nếu miss hits: F7 (tăng MeleeDelay)")
+print("[LRM5] Ready — v5.1 (one-shot FNP, multi-layer dead check, faster kill)")
+print("[LRM5] F3=Toggle  F1=Delay-0.05  F2=Delay+0.05")
+print("[LRM5] F4=Range-50  F5=Range+50  F6=FNPLead+0.02  F7=FNPLead-0.02")
+print("[LRM5] Default: Delay=0.25s  Offset=1.5st  Range=1000st  Batch=15  FNPLead=0.13s")
+print("[LRM5] Nếu không dính từ xa: tăng Delay (F2)")
+print("[LRM5] Nếu vẫn teleport: giảm FNPLead (F7) → bớt thời gian FNP trên server")
