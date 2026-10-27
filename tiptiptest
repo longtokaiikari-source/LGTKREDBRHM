@@ -1,762 +1,437 @@
--- MTC Long-Range Aura Melee v8 — V5 BASE + MAX SPEED + NO TELEPORT
--- "Take v5, pump more packets in, spoof faster"
---
--- ┌─ Why v5 was slow ─────────────────────────────────────────────────────────┐
--- │  v5 Stagger = 0.10s  ← required because FNP needs 1 full RS tick         │
--- │  RS period = 0.10s → per-target overhead = 0.10s × 15 = 1.5s extra      │
--- │  Sequential loop → total ≈ 15 × 0.28s = 4.2s for 15 targets             │
--- └────────────────────────────────────────────────────────────────────────────┘
---
--- ┌─ v8 speed upgrade ────────────────────────────────────────────────────────┐
--- │  DirectSpoof = Network:FireUnreliableServer("ReplicateMovement", ...)     │
--- │    → UDP packet to server, no RS wait needed                              │
--- │    → server receives spoofPos in ~10-30ms                                 │
--- │    → client KHÔNG di chuyển → KHÔNG teleport                             │
--- │                                                                            │
--- │  Stagger = 0.016s (1 frame) vs v5's 0.10s                                │
--- │    → 15 targets: 14×0.016 + 0.25 = 0.47s  (vs v5's 4.2s)               │
--- │    → 20 targets: 19×0.016 + 0.25 = 0.55s                                │
--- │                                                                            │
--- │  MultiHit = 2: mỗi target nhận 2 rounds Slash+Impact, 20ms apart         │
--- │    → Round 1: Slash@t, Impact@t+250ms                                     │
--- │    → Round 2: Slash@t+20ms, Impact@t+270ms                               │
--- │    → Damage × 2 per target → target chết nhanh gấp đôi                  │
--- │                                                                            │
--- │  BatchSize = 20 (default), Interval = 0.03s                              │
--- └────────────────────────────────────────────────────────────────────────────┘
---
--- ┌─ Controls ─────────────────────────────────────────────────────────────────┐
--- │  F3           Toggle ON/OFF                                                │
--- │  F1 / F2      Stagger -8ms / +8ms  (nếu server reject: tăng stagger)     │
--- │  F4 / F5      Range -50 / +50                                              │
--- │  F6 / F7      MeleeDelay -0.05 / +0.05                                    │
--- │  F8 / F9      BatchSize -5 / +5                                            │
--- │  F10          Toggle MultiHit 1x ↔ 2x                                     │
--- └────────────────────────────────────────────────────────────────────────────┘
+--[[
+    MTC Long-Range Aura Melee — v11
+    ──────────────────────────────────────────────────────────
+    SOURCE INSIGHT (CharacterController + ReplicatorService):
 
--- ============================================================
--- SINGLETON
--- ============================================================
-if getgenv().LRM8_Conns then
-    for _, c in ipairs(getgenv().LRM8_Conns) do pcall(function() c:Disconnect() end) end
+    ReplicatorService.Update() → throttled: _lastReplicate = tick() + 0.1
+    → Only 1 ReplicateMovement packet per 100ms via RS.
+    → Calling v_u_1:FireUnreliableServer() DIRECTLY bypasses this throttle.
+    → We spam N packets directly → server sees spoofed pos instantly.
+
+    CharacterController.Teleport():
+        actor.ForceNextPosition = pos   ← RS.Update reads this next tick
+        actor.SimulatedPosition  = pos  ← visual position
+        actor.Position           = pos  ← physical position
+
+    MeleeInventory flow (per swing):
+        Slash(random1-3) → delay(Delay) → Impact({x,y,z}, uid, part)
+
+    STRATEGY v11 (zero wait, spam position, burst kill):
+    ──────────────────────────────────────────────────────────
+    Per cycle:
+      1. Scan all NPCs in aura radius
+      2. Calc centroid of all targets
+      3. Spam SPAM_COUNT packets: FireUnreliableServer("ReplicateMovement", ...)
+         → NO wait — server gets flooded with our spoofed pos immediately
+      4. Fire Slash (animRandom)
+      5. Spam SPAM_COUNT more during Delay window (halfway through)
+      6. task.wait(Delay from Melee.lua config)
+      7. Burst Impact all targets simultaneously
+      8. Wait remaining timer - Delay before next cycle
+
+    Result: ~0.25s cycle time regardless of NPC count. Fast.
+--]]
+
+-- ════════════════════════════════════════════════════════════
+--  CONFIG
+-- ════════════════════════════════════════════════════════════
+local CFG = {
+    AuraRadius   = 80,    -- studs
+    SpamCount    = 8,     -- position packets per spam burst
+    SpamCount2   = 5,     -- mid-delay spam burst count
+    BodyPart     = "Head",
+    PartOffset   = Vector3.new(0, 1.5, 0),
+    Debug        = true,
+    -- Overrides (nil = use Melee.lua values auto-detected)
+    DelayOverride = nil,
+    TimerOverride = nil,
+}
+
+-- Exact values from Melee.lua source
+local MELEE_CFG = {
+    Tomahawk={Delay=0.30,Time=1.00,Reach=7},M9_Bayonet={Delay=0.25,Time=0.50,Reach=5},
+    KitchenCleaver={Delay=0.25,Time=0.50,Reach=5},KitchenKnife={Delay=0.25,Time=0.50,Reach=5},
+    KitchenKnifeLong={Delay=0.25,Time=0.50,Reach=5},KitchenCleaverWood={Delay=0.25,Time=0.50,Reach=5},
+    KitchenKnifeWood={Delay=0.25,Time=0.50,Reach=5},KitchenKnifeLongWood={Delay=0.25,Time=0.50,Reach=5},
+    MI211={Delay=0.25,Time=0.50,Reach=5},SealPup={Delay=0.25,Time=0.50,Reach=5},
+    Machete={Delay=0.35,Time=0.75,Reach=6},Taiga={Delay=0.35,Time=0.75,Reach=6},
+    SOCP={Delay=0.25,Time=0.50,Reach=5},
+    Hooligan={Delay=0.30,Time=1.00,Reach=7},Pipe={Delay=0.30,Time=1.00,Reach=6},
+    PipeWrench={Delay=0.30,Time=1.00,Reach=6},Hatchet={Delay=0.30,Time=1.00,Reach=5},
+    NailBat={Delay=0.30,Time=1.00,Reach=5},MetalBat={Delay=0.30,Time=1.00,Reach=5},
+    Bat={Delay=0.30,Time=1.00,Reach=5},BatGrip={Delay=0.30,Time=1.00,Reach=5},
+    Plank={Delay=0.30,Time=1.00,Reach=5},PlankNailed={Delay=0.30,Time=1.00,Reach=5},
+    Crowbar={Delay=0.30,Time=1.00,Reach=5},CrowbarBlue={Delay=0.30,Time=1.00,Reach=5},
+    CrowbarRed={Delay=0.30,Time=1.00,Reach=5},
+}
+
+-- ════════════════════════════════════════════════════════════
+--  SERVICES & NETWORK
+-- ════════════════════════════════════════════════════════════
+local Players = game:GetService("Players")
+local UIS     = game:GetService("UserInputService")
+local lp      = Players.LocalPlayer
+
+local Network = shared and shared.import and shared.import("network")
+assert(Network, "[v11] network import failed")
+
+-- ════════════════════════════════════════════════════════════
+--  v_u_1 DETECTION (unreliable remote — upvalue of RS.Update)
+-- ════════════════════════════════════════════════════════════
+local _v_u_1    = nil
+local _vu1_how  = nil
+
+local function HasFUS(o)
+    if type(o) ~= "table" and type(o) ~= "userdata" then return false end
+    local ok, f = pcall(function() return o.FireUnreliableServer end)
+    return ok and type(f) == "function"
 end
-getgenv().LRM8_Conns = {}
-local function Track(c) table.insert(getgenv().LRM8_Conns, c); return c end
 
--- ============================================================
--- SERVICES
--- ============================================================
-local RunService        = game:GetService("RunService")
-local HttpService       = game:GetService("HttpService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local UserInputService  = game:GetService("UserInputService")
+local function FindVU1()
+    if _v_u_1 then return true end
 
--- ============================================================
--- GC SCAN
--- ============================================================
-local ReplicatorService = nil
-local Network           = nil
+    -- L1: Network itself (some builds expose it)
+    if HasFUS(Network) then _v_u_1=Network; _vu1_how="net_meta"; return true end
 
-local function DoScan()
-    local ok, gc = pcall(filtergc, "table")
-    if not ok then ok, gc = pcall(getgc, true) end
-    if not ok or type(gc) ~= "table" then return end
-    local i = 0
-    for _, obj in pairs(gc) do
-        i = i + 1
-        if i % 8000 == 0 then task.wait() end
-        if type(obj) ~= "table" then continue end
-        if not ReplicatorService
-            and rawget(obj, "Actors")
-            and rawget(obj, "LocalActor")
-        then
-            ReplicatorService = obj
-        end
-        if not Network then
-            local fs = rawget(obj, "FireServer")
-            local ev = rawget(obj, "_events")
-            local co = rawget(obj, "_code")
-            local ky = rawget(obj, "_key")
-            if fs and ev
-                and type(co) == "string" and co:match("^%x+%-%x+%-%x+%-%x+%-%x+$")
-                and type(ky) == "table" and #ky >= 5
-            then
-                local allNums = true
-                for _, n in ipairs(ky) do
-                    if type(n) ~= "number" then allNums = false; break end
+    -- L2: debug.getupvalues on RS.Update
+    local _g = (debug and type(debug.getupvalues)=="function" and debug.getupvalues)
+    local _req = shared and shared.import and pcall(shared.import,"require") and
+                 select(2, pcall(shared.import, "require"))
+    local RS = _req and pcall(_req,"ReplicatorService") and
+               select(2, pcall(_req,"ReplicatorService"))
+
+    if _g and RS then
+        local upFn = rawget(RS,"Update")
+        if type(upFn)=="function" then
+            local ok,ups = pcall(_g,upFn)
+            if ok and type(ups)=="table" then
+                for _,v in pairs(ups) do
+                    if HasFUS(v) and v~=Network then
+                        _v_u_1=v; _vu1_how="upval_rs"; return true
+                    end
                 end
-                if allNums then Network = obj end
             end
         end
-        if ReplicatorService and Network then break end
-    end
-end
-
-local function AK_FindNet()
-    if Network and rawget(Network, "_code") then return Network end
-    if shared and type(shared.import) == "function" then
-        local ok, net = pcall(function() return shared.import("network") end)
-        if ok and net and rawget(net, "_key") and rawget(net, "_code") then
-            Network = net; return net
+        -- L3: RS fields scan
+        for _,v in pairs(RS) do
+            if HasFUS(v) and v~=Network then _v_u_1=v; _vu1_how="rs_field"; return true end
         end
     end
-    local ok, gc = pcall(filtergc, "table")
-    if not ok then ok, gc = pcall(getgc, true) end
-    if ok and gc then
-        for _, v in pairs(gc) do
-            if type(v) ~= "table" then continue end
-            local k  = rawget(v, "_key")
-            local co = rawget(v, "_code")
-            local ev = rawget(v, "_events")
-            if type(k) == "table" and #k >= 5
-            and type(co) == "string" and co:match("^%x+%-%x+%-%x+%-%x+%-%x+$")
-            and type(ev) == "table"
-            then
-                local allNums = true
-                for _, n in ipairs(k) do
-                    if type(n) ~= "number" then allNums = false; break end
-                end
-                if allNums then Network = v; return v end
-            end
+
+    -- L4: GC / registry scan
+    local ok3,reg = pcall(function() return debug.getregistry() end)
+    if ok3 and type(reg)=="table" then
+        for _,v in pairs(reg) do
+            if HasFUS(v) and v~=Network then _v_u_1=v; _vu1_how="gc"; return true end
         end
     end
-    return nil
-end
 
-local _remote = nil
-local function AK_GetRemote()
-    if _remote and _remote.Parent then return _remote end
-    local ev = ReplicatedStorage:FindFirstChild("Events")
-    if ev then
-        local re = ev:FindFirstChild("RemoteEvent")
-        if re then _remote = re; return re end
-    end
-    for _, v in ipairs(ReplicatedStorage:GetDescendants()) do
-        if v:IsA("RemoteEvent") then _remote = v; return v end
-    end
-    return nil
-end
-
--- ============================================================
--- CIPHER (v5-identical)
--- ============================================================
-local function NetEncode(jsonStr, key)
-    local result = {}
-    for i = 1, #jsonStr do
-        local ki   = i % 4
-        local kval = key[ki + 1]
-        local nb   = (string.byte(jsonStr, i) - 32 + kval) % 95 + 32
-        result[i]  = string.char(nb)
-    end
-    local firstByte = string.byte(jsonStr, 1)
-    local base = #jsonStr
-    for v24 = 1, key[5] do
-        result[base + v24] = string.char(firstByte - string.byte(tostring(v24), 1))
-    end
-    return table.concat(result)
-end
-
-local function Encrypt(data, net)
-    local ok, raw = pcall(function() return HttpService:JSONEncode(data) end)
-    if not ok or not raw then return nil end
-    return NetEncode(raw, net._key)
-end
-
--- ============================================================
--- UID CACHE
--- ============================================================
-local _uidCache = setmetatable({}, {__mode = "k"})
-local function GetUID(actor)
-    if _uidCache[actor] then return _uidCache[actor] end
-    for _, f in ipairs({"UID","_uid","UUID","_id","Id"}) do
-        local v = rawget(actor, f)
-        if type(v) == "string" and v:match("^%x+%-%x+%-%x+%-%x+%-%x+$") then
-            _uidCache[actor] = v; return v
-        end
-    end
-    for _, v in pairs(actor) do
-        if type(v) == "string" and v:match("^%x+%-%x+%-%x+%-%x+%-%x+$") then
-            _uidCache[actor] = v; return v
-        end
-    end
-    local ok2, v2 = pcall(function() return actor.UID end)
-    if ok2 and type(v2) == "string" and v2:match("^%x+%-%x+%-%x+%-%x+%-%x+$") then
-        _uidCache[actor] = v2; return v2
-    end
-    return nil
-end
-
--- ============================================================
--- IsActorDead (v5-proven, multi-layer)
--- ============================================================
-local function IsActorDead(actor)
-    local alive = rawget(actor, "Alive")
-    if alive == false then return true end
-    local health = rawget(actor, "Health")
-    if health ~= nil and health <= 0 then return true end
-    local char = rawget(actor, "Character")
-    if not char then return true end
-    local ok, parent = pcall(function() return char.Parent end)
-    if not ok or not parent then return true end
-    local ok2, hum = pcall(function() return char:FindFirstChildOfClass("Humanoid") end)
-    if ok2 and hum then
-        local ok3, hp = pcall(function() return hum.Health end)
-        if ok3 and hp ~= nil and hp <= 0 then return true end
-    end
     return false
 end
 
--- ============================================================
--- CONFIG
--- ============================================================
-local AK = {
-    Enabled       = false,
-    Range         = 1000,
-    Interval      = 0.03,    -- 30ms giữa các batch
+-- ════════════════════════════════════════════════════════════
+--  LOCAL ACTOR HELPERS
+-- ════════════════════════════════════════════════════════════
+local _localUID   = nil
+local _localActor = nil
 
-    BatchSize     = 20,      -- số target mỗi batch
-    SpoofOffset   = 1.5,     -- studs lên trên target
-    MeleeDelay    = 0.25,    -- Slash → Impact window (s)
-
-    -- ─ SPEED CONTROLS ─────────────────────────────────────────
-    Stagger       = 0.016,   -- delay giữa các target (16ms = 1 frame)
-                             -- Nếu server reject: tăng lên (F2)
-                             -- Nếu FNP fallback mode: tự động ≥ 0.10s
-
-    SpoofGap      = 0.05,    -- DirectSpoof → Impact gap (50ms, UDP latency buffer)
-
-    MultiHit      = 1,       -- 1 = 1 round, 2 = 2 rounds Slash+Impact per target
-                             -- Toggle: F10
-
-    -- ─ INTERNAL ───────────────────────────────────────────────
-    TargetPart    = "Head",
-    _lastFire     = 0,
-    _conn         = nil,
-    _running      = false,
-    _lock         = false,
-    _directMode   = false,
-}
-
--- ============================================================
--- AK_FindPart
--- ============================================================
-local function AK_FindPart(char, partName)
-    return char:FindFirstChild(partName)
-        or char:FindFirstChild("Head")
-        or char:FindFirstChild("UpperTorso")
-        or char:FindFirstChild("HumanoidRootPart")
-        or char.PrimaryPart
-end
-
--- ============================================================
--- DirectSpoof — gửi ReplicateMovement trực tiếp
--- Không đụng ForceNextPosition → không teleport
--- UDP → server nhận trong ~10-30ms
---
--- RS.Update() (line 292) gửi chính xác params này:
---   FireUnreliableServer("ReplicateMovement", uid, x, y, z,
---     Orientation, Sprinting, HeightState, CameraX, CameraY,
---     LeanGoal, Platform, TeleportRevision or 0)
--- ============================================================
-local function DirectSpoof(uid, spoofPos, myActor, net)
-    local fus = rawget(net, "FireUnreliableServer")
-    if type(fus) ~= "function" then return false end
-    pcall(function()
-        fus(net,
-            "ReplicateMovement", uid,
-            spoofPos.X, spoofPos.Y, spoofPos.Z,
-            rawget(myActor, "Orientation")       or 0,
-            rawget(myActor, "Sprinting")         or false,
-            rawget(myActor, "HeightState")       or 0,
-            rawget(myActor, "CameraX")           or 0,
-            rawget(myActor, "CameraY")           or 0,
-            rawget(myActor, "LeanGoal")          or 0,
-            rawget(myActor, "Platform")          or false,
-            rawget(myActor, "TeleportRevision")  or 0
-        )
+local function RefreshLocalActor()
+    local ok,cs = pcall(function()
+        return shared.import("require")("ClientService")
     end)
-    return true
-end
-
--- ============================================================
--- FNP Spoof — fallback nếu FireUnreliableServer không có
--- Stagger PHẢI ≥ 0.10s (1 RS tick) để đảm bảo RS fire trước Impact
--- ONE-SHOT: set FNP 1 lần, chờ RS clear trong ≤ 0.1s
--- ============================================================
-local function FNPSpoof(spoofPos, myActor)
-    pcall(function() myActor.ForceNextPosition = spoofPos end)
-    -- Force RS fire ngay frame tiếp (v6 trick)
-    pcall(function() ReplicatorService._lastReplicate = 0 end)
-    task.wait()
-    task.wait()
-end
-
--- ============================================================
--- FireKill — 1 kill packet set cho 1 target, 1 round
--- Slash → wait → Spoof → wait(SpoofGap) → Impact
--- ============================================================
-local function FireKill(actor, net, remote, uid_self, myActor)
-    if IsActorDead(actor) then return end
-    local char = rawget(actor, "Character")
-    if not char then return end
-    local part = AK_FindPart(char, AK.TargetPart)
-    if not part then return end
-    local uid = GetUID(actor)
-    if not uid then return end
-
-    -- Slash
-    local encSlash = Encrypt(
-        {net._code, "InventoryAction", "Slash", math.random(1, 3)},
-        net
-    )
-    if encSlash then
-        pcall(function() remote:FireServer(encSlash) end)
+    if ok and cs and cs.LocalClient then
+        _localActor = cs.LocalClient.LocalActor or cs.LocalClient._localActor
+        _localUID   = cs.LocalClient.UID or cs.LocalClient._uid
+            or (_localActor and (rawget(_localActor,"UID") or rawget(_localActor,"_uid")))
     end
-
-    -- Chờ đến điểm gửi spoof
-    local waitBeforeSpoof = math.max(0.01, AK.MeleeDelay - AK.SpoofGap)
-    task.wait(waitBeforeSpoof)
-    if IsActorDead(actor) then return end
-
-    -- Spoof position
-    local hitPos = part.Position
-    local spoof  = hitPos + Vector3.new(0, AK.SpoofOffset, 0)
-
-    if AK._directMode then
-        DirectSpoof(uid_self, spoof, myActor, net)
-        task.wait(AK.SpoofGap)
-    else
-        -- FNP fallback: SpoofGap trong FNP mode phải = Stagger ≥ 0.10s
-        FNPSpoof(spoof, myActor)
-        -- FNPSpoof already waited 2 frames (~33ms)
-        -- Thêm buffer để đảm bảo đủ 0.10s total
-        local extraWait = math.max(0, 0.10 - 0.033 - (AK.MeleeDelay - AK.SpoofGap - waitBeforeSpoof))
-        if extraWait > 0 then task.wait(extraWait) end
-    end
-
-    -- Impact
-    if IsActorDead(actor) then return end
-    local freshPos = part.Position
-    local encImpact = Encrypt(
-        {net._code, "InventoryAction", "Impact",
-         {freshPos.X, freshPos.Y, freshPos.Z}, uid, part.Name},
-        net
-    )
-    if encImpact then
-        pcall(function() remote:FireServer(encImpact) end)
-    end
-end
-
--- ============================================================
--- AK_FireBatch
---
--- Per target: spawn FireKill coroutine(s)
---   - 1 coroutine nếu MultiHit=1
---   - 2 coroutines nếu MultiHit=2 (Round2 starts 20ms after Round1)
---
--- Stagger giữa targets: AK.Stagger (default 16ms)
---   DirectMode: 16ms (FNP không được set → không interference)
---   FNP fallback: auto-clamp ≥ 100ms (đảm bảo RS có 1 tick per target)
--- ============================================================
-local function AK_FireBatch(candidates, count, net, remote, myActor, uid_self)
-    -- Auto-clamp stagger in FNP mode
-    local stagger = AK.Stagger
-    if not AK._directMode then
-        stagger = math.max(0.10, stagger)
-    end
-
-    for i = 1, count do
-        local tOffset = (i - 1) * stagger
-
-        -- Round 1
-        task.delay(tOffset, function()
-            FireKill(candidates[i].Actor, net, remote, uid_self, myActor)
-        end)
-
-        -- Round 2 (MultiHit=2): 20ms sau Round 1
-        if AK.MultiHit >= 2 then
-            task.delay(tOffset + 0.020, function()
-                FireKill(candidates[i].Actor, net, remote, uid_self, myActor)
-            end)
+    if not _localUID then
+        -- fallback: character attribute
+        local char = lp.Character
+        if char then
+            _localUID = char:GetAttribute("UID") or char:GetAttribute("ActorUID")
         end
     end
-
-    -- Release lock
-    local lockDelay = (count - 1) * stagger + AK.MeleeDelay
-    if AK.MultiHit >= 2 then lockDelay = lockDelay + 0.020 end
-    lockDelay = lockDelay + 0.10
-    task.delay(lockDelay, function()
-        AK._lock = false
-    end)
 end
 
--- ============================================================
--- AK_Tick — Heartbeat loop
--- ============================================================
-local function AK_Tick()
-    if not AK.Enabled then return end
-    if AK._lock then return end
-    local now = tick()
-    if now - AK._lastFire < AK.Interval then return end
+local function ActorField(k, default)
+    if not _localActor then return default end
+    local ok,v = pcall(function() return _localActor[k] end)
+    return (ok and v) or default
+end
 
-    local myActor = ReplicatorService and ReplicatorService.LocalActor
-    if not myActor then return end
-    local uid_self = ReplicatorService._uid
-    if not uid_self then return end
+-- ════════════════════════════════════════════════════════════
+--  POSITION SPAM  (bypass RS 100ms throttle)
+-- ════════════════════════════════════════════════════════════
+local function SpoofSpam(pos, count)
+    if not _v_u_1 or not _localUID then return 0 end
+    count = count or CFG.SpamCount
 
-    local net = AK_FindNet()
-    if not net then return end
-    local remote = AK_GetRemote()
-    if not remote then return end
-
-    local myPos
-    pcall(function() myPos = myActor.Position end)
-    if not myPos then
-        local cam = workspace.CurrentCamera
-        myPos = cam and cam.CFrame.Position or Vector3.new(0, 0, 0)
+    -- Also set ForceNextPosition so RS.Update() sends it on its own next tick (backup)
+    if _localActor then
+        pcall(function()
+            _localActor.ForceNextPosition = pos
+            _localActor.SimulatedPosition  = pos
+        end)
     end
 
-    local candidates = {}
-    if rawget(ReplicatorService, "Actors") then
-        for _, actor in pairs(ReplicatorService.Actors) do
-            if type(actor) ~= "table" then continue end
-            if actor == myActor then continue end
-            if IsActorDead(actor) then continue end
-            local aPos
-            pcall(function() aPos = actor.Position end)
-            if not aPos then pcall(function() aPos = actor.ServerPosition end) end
-            if not aPos then
-                local char = rawget(actor, "Character")
-                if char and char.PrimaryPart then
-                    pcall(function() aPos = char.PrimaryPart.Position end)
+    -- Direct spam — no throttle since we're calling v_u_1 directly, not via RS.Update
+    local ori  = ActorField("Orientation", 0)
+    local spr  = ActorField("Sprinting",   false)
+    local hs   = ActorField("HeightState", 0)
+    local cx   = ActorField("CameraX",     0)
+    local cy   = ActorField("CameraY",     0)
+    local lg   = ActorField("LeanGoal",    0)
+    local pl   = ActorField("Platform",    false)
+    local tr   = ActorField("TeleportRevision", 0)
+
+    local sent = 0
+    for _ = 1, count do
+        local ok = pcall(function()
+            _v_u_1:FireUnreliableServer(
+                "ReplicateMovement", _localUID,
+                pos.X, pos.Y, pos.Z,
+                ori, spr, hs, cx, cy, lg, pl, tr
+            )
+        end)
+        if ok then sent = sent + 1 end
+    end
+    return sent
+end
+
+-- ════════════════════════════════════════════════════════════
+--  FIRE HELPERS  (exact MeleeInventory.lua format)
+-- ════════════════════════════════════════════════════════════
+local function FireSlash(animNum)
+    -- matches: v_u_2:FireServer("InventoryAction","Slash",animNum)
+    pcall(function() Network:FireServer("InventoryAction","Slash",animNum) end)
+end
+
+local function FireImpact(hitPos, uid, part)
+    -- matches: v_u_2:FireServer("InventoryAction","Impact",v_u_7(hitPos),uid,part)
+    -- v_u_7 = vector3toTable = {x,y,z}
+    local tbl = {x=hitPos.X, y=hitPos.Y, z=hitPos.Z}
+    pcall(function() Network:FireServer("InventoryAction","Impact",tbl,uid,part) end)
+end
+
+-- ════════════════════════════════════════════════════════════
+--  NPC SCANNER
+-- ════════════════════════════════════════════════════════════
+local function ScanTargets(maxRange)
+    local out = {}
+    local myPos = Vector3.new(0,0,0)
+    local char = lp.Character
+    local hrp0 = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp0 then myPos = hrp0.Position end
+
+    -- helper: add a character model if it qualifies
+    local function tryAdd(model)
+        if model == char then return end
+        local hum = model:FindFirstChildOfClass("Humanoid")
+        local hrp = model:FindFirstChild("HumanoidRootPart")
+        if not hum or not hrp or hum.Health <= 0 then return end
+        if (hrp.Position - myPos).Magnitude > maxRange then return end
+
+        -- UID resolution — try every known location
+        local uid = model:GetAttribute("UID")
+               or model:GetAttribute("ActorUID")
+               or model:GetAttribute("_uid")
+        if not uid then
+            -- scan model children for UID property
+            for _, child in ipairs(model:GetChildren()) do
+                local ok2,v2 = pcall(function() return child.UID end)
+                if ok2 and v2 and type(v2)=="string" then uid=v2; break end
+                local ok3,v3 = pcall(function() return rawget(child,"UID") end)
+                if ok3 and v3 then uid=v3; break end
+            end
+        end
+        if not uid then uid = model.Name .. tostring(math.floor(hrp.Position.X)) end
+
+        out[#out+1] = {uid=uid, pos=hrp.Position, model=model}
+    end
+
+    -- player characters
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= lp and p.Character then
+            pcall(tryAdd, p.Character)
+        end
+    end
+    -- workspace NPCs (zombies, bots)
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("Model") then
+            pcall(tryAdd, obj)
+        end
+    end
+    return out
+end
+
+-- ════════════════════════════════════════════════════════════
+--  WEAPON CONFIG
+-- ════════════════════════════════════════════════════════════
+local function GetWepCfg()
+    local build = nil
+    -- try InventoryService.Equipped
+    local ok,inv = pcall(function() return shared.import("require")("InventoryService") end)
+    if ok and inv then
+        local eq = rawget(inv,"Equipped") or inv.Equipped
+        if eq and eq.Handler then
+            build = rawget(eq.Handler,"_build") or eq.Handler._build
+        end
+    end
+    -- fallback: equipped tool
+    if not build then
+        local c = lp.Character
+        if c then
+            for _,t in ipairs(c:GetChildren()) do
+                if t:IsA("Tool") then
+                    build = t:GetAttribute("Build") or t:GetAttribute("Variant") or t.Name
+                    break
                 end
             end
-            if not aPos then continue end
-            local d = (aPos - myPos).Magnitude
-            if d <= AK.Range then
-                candidates[#candidates + 1] = {Actor = actor, Dist = d}
+        end
+    end
+    local cfg = (build and MELEE_CFG[build]) or {Delay=0.25,Time=0.50,Reach=5}
+    return cfg, build or "?"
+end
+
+-- ════════════════════════════════════════════════════════════
+--  MAIN CYCLE
+-- ════════════════════════════════════════════════════════════
+local function RunCycle()
+    local wCfg, wName = GetWepCfg()
+    local delay = CFG.DelayOverride or wCfg.Delay
+    local timer = CFG.TimerOverride or wCfg.Time
+
+    local targets = ScanTargets(CFG.AuraRadius)
+    if #targets == 0 then
+        if CFG.Debug then print("[v11] no targets") end
+        return timer
+    end
+
+    -- Centroid of all targets
+    local cx2,cy2,cz2 = 0,0,0
+    for _,t in ipairs(targets) do
+        cx2=cx2+t.pos.X; cy2=cy2+t.pos.Y; cz2=cz2+t.pos.Z
+    end
+    local n = #targets
+    local centroid = Vector3.new(cx2/n, cy2/n, cz2/n)
+
+    if CFG.Debug then
+        print(string.format("[v11] wep=%s | targets=%d | delay=%.2f timer=%.2f",
+            wName, n, delay, timer))
+    end
+
+    -- 1) Pre-Slash spam: flood server with centroid position
+    local s1 = SpoofSpam(centroid, CFG.SpamCount)
+    if CFG.Debug then print("[v11] pre-spam sent="..s1) end
+
+    -- 2) Slash immediately (no wait — spam already in flight)
+    local anim = math.random(1,3)
+    FireSlash(anim)
+    if CFG.Debug then print("[v11] Slash(anim="..anim..")") end
+
+    -- 3) Mid-delay spam (halfway through delay window)
+    --    Spawned so Slash fires without waiting
+    local halfDelay = delay * 0.5
+    task.spawn(function()
+        task.wait(halfDelay)
+        SpoofSpam(centroid, CFG.SpamCount2)
+    end)
+
+    -- 4) Wait exact Delay from Melee.lua
+    task.wait(delay)
+
+    -- 5) Burst Impact all targets
+    local hits = 0
+    for _, tgt in ipairs(targets) do
+        local hitPos = tgt.pos + CFG.PartOffset
+        FireImpact(hitPos, tgt.uid, CFG.BodyPart)
+        hits = hits + 1
+    end
+    if CFG.Debug then print("[v11] Impact burst x"..hits) end
+
+    -- 6) Remaining wait before next cycle
+    local remaining = math.max(0.05, timer - delay)
+    return remaining
+end
+
+-- ════════════════════════════════════════════════════════════
+--  LOOP CONTROL
+-- ════════════════════════════════════════════════════════════
+local _running = false
+local _enabled = false
+
+local function Start()
+    if _running then print("[v11] already running"); return end
+    _running = true
+    _enabled = true
+
+    RefreshLocalActor()
+
+    print("[v11] detecting v_u_1...")
+    if FindVU1() then
+        print("[v11] v_u_1 OK via "..(_vu1_how or "?"))
+    else
+        print("[v11] WARN: v_u_1 not found — position spam disabled")
+    end
+    if not _localUID then
+        print("[v11] WARN: localUID not found — spoof will skip")
+    end
+
+    print("[v11] AuraKill ON | radius="..CFG.AuraRadius)
+    task.spawn(function()
+        while _enabled do
+            local ok, wait_t = pcall(RunCycle)
+            if not ok then
+                print("[v11] cycle err: "..tostring(wait_t))
+                wait_t = 0.5
             end
+            task.wait(wait_t or 0.5)
         end
-    end
-
-    if #candidates == 0 then return end
-    table.sort(candidates, function(a, b) return a.Dist < b.Dist end)
-
-    AK._lastFire = now
-    AK._lock     = true
-
-    local count = math.min(AK.BatchSize, #candidates)
-    AK_FireBatch(candidates, count, net, remote, myActor, uid_self)
-end
-
-function AK.Start()
-    if AK._running then return end
-    local net = AK_FindNet()
-    if net then
-        local fus = rawget(net, "FireUnreliableServer")
-        AK._directMode = type(fus) == "function"
-    end
-    AK._running = true
-    AK._conn = Track(RunService.Heartbeat:Connect(AK_Tick))
-    local stagger = AK._directMode and AK.Stagger or math.max(0.10, AK.Stagger)
-    local totalMs = math.floor(((AK.BatchSize - 1) * stagger + AK.MeleeDelay) * 1000)
-    local mode = AK._directMode and "DirectSpoof" or "FNP Fallback"
-    print(string.format("[LRM8] Started | Mode: %s | Batch: %d targets in ~%dms | MultiHit: %dx",
-        mode, AK.BatchSize, totalMs, AK.MultiHit))
-end
-
-function AK.Stop()
-    AK._running = false
-    AK._lock    = false
-    if AK._conn then
-        pcall(function() AK._conn:Disconnect() end)
-        AK._conn = nil
-    end
-    if not AK._directMode then
-        local myActor = ReplicatorService and ReplicatorService.LocalActor
-        if myActor then pcall(function() myActor.ForceNextPosition = nil end) end
-    end
-    print("[LRM8] Stopped")
-end
-
--- ============================================================
--- UI
--- ============================================================
-pcall(function()
-    local target = gethui and gethui() or game:GetService("CoreGui")
-    local old = target:FindFirstChild("LRM8_GUI")
-    if old then old:Destroy() end
-end)
-
-local gui = Instance.new("ScreenGui")
-gui.Name = "LRM8_GUI"
-gui.ResetOnSpawn = false
-pcall(function()
-    gui.Parent = gethui and gethui() or game:GetService("CoreGui")
-end)
-
-local frame = Instance.new("Frame", gui)
-frame.Size               = UDim2.new(0, 310, 0, 330)
-frame.Position           = UDim2.new(0, 16, 0.5, -165)
-frame.BackgroundColor3   = Color3.fromRGB(10, 10, 13)
-frame.BorderSizePixel    = 0
-frame.Active             = true
-frame.Draggable          = true
-Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
-
-local hdr = Instance.new("Frame", frame)
-hdr.Size               = UDim2.new(1, 0, 0, 30)
-hdr.BackgroundColor3   = Color3.fromRGB(20, 20, 28)
-hdr.BorderSizePixel    = 0
-Instance.new("UICorner", hdr).CornerRadius = UDim.new(0, 8)
-
-local ttl = Instance.new("TextLabel", hdr)
-ttl.Size                   = UDim2.new(1, 0, 1, 0)
-ttl.BackgroundTransparency = 1
-ttl.Font                   = Enum.Font.GothamBold
-ttl.TextSize               = 12
-ttl.TextColor3             = Color3.fromRGB(200, 200, 220)
-ttl.Text                   = "  MTC  ·  LONG RANGE MELEE  ·  v8  ·  MAX SPEED"
-ttl.TextXAlignment         = Enum.TextXAlignment.Left
-
-local function Lbl(y, txt, col)
-    local l = Instance.new("TextLabel", frame)
-    l.Size                   = UDim2.new(1, -16, 0, 16)
-    l.Position               = UDim2.new(0, 8, 0, y)
-    l.BackgroundTransparency = 1
-    l.Font                   = Enum.Font.Gotham
-    l.TextSize               = 11
-    l.TextColor3             = col or Color3.fromRGB(160, 160, 170)
-    l.TextXAlignment         = Enum.TextXAlignment.Left
-    l.Text                   = txt
-    return l
-end
-
-local function Btn(y, h, txt, cb)
-    local b = Instance.new("TextButton", frame)
-    b.Size               = UDim2.new(1, -16, 0, h)
-    b.Position           = UDim2.new(0, 8, 0, y)
-    b.BackgroundColor3   = Color3.fromRGB(28, 28, 38)
-    b.BorderSizePixel    = 0
-    b.Font               = Enum.Font.GothamBold
-    b.TextSize           = 12
-    b.TextColor3         = Color3.fromRGB(200, 200, 220)
-    b.Text               = txt
-    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
-    b.MouseButton1Click:Connect(cb)
-    return b
-end
-
-local lblStatus  = Lbl(38,  "Status  : OFF",                      Color3.fromRGB(210, 65, 65))
-local lblMode    = Lbl(56,  "Mode    : detecting...")
-local lblNet     = Lbl(72,  "Network : --")
-local lblActors  = Lbl(88,  "Actors  : --")
-
-local function fmtSpeed()
-    local stagger = AK._directMode and AK.Stagger or math.max(0.10, AK.Stagger)
-    local ms = math.floor(((AK.BatchSize - 1) * stagger + AK.MeleeDelay) * 1000)
-    return string.format("Speed   : %d targets ~%dms | Stagger %dms | Hit×%d",
-        AK.BatchSize, ms, math.floor(stagger * 1000), AK.MultiHit)
-end
-local function fmtRange()
-    return string.format("Range   : %.0fst | Batch %d | Interval %dms",
-        AK.Range, AK.BatchSize, math.floor(AK.Interval * 1000))
-end
-local function fmtDelay()
-    return string.format("Delay   : %.2fs | SpoofGap %dms | Offset %.1fst",
-        AK.MeleeDelay, math.floor(AK.SpoofGap * 1000), AK.SpoofOffset)
-end
-
-local lblSpeed  = Lbl(104, fmtSpeed())
-local lblRange  = Lbl(120, fmtRange())
-local lblDelay  = Lbl(136, fmtDelay())
-
-local toggleBtn = Btn(154, 28, "[ OFF ]  F3 — Toggle Aura Kill", function()
-    AK.Enabled = not AK.Enabled
-    if AK.Enabled then
-        AK.Start()
-        toggleBtn.Text       = "[ ON ]  F3 — Toggle Aura Kill"
-        toggleBtn.TextColor3 = Color3.fromRGB(65, 210, 100)
-        lblStatus.Text       = "Status  : ON"
-        lblStatus.TextColor3 = Color3.fromRGB(65, 210, 100)
-    else
-        AK.Stop()
-        toggleBtn.Text       = "[ OFF ]  F3 — Toggle Aura Kill"
-        toggleBtn.TextColor3 = Color3.fromRGB(200, 200, 220)
-        lblStatus.Text       = "Status  : OFF"
-        lblStatus.TextColor3 = Color3.fromRGB(210, 65, 65)
-    end
-end)
-
-Btn(190, 22, "Rescan Network + Remote", function()
-    Network = nil; _remote = nil; ReplicatorService = nil
-    task.spawn(function()
-        DoScan(); AK_FindNet(); AK_GetRemote()
-        local net = Network
-        if net then
-            local fus = rawget(net, "FireUnreliableServer")
-            AK._directMode = type(fus) == "function"
-        end
-        lblNet.Text = Network
-            and ("Network : OK  key[1]=" .. tostring(Network._key[1]))
-            or  "Network : FAIL"
-        local modeStr = AK._directMode and "DirectSpoof ✓" or "FNP Fallback"
-        local modeCol = AK._directMode
-            and Color3.fromRGB(65, 210, 100)
-            or  Color3.fromRGB(210, 180, 65)
-        lblMode.Text      = "Mode    : " .. modeStr
-        lblMode.TextColor3 = modeCol
-        lblSpeed.Text = fmtSpeed()
+        _running = false
+        print("[v11] AuraKill OFF")
     end)
-end)
+end
 
-Btn(220, 22, "Rescan Actors (RS)", function()
-    ReplicatorService = nil
-    task.spawn(function()
-        DoScan()
-        local n = 0
-        if ReplicatorService and rawget(ReplicatorService, "Actors") then
-            for _ in pairs(ReplicatorService.Actors) do n = n + 1 end
-        end
-        lblActors.Text = "Actors  : " .. n
-    end)
-end)
+local function Stop()
+    _enabled = false
+end
 
-Btn(250, 22, "F10 — Toggle MultiHit  (now: " .. AK.MultiHit .. "x)", function()
-    AK.MultiHit = AK.MultiHit == 1 and 2 or 1
-    lblSpeed.Text = fmtSpeed()
-end)
-
-local multiBtn = frame:FindFirstChild("TextButton") -- will set text in keybind
-
--- KEYBINDS
-Track(UserInputService.InputBegan:Connect(function(inp, gpe)
+-- ════════════════════════════════════════════════════════════
+--  KEYBINDS  F=toggle | G=single test | H=status
+-- ════════════════════════════════════════════════════════════
+UIS.InputBegan:Connect(function(inp, gpe)
     if gpe then return end
-    local kc = inp.KeyCode
+    if inp.KeyCode == Enum.KeyCode.F then
+        if _enabled then Stop() else Start() end
 
-    if kc == Enum.KeyCode.F3 then
-        AK.Enabled = not AK.Enabled
-        if AK.Enabled then
-            AK.Start()
-            toggleBtn.Text       = "[ ON ]  F3 — Toggle Aura Kill"
-            toggleBtn.TextColor3 = Color3.fromRGB(65, 210, 100)
-            lblStatus.Text       = "Status  : ON"
-            lblStatus.TextColor3 = Color3.fromRGB(65, 210, 100)
-            lblMode.Text = AK._directMode
-                and "Mode    : DirectSpoof ✓  (No Teleport)"
-                or  "Mode    : FNP Fallback  (Stagger ≥100ms)"
-            lblMode.TextColor3 = AK._directMode
-                and Color3.fromRGB(65, 210, 100)
-                or  Color3.fromRGB(210, 180, 65)
-        else
-            AK.Stop()
-            toggleBtn.Text       = "[ OFF ]  F3 — Toggle Aura Kill"
-            toggleBtn.TextColor3 = Color3.fromRGB(200, 200, 220)
-            lblStatus.Text       = "Status  : OFF"
-            lblStatus.TextColor3 = Color3.fromRGB(210, 65, 65)
-        end
+    elseif inp.KeyCode == Enum.KeyCode.G then
+        -- single cycle test
+        RefreshLocalActor()
+        FindVU1()
+        print("[v11] TEST CYCLE")
+        local ok, w = pcall(RunCycle)
+        if not ok then print("[v11] err: "..tostring(w)) end
 
-    elseif kc == Enum.KeyCode.F1 then
-        AK.Stagger = math.max(0.008, AK.Stagger - 0.008)
-        lblSpeed.Text = fmtSpeed()
-    elseif kc == Enum.KeyCode.F2 then
-        AK.Stagger = math.min(0.20, AK.Stagger + 0.008)
-        lblSpeed.Text = fmtSpeed()
-
-    elseif kc == Enum.KeyCode.F4 then
-        AK.Range = math.max(5, AK.Range - 50)
-        lblRange.Text = fmtRange()
-    elseif kc == Enum.KeyCode.F5 then
-        AK.Range = math.min(9999, AK.Range + 50)
-        lblRange.Text = fmtRange()
-
-    elseif kc == Enum.KeyCode.F6 then
-        AK.MeleeDelay = math.max(0.10, AK.MeleeDelay - 0.05)
-        lblDelay.Text = fmtDelay()
-    elseif kc == Enum.KeyCode.F7 then
-        AK.MeleeDelay = math.min(1.0, AK.MeleeDelay + 0.05)
-        lblDelay.Text = fmtDelay()
-
-    elseif kc == Enum.KeyCode.F8 then
-        AK.BatchSize = math.max(1, AK.BatchSize - 5)
-        lblRange.Text = fmtRange()
-        lblSpeed.Text = fmtSpeed()
-    elseif kc == Enum.KeyCode.F9 then
-        AK.BatchSize = math.min(50, AK.BatchSize + 5)
-        lblRange.Text = fmtRange()
-        lblSpeed.Text = fmtSpeed()
-
-    elseif kc == Enum.KeyCode.F10 then
-        AK.MultiHit = AK.MultiHit == 1 and 2 or 1
-        lblSpeed.Text = fmtSpeed()
-        print("[LRM8] MultiHit →", AK.MultiHit .. "x")
+    elseif inp.KeyCode == Enum.KeyCode.H then
+        -- status dump
+        print(string.format("[v11] status: running=%s | v_u_1=%s(%s) | uid=%s",
+            tostring(_enabled),
+            tostring(_v_u_1 ~= nil),
+            _vu1_how or "none",
+            tostring(_localUID)
+        ))
     end
-end))
-
--- INFO TICKER
-local _lastTick2 = 0
-Track(RunService.Heartbeat:Connect(function()
-    local now = tick()
-    if now - _lastTick2 < 1 then return end
-    _lastTick2 = now
-    local net = Network
-    lblNet.Text = net
-        and ("Network : OK  key[1]=" .. tostring(net._key[1]))
-        or  "Network : --"
-    local n = 0
-    if ReplicatorService and rawget(ReplicatorService, "Actors") then
-        for _ in pairs(ReplicatorService.Actors) do n = n + 1 end
-    end
-    lblActors.Text = "Actors  : " .. n
-    lblSpeed.Text = fmtSpeed()
-end))
-
--- ============================================================
--- INIT
--- ============================================================
-print("[LRM8] Scanning GC...")
-task.spawn(function()
-    for attempt = 1, 30 do
-        DoScan()
-        if not Network then AK_FindNet() end
-        if ReplicatorService and Network then break end
-        task.wait(1)
-    end
-
-    local net = Network
-    if net then
-        print("[LRM8] Network OK — code:", net._code:sub(1, 8), "key[1]:", net._key[1])
-        lblNet.Text = "Network : OK  key[1]=" .. tostring(net._key[1])
-        local fus = rawget(net, "FireUnreliableServer")
-        AK._directMode = type(fus) == "function"
-        local modeStr = AK._directMode and "DirectSpoof ✓  (No Teleport)" or "FNP Fallback  (Stagger ≥100ms)"
-        local modeCol = AK._directMode
-            and Color3.fromRGB(65, 210, 100)
-            or  Color3.fromRGB(210, 180, 65)
-        lblMode.Text       = "Mode    : " .. modeStr
-        lblMode.TextColor3 = modeCol
-        print("[LRM8] Spoof mode:", modeStr)
-    else
-        print("[LRM8] Network FAIL — bấm Rescan")
-    end
-    if ReplicatorService then
-        local n = 0
-        for _ in pairs(ReplicatorService.Actors) do n = n + 1 end
-        print("[LRM8] ReplicatorService OK — actors:", n)
-    else
-        print("[LRM8] ReplicatorService FAIL — bấm Rescan Actors")
-    end
-
-    lblSpeed.Text = fmtSpeed()
-    lblRange.Text = fmtRange()
-    lblDelay.Text = fmtDelay()
 end)
 
-print("[LRM8] Ready — v8 MAX SPEED + NO TELEPORT")
-print("[LRM8] F3=Toggle  F1/F2=Stagger±  F4/F5=Range±  F6/F7=MeleeDelay±")
-print("[LRM8] F8/F9=BatchSize±  F10=MultiHit toggle")
-print("[LRM8] ---")
-print("[LRM8] SPEED GUIDE:")
-print("[LRM8]   DirectMode + Stagger 16ms + MultiHit 2x = MAX SPEED")
-print("[LRM8]   Nếu targets không chết: F2 (tăng stagger) hoặc tắt MultiHit")
-print("[LRM8]   FNP mode: stagger tự lock ≥ 100ms (slower but guaranteed)")
+-- ════════════════════════════════════════════════════════════
+--  RETURN API
+-- ════════════════════════════════════════════════════════════
+return {
+    Start=Start, Stop=Stop, Config=CFG,
+    _v_u_1=function() return _v_u_1 end,
+    _uid=function() return _localUID end,
+    _spam=SpoofSpam,
+    _scan=ScanTargets,
+    _slash=FireSlash,
+    _impact=FireImpact,
+}
