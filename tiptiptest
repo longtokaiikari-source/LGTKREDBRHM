@@ -72,8 +72,32 @@ local Players = game:GetService("Players")
 local UIS     = game:GetService("UserInputService")
 local lp      = Players.LocalPlayer
 
-local Network = shared and shared.import and shared.import("network")
-assert(Network, "[v11] network import failed")
+-- shared.import may need "require" as first arg (MTC pattern: shared.import("require","network",...))
+-- Also: MTC loads async — retry up to 15s so script can run before full load
+local Network
+local function _tryNet()
+    if not shared or not shared.import then return nil end
+    -- try single arg
+    local ok1, n1 = pcall(function() return shared.import("network") end)
+    if ok1 and type(n1)=="table" and type(n1.FireServer)=="function" then return n1 end
+    -- try with "require" as first arg (matches MTC source pattern)
+    local ok2, _, n2 = pcall(function() return shared.import("require","network") end)
+    if ok2 and type(n2)=="table" and type(n2.FireServer)=="function" then return n2 end
+    -- try require() directly
+    local ok3, n3 = pcall(require, "network")
+    if ok3 and type(n3)=="table" and type(n3.FireServer)=="function" then return n3 end
+    return nil
+end
+print("[v11] waiting for network...")
+for _=1,150 do           -- up to 15 seconds
+    Network = _tryNet()
+    if Network then break end
+    task.wait(0.1)
+end
+if not Network then
+    warn("[v11] network not found after 15s — aborted"); return
+end
+print("[v11] network OK")
 
 -- ════════════════════════════════════════════════════════════
 --  v_u_1 DETECTION (unreliable remote — upvalue of RS.Update)
