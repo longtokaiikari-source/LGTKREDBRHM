@@ -1,461 +1,882 @@
---[[
-    MTC Long-Range Aura Melee — v11
-    ──────────────────────────────────────────────────────────
-    SOURCE INSIGHT (CharacterController + ReplicatorService):
+-- MTC Long-Range Aura Melee v6
+-- Method: SimulatedPosition → FNP → FNP → ServerPosition chain
+-- Source: CharacterController.lua line 1549 (SimPos), ReplicatorService.Update() (FNP)
+--
+-- ┌─ v6 Spoof Chain (SimPos → FNP → FNP → ServerPos) ────────────────────┐
+-- │                                                                        │
+-- │  CharacterController.Update() line 1549:                              │
+-- │    SimulatedPosition = real_physics_pos   ← set mỗi frame             │
+-- │                                                                        │
+-- │  ReplicatorService.Update() 10Hz:                                      │
+-- │    v138 = ForceNextPosition OR SimulatedPosition                       │
+-- │    → ưu tiên FNP, fallback SimPos                                      │
+-- │    → FireUnreliableServer("ReplicateMovement", uid, v138.X,Y,Z ...)    │
+-- │    → ForceNextPosition = nil (clear sau tick)                          │
+-- │                                                                        │
+-- │  v6 write order (tại FNPLead window):                                  │
+-- │    [1] SimulatedPosition  = spoofPos  ← ghi đè CC.Update()            │
+-- │    [2] ForceNextPosition  = spoofPos  ← RS ưu tiên đọc cái này        │
+-- │    [3] ForceNextPosition  = spoofPos  ← ghi lần 2 (belt+suspenders)   │
+-- │    [4] ServerPosition     = spoofPos  ← direct write nếu accessible   │
+-- │                                                                        │
+-- │  RS tick đọc FNP (field [2]/[3]) → gửi spoofPos → clear FNP          │
+-- │  SimPos fallback vẫn = spoofPos cho đến khi CC.Update() override lại  │
+-- │  → server nhận spoofPos confirmed từ 2 path (FNP + SimPos)            │
+-- │  → hit window rộng hơn v5 (2 RS tick coverage thay vì 1)              │
+-- └────────────────────────────────────────────────────────────────────────┘
+--
+-- ┌─ v6 Packet Boost ──────────────────────────────────────────────────────┐
+-- │  Slash  → fire 1x                                                      │
+-- │  Impact → fire 3x với 15ms spacing (server dedup nếu có,              │
+-- │           nhưng window hit cao hơn nếu server laggy)                   │
+-- │  Interval: 0.02s (50Hz tick thay vì 20Hz)                              │
+-- │  BatchSize: 20 (tăng từ 15)                                            │
+-- └────────────────────────────────────────────────────────────────────────┘
 
-    ReplicatorService.Update() → throttled: _lastReplicate = tick() + 0.1
-    → Only 1 ReplicateMovement packet per 100ms via RS.
-    → Calling v_u_1:FireUnreliableServer() DIRECTLY bypasses this throttle.
-    → We spam N packets directly → server sees spoofed pos instantly.
+-- ============================================================
+-- SINGLETON
+-- ============================================================
+if getgenv().LRM6_Conns then
+    for _, c in ipairs(getgenv().LRM6_Conns) do
+        pcall(function() c:Disconnect() end)
+    end
+end
+getgenv().LRM6_Conns = {}
+local function Track(c) table.insert(getgenv().LRM6_Conns, c); return c end
 
-    CharacterController.Teleport():
-        actor.ForceNextPosition = pos   ← RS.Update reads this next tick
-        actor.SimulatedPosition  = pos  ← visual position
-        actor.Position           = pos  ← physical position
+-- ============================================================
+-- SERVICES
+-- ============================================================
+local RunService        = game:GetService("RunService")
+local HttpService       = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService  = game:GetService("UserInputService")
 
-    MeleeInventory flow (per swing):
-        Slash(random1-3) → delay(Delay) → Impact({x,y,z}, uid, part)
-
-    STRATEGY v11 (zero wait, spam position, burst kill):
-    ──────────────────────────────────────────────────────────
-    Per cycle:
-      1. Scan all NPCs in aura radius
-      2. Calc centroid of all targets
-      3. Spam SPAM_COUNT packets: FireUnreliableServer("ReplicateMovement", ...)
-         → NO wait — server gets flooded with our spoofed pos immediately
-      4. Fire Slash (animRandom)
-      5. Spam SPAM_COUNT more during Delay window (halfway through)
-      6. task.wait(Delay from Melee.lua config)
-      7. Burst Impact all targets simultaneously
-      8. Wait remaining timer - Delay before next cycle
-
-    Result: ~0.25s cycle time regardless of NPC count. Fast.
---]]
-
--- ════════════════════════════════════════════════════════════
---  CONFIG
--- ════════════════════════════════════════════════════════════
-local CFG = {
-    AuraRadius   = 80,    -- studs
-    SpamCount    = 8,     -- position packets per spam burst
-    SpamCount2   = 5,     -- mid-delay spam burst count
-    BodyPart     = "Head",
-    PartOffset   = Vector3.new(0, 1.5, 0),
-    Debug        = true,
-    -- Overrides (nil = use Melee.lua values auto-detected)
-    DelayOverride = nil,
-    TimerOverride = nil,
+-- ============================================================
+-- CONSOLE BUFFER
+-- ============================================================
+local Console = {
+    Lines    = {},
+    MaxLines = 80,
+    Label    = nil,   -- TextLabel ref, set by UI
+    Enabled  = true,
 }
 
--- Exact values from Melee.lua source
-local MELEE_CFG = {
-    Tomahawk={Delay=0.30,Time=1.00,Reach=7},M9_Bayonet={Delay=0.25,Time=0.50,Reach=5},
-    KitchenCleaver={Delay=0.25,Time=0.50,Reach=5},KitchenKnife={Delay=0.25,Time=0.50,Reach=5},
-    KitchenKnifeLong={Delay=0.25,Time=0.50,Reach=5},KitchenCleaverWood={Delay=0.25,Time=0.50,Reach=5},
-    KitchenKnifeWood={Delay=0.25,Time=0.50,Reach=5},KitchenKnifeLongWood={Delay=0.25,Time=0.50,Reach=5},
-    MI211={Delay=0.25,Time=0.50,Reach=5},SealPup={Delay=0.25,Time=0.50,Reach=5},
-    Machete={Delay=0.35,Time=0.75,Reach=6},Taiga={Delay=0.35,Time=0.75,Reach=6},
-    SOCP={Delay=0.25,Time=0.50,Reach=5},
-    Hooligan={Delay=0.30,Time=1.00,Reach=7},Pipe={Delay=0.30,Time=1.00,Reach=6},
-    PipeWrench={Delay=0.30,Time=1.00,Reach=6},Hatchet={Delay=0.30,Time=1.00,Reach=5},
-    NailBat={Delay=0.30,Time=1.00,Reach=5},MetalBat={Delay=0.30,Time=1.00,Reach=5},
-    Bat={Delay=0.30,Time=1.00,Reach=5},BatGrip={Delay=0.30,Time=1.00,Reach=5},
-    Plank={Delay=0.30,Time=1.00,Reach=5},PlankNailed={Delay=0.30,Time=1.00,Reach=5},
-    Crowbar={Delay=0.30,Time=1.00,Reach=5},CrowbarBlue={Delay=0.30,Time=1.00,Reach=5},
-    CrowbarRed={Delay=0.30,Time=1.00,Reach=5},
-}
-
--- ════════════════════════════════════════════════════════════
---  SERVICES & NETWORK
--- ════════════════════════════════════════════════════════════
-local Players = game:GetService("Players")
-local UIS     = game:GetService("UserInputService")
-local lp      = Players.LocalPlayer
-
--- shared.import may need "require" as first arg (MTC pattern: shared.import("require","network",...))
--- Also: MTC loads async — retry up to 15s so script can run before full load
-local Network
-local function _tryNet()
-    if not shared or not shared.import then return nil end
-    -- try single arg
-    local ok1, n1 = pcall(function() return shared.import("network") end)
-    if ok1 and type(n1)=="table" and type(n1.FireServer)=="function" then return n1 end
-    -- try with "require" as first arg (matches MTC source pattern)
-    local ok2, _, n2 = pcall(function() return shared.import("require","network") end)
-    if ok2 and type(n2)=="table" and type(n2.FireServer)=="function" then return n2 end
-    -- try require() directly
-    local ok3, n3 = pcall(require, "network")
-    if ok3 and type(n3)=="table" and type(n3.FireServer)=="function" then return n3 end
-    return nil
-end
-print("[v11] waiting for network...")
-for _=1,150 do           -- up to 15 seconds
-    Network = _tryNet()
-    if Network then break end
-    task.wait(0.1)
-end
-if not Network then
-    warn("[v11] network not found after 15s — aborted"); return
-end
-print("[v11] network OK")
-
--- ════════════════════════════════════════════════════════════
---  v_u_1 DETECTION (unreliable remote — upvalue of RS.Update)
--- ════════════════════════════════════════════════════════════
-local _v_u_1    = nil
-local _vu1_how  = nil
-
-local function HasFUS(o)
-    if type(o) ~= "table" and type(o) ~= "userdata" then return false end
-    local ok, f = pcall(function() return o.FireUnreliableServer end)
-    return ok and type(f) == "function"
+local function Log(msg)
+    if not Console.Enabled then return end
+    local ts  = string.format("[%05.1f] ", tick() % 1000)
+    local line = ts .. tostring(msg)
+    table.insert(Console.Lines, line)
+    if #Console.Lines > Console.MaxLines then
+        table.remove(Console.Lines, 1)
+    end
+    if Console.Label then
+        -- TextLabel multi-line: join last 10 lines
+        local start = math.max(1, #Console.Lines - 9)
+        local visible = {}
+        for i = start, #Console.Lines do
+            visible[#visible + 1] = Console.Lines[i]
+        end
+        Console.Label.Text = table.concat(visible, "\n")
+    end
+    print(line)
 end
 
-local function FindVU1()
-    if _v_u_1 then return true end
+-- ============================================================
+-- GC SCAN
+-- ============================================================
+local ReplicatorService = nil
+local Network           = nil
 
-    -- L1: Network itself (some builds expose it)
-    if HasFUS(Network) then _v_u_1=Network; _vu1_how="net_meta"; return true end
-
-    -- L2: debug.getupvalues on RS.Update
-    local _g = (debug and type(debug.getupvalues)=="function" and debug.getupvalues)
-    local _req = shared and shared.import and pcall(shared.import,"require") and
-                 select(2, pcall(shared.import, "require"))
-    local RS = _req and pcall(_req,"ReplicatorService") and
-               select(2, pcall(_req,"ReplicatorService"))
-
-    if _g and RS then
-        local upFn = rawget(RS,"Update")
-        if type(upFn)=="function" then
-            local ok,ups = pcall(_g,upFn)
-            if ok and type(ups)=="table" then
-                for _,v in pairs(ups) do
-                    if HasFUS(v) and v~=Network then
-                        _v_u_1=v; _vu1_how="upval_rs"; return true
-                    end
+local function DoScan()
+    local ok, gc = pcall(filtergc, "table")
+    if not ok then ok, gc = pcall(getgc, true) end
+    if not ok or type(gc) ~= "table" then
+        Log("GC scan: pcall failed")
+        return
+    end
+    local i = 0
+    for _, obj in pairs(gc) do
+        i = i + 1
+        if i % 8000 == 0 then task.wait() end
+        if type(obj) ~= "table" then continue end
+        if not ReplicatorService
+            and rawget(obj, "Actors")
+            and rawget(obj, "LocalActor")
+        then
+            ReplicatorService = obj
+            Log("RS found at GC idx ~" .. i)
+        end
+        if not Network then
+            local fs = rawget(obj, "FireServer")
+            local ev = rawget(obj, "_events")
+            local co = rawget(obj, "_code")
+            local ky = rawget(obj, "_key")
+            if fs and ev
+                and type(co) == "string"
+                and co:match("^%x+%-%x+%-%x+%-%x+%-%x+$")
+                and type(ky) == "table" and #ky >= 5
+            then
+                local allNums = true
+                for _, n in ipairs(ky) do
+                    if type(n) ~= "number" then allNums = false; break end
+                end
+                if allNums then
+                    Network = obj
+                    Log("Net found — code: " .. co:sub(1,8) .. "... key[1]=" .. tostring(ky[1]))
                 end
             end
         end
-        -- L3: RS fields scan
-        for _,v in pairs(RS) do
-            if HasFUS(v) and v~=Network then _v_u_1=v; _vu1_how="rs_field"; return true end
+        if ReplicatorService and Network then break end
+    end
+end
+
+-- ============================================================
+-- AK_FindNet
+-- ============================================================
+local function AK_FindNet()
+    if Network and rawget(Network, "_code") then return Network end
+    if shared and type(shared.import) == "function" then
+        local ok, net = pcall(function() return shared.import("network") end)
+        if ok and net
+            and rawget(net, "_key")
+            and rawget(net, "_code")
+        then
+            Network = net
+            Log("Net via shared.import OK")
+            return net
         end
     end
-
-    -- L4: GC / registry scan
-    local ok3,reg = pcall(function() return debug.getregistry() end)
-    if ok3 and type(reg)=="table" then
-        for _,v in pairs(reg) do
-            if HasFUS(v) and v~=Network then _v_u_1=v; _vu1_how="gc"; return true end
+    local ok, gc = pcall(filtergc, "table")
+    if not ok then ok, gc = pcall(getgc, true) end
+    if ok and gc then
+        for _, v in pairs(gc) do
+            if type(v) ~= "table" then continue end
+            local k  = rawget(v, "_key")
+            local co = rawget(v, "_code")
+            local ev = rawget(v, "_events")
+            if type(k) == "table" and #k >= 5
+                and type(co) == "string"
+                and co:match("^%x+%-%x+%-%x+%-%x+%-%x+$")
+                and type(ev) == "table"
+            then
+                local allNums = true
+                for _, n in ipairs(k) do
+                    if type(n) ~= "number" then allNums = false; break end
+                end
+                if allNums then
+                    Network = v
+                    Log("Net via GC fallback — code: " .. co:sub(1,8))
+                    return v
+                end
+            end
         end
     end
+    Log("Net FAIL — rescan needed")
+    return nil
+end
 
+-- ============================================================
+-- AK_GetRemote
+-- ============================================================
+local _remote = nil
+local function AK_GetRemote()
+    if _remote and _remote.Parent then return _remote end
+    local ev = ReplicatedStorage:FindFirstChild("Events")
+    if ev then
+        local re = ev:FindFirstChild("RemoteEvent")
+        if re then
+            _remote = re
+            Log("Remote: Events.RemoteEvent OK")
+            return re
+        end
+    end
+    for _, v in ipairs(ReplicatedStorage:GetDescendants()) do
+        if v:IsA("RemoteEvent") then
+            _remote = v
+            Log("Remote: " .. v:GetFullName())
+            return v
+        end
+    end
+    Log("Remote: FAIL")
+    return nil
+end
+
+-- ============================================================
+-- CIPHER
+-- ============================================================
+local function NetEncode(jsonStr, key)
+    local result = {}
+    for i = 1, #jsonStr do
+        local ki   = i % 4
+        local kval = key[ki + 1]
+        local nb   = (string.byte(jsonStr, i) - 32 + kval) % 95 + 32
+        result[i]  = string.char(nb)
+    end
+    local firstByte = string.byte(jsonStr, 1)
+    local base = #jsonStr
+    for v24 = 1, key[5] do
+        result[base + v24] = string.char(firstByte - string.byte(tostring(v24), 1))
+    end
+    return table.concat(result)
+end
+
+local function Encrypt(data, net)
+    local ok, raw = pcall(function() return HttpService:JSONEncode(data) end)
+    if not ok or not raw then return nil end
+    return NetEncode(raw, net._key)
+end
+
+-- ============================================================
+-- UID CACHE
+-- ============================================================
+local _uidCache = setmetatable({}, {__mode = "k"})
+local function GetUID(actor)
+    if _uidCache[actor] then return _uidCache[actor] end
+    for _, f in ipairs({"UID","_uid","UUID","_id","Id"}) do
+        local v = rawget(actor, f)
+        if type(v) == "string" and v:match("^%x+%-%x+%-%x+%-%x+%-%x+$") then
+            _uidCache[actor] = v; return v
+        end
+    end
+    for _, v in pairs(actor) do
+        if type(v) == "string" and v:match("^%x+%-%x+%-%x+%-%x+%-%x+$") then
+            _uidCache[actor] = v; return v
+        end
+    end
+    local ok2, v2 = pcall(function() return actor.UID end)
+    if ok2 and type(v2) == "string" and v2:match("^%x+%-%x+%-%x+%-%x+%-%x+$") then
+        _uidCache[actor] = v2; return v2
+    end
+    return nil
+end
+
+-- ============================================================
+-- IsActorDead — NPC dead check, 4 layers
+-- ============================================================
+local function IsActorDead(actor)
+    if rawget(actor, "Alive") == false then return true end
+    local health = rawget(actor, "Health")
+    if health ~= nil and health <= 0 then return true end
+    local char = rawget(actor, "Character")
+    if not char then return true end
+    local ok, parent = pcall(function() return char.Parent end)
+    if not ok or not parent then return true end
+    local ok2, hum = pcall(function()
+        return char:FindFirstChildOfClass("Humanoid")
+    end)
+    if ok2 and hum then
+        local ok3, hp = pcall(function() return hum.Health end)
+        if ok3 and hp ~= nil and hp <= 0 then return true end
+    end
     return false
 end
 
--- ════════════════════════════════════════════════════════════
---  LOCAL ACTOR HELPERS
--- ════════════════════════════════════════════════════════════
-local _localUID   = nil
-local _localActor = nil
+-- ============================================================
+-- CONFIG
+-- ============================================================
+local AK = {
+    Enabled     = false,
+    Range       = 1000,
+    Interval    = 0.02,   -- 50Hz (tăng từ 20Hz)
+    BatchSize   = 20,     -- tăng từ 15
 
-local function RefreshLocalActor()
-    local ok,cs = pcall(function()
-        return shared.import("require")("ClientService")
+    SpoofOffset  = 1.5,
+    MeleeDelay   = 0.25,
+    FNPLead      = 0.13,
+
+    -- v6: số lần fire Impact mỗi hit
+    ImpactRepeat = 3,
+    ImpactSpacing = 0.015,  -- 15ms giữa mỗi Impact repeat
+
+    TargetPart   = "Head",
+    _lastFire    = 0,
+    _conn        = nil,
+    _running     = false,
+    _lock        = false,
+
+    -- Stats
+    _hitCount    = 0,
+    _missCount   = 0,
+    _fireCount   = 0,
+}
+
+-- ============================================================
+-- AK_FindPart
+-- ============================================================
+local function AK_FindPart(char, partName)
+    return char:FindFirstChild(partName)
+        or char:FindFirstChild("Head")
+        or char:FindFirstChild("UpperTorso")
+        or char:FindFirstChild("HumanoidRootPart")
+        or char.PrimaryPart
+end
+
+-- ============================================================
+-- AK_SpoofChain — v6 SimPos → FNP → FNP → ServerPos
+--
+-- Write order đảm bảo cả 2 path RS đọc đều = spoofPos:
+--   Path A (primary): FNP [2][3] → RS đọc → gửi spoofPos → clear FNP
+--   Path B (fallback): SimPos [1] → RS fallback nếu FNP đã clear
+--   Path C (direct):   ServerPosition [4] → write trực tiếp nếu writable
+--
+-- Coverage: ~0.2s (2 RS ticks) thay vì ~0.1s (1 RS tick) của v5
+-- ============================================================
+local function AK_SpoofChain(myActor, spoofPos)
+    -- [1] SimulatedPosition — ghi đè CharacterController.Update() line 1549
+    --     CC set SimPos = real_pos mỗi frame, ta ghi đè ngay trước RS tick
+    pcall(function() myActor.SimulatedPosition = spoofPos end)
+
+    -- [2] ForceNextPosition — RS ưu tiên đọc FNP trước SimPos
+    pcall(function() myActor.ForceNextPosition = spoofPos end)
+
+    -- [3] ForceNextPosition second write — belt+suspenders
+    --     Nếu RS tick xảy ra giữa [2] và [3], write [3] cover tick tiếp
+    pcall(function() myActor.ForceNextPosition = spoofPos end)
+
+    -- [4] ServerPosition direct write — nếu field này writable từ client
+    --     (một số MTC builds expose nó), cover path RS không đọc FNP/SimPos
+    pcall(function() myActor.ServerPosition = spoofPos end)
+end
+
+-- ============================================================
+-- AK_Fire — SimPos chain + Impact repeat
+-- ============================================================
+local function AK_Fire(actor)
+    local net = AK_FindNet()
+    if not net then
+        Log("Fire SKIP — no network")
+        return false
+    end
+    local remote = AK_GetRemote()
+    if not remote then
+        Log("Fire SKIP — no remote")
+        return false
+    end
+    local myActor = ReplicatorService and ReplicatorService.LocalActor
+    if not myActor then
+        Log("Fire SKIP — no LocalActor")
+        return false
+    end
+    if IsActorDead(actor) then return false end
+
+    local char = rawget(actor, "Character")
+    if not char then return false end
+    local part = AK_FindPart(char, AK.TargetPart)
+    if not part then return false end
+    local uid = GetUID(actor)
+    if not uid then
+        Log("Fire SKIP — no UID")
+        return false
+    end
+
+    AK._fireCount = AK._fireCount + 1
+
+    -- ── Slash at t=0 ─────────────────────────────────────────
+    local n = math.random(1, 3)
+    local encSlash = Encrypt({net._code, "InventoryAction", "Slash", n}, net)
+    if encSlash then
+        pcall(function() remote:FireServer(encSlash) end)
+        Log("Slash → uid:" .. uid:sub(1,8) .. " n=" .. n)
+    end
+
+    -- ── Spoof chain at t = (MeleeDelay - FNPLead) ────────────
+    -- v6: SimPos + FNP×2 + ServerPos chain
+    local fnpDelay = math.max(0.01, AK.MeleeDelay - AK.FNPLead)
+    task.delay(fnpDelay, function()
+        if IsActorDead(actor) then return end
+        local p2 = AK_FindPart(char, AK.TargetPart)
+        if not p2 then return end
+        local h2    = p2.Position
+        local spoof = h2 + Vector3.new(0, AK.SpoofOffset, 0)
+        AK_SpoofChain(myActor, spoof)
+        Log("SpoofChain SET → " .. string.format("(%.1f,%.1f,%.1f)", spoof.X, spoof.Y, spoof.Z))
     end)
-    if ok and cs and cs.LocalClient then
-        _localActor = cs.LocalClient.LocalActor or cs.LocalClient._localActor
-        _localUID   = cs.LocalClient.UID or cs.LocalClient._uid
-            or (_localActor and (rawget(_localActor,"UID") or rawget(_localActor,"_uid")))
-    end
-    if not _localUID then
-        -- fallback: character attribute
-        local char = lp.Character
-        if char then
-            _localUID = char:GetAttribute("UID") or char:GetAttribute("ActorUID")
+
+    -- ── Impact × ImpactRepeat at t = MeleeDelay ──────────────
+    -- Fire Impact beberapa kali dengan spacing 15ms
+    -- Server dedup pada tick yang sama, tapi pada server laggy
+    -- salah satu packet masuk di timing yang tepat
+    task.delay(AK.MeleeDelay, function()
+        if IsActorDead(actor) then return end
+
+        -- Clear SimPos sau khi Impact fired — trả CharacterController về normal
+        task.delay(AK.ImpactRepeat * AK.ImpactSpacing + 0.05, function()
+            pcall(function()
+                myActor.SimulatedPosition = nil
+            end)
+        end)
+
+        for repeat_i = 1, AK.ImpactRepeat do
+            task.delay((repeat_i - 1) * AK.ImpactSpacing, function()
+                if IsActorDead(actor) then return end
+                local p3 = AK_FindPart(char, AK.TargetPart)
+                if not p3 then return end
+                local h3 = p3.Position
+
+                local encImpact = Encrypt(
+                    {net._code, "InventoryAction", "Impact",
+                     {h3.X, h3.Y, h3.Z}, uid, p3.Name},
+                    net
+                )
+                if encImpact then
+                    local ok = pcall(function() remote:FireServer(encImpact) end)
+                    if ok then
+                        AK._hitCount = AK._hitCount + 1
+                        if repeat_i == 1 then
+                            Log("Impact[" .. repeat_i .. "] → uid:" .. uid:sub(1,8)
+                                .. string.format(" pos=(%.1f,%.1f,%.1f)", h3.X, h3.Y, h3.Z))
+                        end
+                    else
+                        AK._missCount = AK._missCount + 1
+                        Log("Impact[" .. repeat_i .. "] FAIL")
+                    end
+                end
+            end)
         end
+    end)
+
+    return true
+end
+
+-- ============================================================
+-- AK_Tick
+-- ============================================================
+local function AK_Tick()
+    if not AK.Enabled then return end
+    if AK._lock then return end
+    local now = tick()
+    if now - AK._lastFire < AK.Interval then return end
+
+    local myActor = ReplicatorService and ReplicatorService.LocalActor
+    if not myActor then return end
+
+    local myPos
+    pcall(function() myPos = myActor.Position end)
+    if not myPos then
+        local cam = workspace.CurrentCamera
+        myPos = cam and cam.CFrame.Position or Vector3.new(0, 0, 0)
     end
-end
 
-local function ActorField(k, default)
-    if not _localActor then return default end
-    local ok,v = pcall(function() return _localActor[k] end)
-    return (ok and v) or default
-end
+    local candidates = {}
+    if rawget(ReplicatorService, "Actors") then
+        for _, actor in pairs(ReplicatorService.Actors) do
+            if type(actor) ~= "table" then continue end
+            if actor == myActor then continue end
+            if IsActorDead(actor) then continue end
 
--- ════════════════════════════════════════════════════════════
---  POSITION SPAM  (bypass RS 100ms throttle)
--- ════════════════════════════════════════════════════════════
-local function SpoofSpam(pos, count)
-    if not _v_u_1 or not _localUID then return 0 end
-    count = count or CFG.SpamCount
-
-    -- Also set ForceNextPosition so RS.Update() sends it on its own next tick (backup)
-    if _localActor then
-        pcall(function()
-            _localActor.ForceNextPosition = pos
-            _localActor.SimulatedPosition  = pos
-        end)
-    end
-
-    -- Direct spam — no throttle since we're calling v_u_1 directly, not via RS.Update
-    local ori  = ActorField("Orientation", 0)
-    local spr  = ActorField("Sprinting",   false)
-    local hs   = ActorField("HeightState", 0)
-    local cx   = ActorField("CameraX",     0)
-    local cy   = ActorField("CameraY",     0)
-    local lg   = ActorField("LeanGoal",    0)
-    local pl   = ActorField("Platform",    false)
-    local tr   = ActorField("TeleportRevision", 0)
-
-    local sent = 0
-    for _ = 1, count do
-        local ok = pcall(function()
-            _v_u_1:FireUnreliableServer(
-                "ReplicateMovement", _localUID,
-                pos.X, pos.Y, pos.Z,
-                ori, spr, hs, cx, cy, lg, pl, tr
-            )
-        end)
-        if ok then sent = sent + 1 end
-    end
-    return sent
-end
-
--- ════════════════════════════════════════════════════════════
---  FIRE HELPERS  (exact MeleeInventory.lua format)
--- ════════════════════════════════════════════════════════════
-local function FireSlash(animNum)
-    -- matches: v_u_2:FireServer("InventoryAction","Slash",animNum)
-    pcall(function() Network:FireServer("InventoryAction","Slash",animNum) end)
-end
-
-local function FireImpact(hitPos, uid, part)
-    -- matches: v_u_2:FireServer("InventoryAction","Impact",v_u_7(hitPos),uid,part)
-    -- v_u_7 = vector3toTable = {x,y,z}
-    local tbl = {x=hitPos.X, y=hitPos.Y, z=hitPos.Z}
-    pcall(function() Network:FireServer("InventoryAction","Impact",tbl,uid,part) end)
-end
-
--- ════════════════════════════════════════════════════════════
---  NPC SCANNER
--- ════════════════════════════════════════════════════════════
-local function ScanTargets(maxRange)
-    local out = {}
-    local myPos = Vector3.new(0,0,0)
-    local char = lp.Character
-    local hrp0 = char and char:FindFirstChild("HumanoidRootPart")
-    if hrp0 then myPos = hrp0.Position end
-
-    -- helper: add a character model if it qualifies
-    local function tryAdd(model)
-        if model == char then return end
-        local hum = model:FindFirstChildOfClass("Humanoid")
-        local hrp = model:FindFirstChild("HumanoidRootPart")
-        if not hum or not hrp or hum.Health <= 0 then return end
-        if (hrp.Position - myPos).Magnitude > maxRange then return end
-
-        -- UID resolution — try every known location
-        local uid = model:GetAttribute("UID")
-               or model:GetAttribute("ActorUID")
-               or model:GetAttribute("_uid")
-        if not uid then
-            -- scan model children for UID property
-            for _, child in ipairs(model:GetChildren()) do
-                local ok2,v2 = pcall(function() return child.UID end)
-                if ok2 and v2 and type(v2)=="string" then uid=v2; break end
-                local ok3,v3 = pcall(function() return rawget(child,"UID") end)
-                if ok3 and v3 then uid=v3; break end
+            local aPos
+            pcall(function() aPos = actor.Position end)
+            if not aPos then
+                pcall(function() aPos = actor.ServerPosition end)
             end
-        end
-        if not uid then uid = model.Name .. tostring(math.floor(hrp.Position.X)) end
-
-        out[#out+1] = {uid=uid, pos=hrp.Position, model=model}
-    end
-
-    -- player characters
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= lp and p.Character then
-            pcall(tryAdd, p.Character)
-        end
-    end
-    -- workspace NPCs (zombies, bots)
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("Model") then
-            pcall(tryAdd, obj)
-        end
-    end
-    return out
-end
-
--- ════════════════════════════════════════════════════════════
---  WEAPON CONFIG
--- ════════════════════════════════════════════════════════════
-local function GetWepCfg()
-    local build = nil
-    -- try InventoryService.Equipped
-    local ok,inv = pcall(function() return shared.import("require")("InventoryService") end)
-    if ok and inv then
-        local eq = rawget(inv,"Equipped") or inv.Equipped
-        if eq and eq.Handler then
-            build = rawget(eq.Handler,"_build") or eq.Handler._build
-        end
-    end
-    -- fallback: equipped tool
-    if not build then
-        local c = lp.Character
-        if c then
-            for _,t in ipairs(c:GetChildren()) do
-                if t:IsA("Tool") then
-                    build = t:GetAttribute("Build") or t:GetAttribute("Variant") or t.Name
-                    break
+            if not aPos then
+                local char = rawget(actor, "Character")
+                if char then
+                    local pp = char.PrimaryPart
+                    if pp then pcall(function() aPos = pp.Position end) end
                 end
             end
-        end
-    end
-    local cfg = (build and MELEE_CFG[build]) or {Delay=0.25,Time=0.50,Reach=5}
-    return cfg, build or "?"
-end
+            if not aPos then continue end
 
--- ════════════════════════════════════════════════════════════
---  MAIN CYCLE
--- ════════════════════════════════════════════════════════════
-local function RunCycle()
-    local wCfg, wName = GetWepCfg()
-    local delay = CFG.DelayOverride or wCfg.Delay
-    local timer = CFG.TimerOverride or wCfg.Time
-
-    local targets = ScanTargets(CFG.AuraRadius)
-    if #targets == 0 then
-        if CFG.Debug then print("[v11] no targets") end
-        return timer
-    end
-
-    -- Centroid of all targets
-    local cx2,cy2,cz2 = 0,0,0
-    for _,t in ipairs(targets) do
-        cx2=cx2+t.pos.X; cy2=cy2+t.pos.Y; cz2=cz2+t.pos.Z
-    end
-    local n = #targets
-    local centroid = Vector3.new(cx2/n, cy2/n, cz2/n)
-
-    if CFG.Debug then
-        print(string.format("[v11] wep=%s | targets=%d | delay=%.2f timer=%.2f",
-            wName, n, delay, timer))
-    end
-
-    -- 1) Pre-Slash spam: flood server with centroid position
-    local s1 = SpoofSpam(centroid, CFG.SpamCount)
-    if CFG.Debug then print("[v11] pre-spam sent="..s1) end
-
-    -- 2) Slash immediately (no wait — spam already in flight)
-    local anim = math.random(1,3)
-    FireSlash(anim)
-    if CFG.Debug then print("[v11] Slash(anim="..anim..")") end
-
-    -- 3) Mid-delay spam (halfway through delay window)
-    --    Spawned so Slash fires without waiting
-    local halfDelay = delay * 0.5
-    task.spawn(function()
-        task.wait(halfDelay)
-        SpoofSpam(centroid, CFG.SpamCount2)
-    end)
-
-    -- 4) Wait exact Delay from Melee.lua
-    task.wait(delay)
-
-    -- 5) Burst Impact all targets
-    local hits = 0
-    for _, tgt in ipairs(targets) do
-        local hitPos = tgt.pos + CFG.PartOffset
-        FireImpact(hitPos, tgt.uid, CFG.BodyPart)
-        hits = hits + 1
-    end
-    if CFG.Debug then print("[v11] Impact burst x"..hits) end
-
-    -- 6) Remaining wait before next cycle
-    local remaining = math.max(0.05, timer - delay)
-    return remaining
-end
-
--- ════════════════════════════════════════════════════════════
---  LOOP CONTROL
--- ════════════════════════════════════════════════════════════
-local _running = false
-local _enabled = false
-
-local function Start()
-    if _running then print("[v11] already running"); return end
-    _running = true
-    _enabled = true
-
-    RefreshLocalActor()
-
-    print("[v11] detecting v_u_1...")
-    if FindVU1() then
-        print("[v11] v_u_1 OK via "..(_vu1_how or "?"))
-    else
-        print("[v11] WARN: v_u_1 not found — position spam disabled")
-    end
-    if not _localUID then
-        print("[v11] WARN: localUID not found — spoof will skip")
-    end
-
-    print("[v11] AuraKill ON | radius="..CFG.AuraRadius)
-    task.spawn(function()
-        while _enabled do
-            local ok, wait_t = pcall(RunCycle)
-            if not ok then
-                print("[v11] cycle err: "..tostring(wait_t))
-                wait_t = 0.5
+            local d = (aPos - myPos).Magnitude
+            if d <= AK.Range then
+                candidates[#candidates + 1] = {Actor = actor, Dist = d}
             end
-            task.wait(wait_t or 0.5)
         end
-        _running = false
-        print("[v11] AuraKill OFF")
+    end
+
+    if #candidates == 0 then return end
+    table.sort(candidates, function(a, b) return a.Dist < b.Dist end)
+
+    AK._lastFire = now
+    AK._lock     = true
+
+    local count = math.min(AK.BatchSize, #candidates)
+    task.spawn(function()
+        for i = 1, count do
+            if not AK.Enabled then break end
+            AK_Fire(candidates[i].Actor)
+            task.wait(0.10)
+        end
+        AK._lock = false
     end)
 end
 
-local function Stop()
-    _enabled = false
+-- ============================================================
+-- Start / Stop
+-- ============================================================
+function AK.Start()
+    if AK._running then return end
+    AK._running = true
+    AK._hitCount = 0; AK._missCount = 0; AK._fireCount = 0
+    AK._conn = Track(RunService.Heartbeat:Connect(AK_Tick))
+    Log("AK Started — Delay:" .. AK.MeleeDelay
+        .. " Lead:" .. AK.FNPLead
+        .. " Range:" .. AK.Range
+        .. " Repeat×" .. AK.ImpactRepeat)
 end
 
--- ════════════════════════════════════════════════════════════
---  KEYBINDS  F=toggle | G=single test | H=status
--- ════════════════════════════════════════════════════════════
-UIS.InputBegan:Connect(function(inp, gpe)
-    if gpe then return end
-    if inp.KeyCode == Enum.KeyCode.F then
-        if _enabled then Stop() else Start() end
+function AK.Stop()
+    AK._running = false
+    AK._lock    = false
+    if AK._conn then
+        pcall(function() AK._conn:Disconnect() end)
+        AK._conn = nil
+    end
+    local myActor = ReplicatorService and ReplicatorService.LocalActor
+    if myActor then
+        pcall(function() myActor.ForceNextPosition = nil end)
+        pcall(function() myActor.SimulatedPosition = nil end)
+        pcall(function() myActor.ServerPosition = nil end)
+    end
+    Log("AK Stopped — fires:" .. AK._fireCount
+        .. " hits:" .. AK._hitCount
+        .. " miss:" .. AK._missCount)
+end
 
-    elseif inp.KeyCode == Enum.KeyCode.G then
-        -- single cycle test
-        RefreshLocalActor()
-        FindVU1()
-        print("[v11] TEST CYCLE")
-        local ok, w = pcall(RunCycle)
-        if not ok then print("[v11] err: "..tostring(w)) end
+-- ============================================================
+-- UI
+-- ============================================================
+pcall(function()
+    local target = gethui and gethui() or game:GetService("CoreGui")
+    local old = target:FindFirstChild("LRM6_GUI")
+    if old then old:Destroy() end
+end)
 
-    elseif inp.KeyCode == Enum.KeyCode.H then
-        -- status dump
-        print(string.format("[v11] status: running=%s | v_u_1=%s(%s) | uid=%s",
-            tostring(_enabled),
-            tostring(_v_u_1 ~= nil),
-            _vu1_how or "none",
-            tostring(_localUID)
-        ))
+local gui = Instance.new("ScreenGui")
+gui.Name          = "LRM6_GUI"
+gui.ResetOnSpawn  = false
+pcall(function()
+    gui.Parent = gethui and gethui() or game:GetService("CoreGui")
+end)
+
+-- ── Main frame (controls) ────────────────────────────────────
+local frame = Instance.new("Frame", gui)
+frame.Size               = UDim2.new(0, 290, 0, 310)
+frame.Position           = UDim2.new(0, 16, 0.5, -155)
+frame.BackgroundColor3   = Color3.fromRGB(10, 10, 13)
+frame.BorderSizePixel    = 0
+frame.Active             = true
+frame.Draggable          = true
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+
+-- Header
+local hdr = Instance.new("Frame", frame)
+hdr.Size               = UDim2.new(1, 0, 0, 30)
+hdr.BackgroundColor3   = Color3.fromRGB(20, 20, 28)
+hdr.BorderSizePixel    = 0
+Instance.new("UICorner", hdr).CornerRadius = UDim.new(0, 8)
+
+local ttl = Instance.new("TextLabel", hdr)
+ttl.Size                   = UDim2.new(1, 0, 1, 0)
+ttl.BackgroundTransparency = 1
+ttl.Font                   = Enum.Font.GothamBold
+ttl.TextSize               = 12
+ttl.TextColor3             = Color3.fromRGB(200, 200, 220)
+ttl.Text                   = "  MTC  ·  LONG RANGE MELEE  ·  v6.0  [SimChain]"
+ttl.TextXAlignment         = Enum.TextXAlignment.Left
+
+local function Lbl(y, txt, col)
+    local l = Instance.new("TextLabel", frame)
+    l.Size                   = UDim2.new(1, -16, 0, 16)
+    l.Position               = UDim2.new(0, 8, 0, y)
+    l.BackgroundTransparency = 1
+    l.Font                   = Enum.Font.Gotham
+    l.TextSize               = 11
+    l.TextColor3             = col or Color3.fromRGB(160, 160, 170)
+    l.TextXAlignment         = Enum.TextXAlignment.Left
+    l.Text                   = txt
+    return l
+end
+
+local function Btn(y, h, txt, cb)
+    local b = Instance.new("TextButton", frame)
+    b.Size               = UDim2.new(1, -16, 0, h)
+    b.Position           = UDim2.new(0, 8, 0, y)
+    b.BackgroundColor3   = Color3.fromRGB(28, 28, 38)
+    b.BorderSizePixel    = 0
+    b.Font               = Enum.Font.GothamBold
+    b.TextSize           = 11
+    b.TextColor3         = Color3.fromRGB(200, 200, 220)
+    b.Text               = txt
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
+    b.MouseButton1Click:Connect(cb)
+    return b
+end
+
+local lblStatus  = Lbl(38,  "Status  : OFF",               Color3.fromRGB(210, 65, 65))
+local lblNet     = Lbl(55,  "Network : --")
+local lblActors  = Lbl(71,  "Actors  : --")
+local lblDelay   = Lbl(87,  string.format("Delay : %.3fs  Lead: %.2fs  Offset: %.1fst",
+                             AK.MeleeDelay, AK.FNPLead, AK.SpoofOffset))
+local lblRange   = Lbl(103, string.format("Range : %.0fst  Batch: %d  Interval: %.2fs",
+                             AK.Range, AK.BatchSize, AK.Interval))
+local lblRepeat  = Lbl(119, string.format("Impact×%d  Spacing: %.0fms  50Hz tick",
+                             AK.ImpactRepeat, AK.ImpactSpacing * 1000))
+local lblStats   = Lbl(135, "Fires: 0  Hits: 0  Miss: 0")
+
+local toggleBtn = Btn(155, 26, "[ OFF ]  Toggle Aura Kill", function()
+    AK.Enabled = not AK.Enabled
+    if AK.Enabled then
+        AK.Start()
+        toggleBtn.Text       = "[ ON ]  Toggle Aura Kill"
+        toggleBtn.TextColor3 = Color3.fromRGB(65, 210, 100)
+        lblStatus.Text       = "Status  : ON"
+        lblStatus.TextColor3 = Color3.fromRGB(65, 210, 100)
+    else
+        AK.Stop()
+        toggleBtn.Text       = "[ OFF ]  Toggle Aura Kill"
+        toggleBtn.TextColor3 = Color3.fromRGB(200, 200, 220)
+        lblStatus.Text       = "Status  : OFF"
+        lblStatus.TextColor3 = Color3.fromRGB(210, 65, 65)
     end
 end)
 
--- ════════════════════════════════════════════════════════════
---  RETURN API
--- ════════════════════════════════════════════════════════════
-return {
-    Start=Start, Stop=Stop, Config=CFG,
-    _v_u_1=function() return _v_u_1 end,
-    _uid=function() return _localUID end,
-    _spam=SpoofSpam,
-    _scan=ScanTargets,
-    _slash=FireSlash,
-    _impact=FireImpact,
-}
+Btn(187, 22, "Rescan Network + Remote", function()
+    Network = nil; _remote = nil; ReplicatorService = nil
+    task.spawn(function()
+        DoScan(); AK_FindNet(); AK_GetRemote()
+        local net = Network
+        lblNet.Text = net
+            and ("Network : OK  key[1]=" .. tostring(net._key[1]))
+            or   "Network : FAIL"
+    end)
+end)
+
+Btn(215, 22, "Rescan Actors (RS)", function()
+    ReplicatorService = nil
+    task.spawn(function()
+        DoScan()
+        local n = 0
+        if ReplicatorService and rawget(ReplicatorService, "Actors") then
+            for _ in pairs(ReplicatorService.Actors) do n = n + 1 end
+        end
+        lblActors.Text = "Actors  : " .. n
+            .. (ReplicatorService and "" or " [RS missing]")
+    end)
+end)
+
+Btn(243, 22, "Clear Console", function()
+    Console.Lines = {}
+    if Console.Label then Console.Label.Text = "" end
+end)
+
+Btn(271, 22, "Toggle Console", function()
+    Console.Enabled = not Console.Enabled
+    if consoleFrame then
+        consoleFrame.Visible = Console.Enabled
+    end
+end)
+
+-- ── Console frame ────────────────────────────────────────────
+-- Posisi di bawah main frame, draggable tersendiri
+consoleFrame = Instance.new("Frame", gui)
+consoleFrame.Name              = "ConsoleFrame"
+consoleFrame.Size              = UDim2.new(0, 480, 0, 220)
+consoleFrame.Position          = UDim2.new(0, 16, 0.5, 165)
+consoleFrame.BackgroundColor3  = Color3.fromRGB(6, 6, 8)
+consoleFrame.BorderSizePixel   = 0
+consoleFrame.Active            = true
+consoleFrame.Draggable         = true
+Instance.new("UICorner", consoleFrame).CornerRadius = UDim.new(0, 6)
+
+-- Console header
+local cHdr = Instance.new("Frame", consoleFrame)
+cHdr.Size               = UDim2.new(1, 0, 0, 22)
+cHdr.BackgroundColor3   = Color3.fromRGB(16, 16, 24)
+cHdr.BorderSizePixel    = 0
+Instance.new("UICorner", cHdr).CornerRadius = UDim.new(0, 6)
+
+local cHdrTtl = Instance.new("TextLabel", cHdr)
+cHdrTtl.Size                   = UDim2.new(1, -8, 1, 0)
+cHdrTtl.Position               = UDim2.new(0, 8, 0, 0)
+cHdrTtl.BackgroundTransparency = 1
+cHdrTtl.Font                   = Enum.Font.Code
+cHdrTtl.TextSize               = 10
+cHdrTtl.TextColor3             = Color3.fromRGB(100, 180, 255)
+cHdrTtl.Text                   = "CONSOLE  ·  LRM v6.0  ·  SimChain+PacketBoost"
+cHdrTtl.TextXAlignment         = Enum.TextXAlignment.Left
+
+-- ScrollingFrame cho log lines
+local scrollFrame = Instance.new("ScrollingFrame", consoleFrame)
+scrollFrame.Size                  = UDim2.new(1, -4, 1, -26)
+scrollFrame.Position              = UDim2.new(0, 2, 0, 24)
+scrollFrame.BackgroundTransparency = 1
+scrollFrame.BorderSizePixel       = 0
+scrollFrame.ScrollBarThickness    = 4
+scrollFrame.ScrollBarImageColor3  = Color3.fromRGB(60, 60, 80)
+scrollFrame.CanvasSize            = UDim2.new(0, 0, 0, 0)
+scrollFrame.AutomaticCanvasSize   = Enum.AutomaticSize.Y
+
+local logLabel = Instance.new("TextLabel", scrollFrame)
+logLabel.Size                   = UDim2.new(1, -8, 0, 0)
+logLabel.Position               = UDim2.new(0, 4, 0, 2)
+logLabel.BackgroundTransparency = 1
+logLabel.Font                   = Enum.Font.Code
+logLabel.TextSize               = 10
+logLabel.TextColor3             = Color3.fromRGB(140, 220, 140)
+logLabel.TextXAlignment         = Enum.TextXAlignment.Left
+logLabel.TextYAlignment         = Enum.TextYAlignment.Top
+logLabel.TextWrapped            = true
+logLabel.AutomaticSize          = Enum.AutomaticSize.Y
+logLabel.Text                   = ""
+
+Console.Label = logLabel
+
+-- Auto-scroll xuống khi có log mới
+local function AutoScroll()
+    task.wait()
+    local canvas = scrollFrame.AbsoluteCanvasSize.Y
+    local frame_h = scrollFrame.AbsoluteSize.Y
+    if canvas > frame_h then
+        scrollFrame.CanvasPosition = Vector2.new(0, canvas - frame_h)
+    end
+end
+
+-- Patch Console label setter để auto-scroll
+local _origLblSet = Console
+local _realLog = Log
+Log = function(msg)
+    if not Console.Enabled then return end
+    local ts   = string.format("[%05.1f] ", tick() % 1000)
+    local line = ts .. tostring(msg)
+    table.insert(Console.Lines, line)
+    if #Console.Lines > Console.MaxLines then
+        table.remove(Console.Lines, 1)
+    end
+    if Console.Label then
+        local start   = math.max(1, #Console.Lines - 18)
+        local visible = {}
+        for i = start, #Console.Lines do
+            visible[#visible + 1] = Console.Lines[i]
+        end
+        Console.Label.Text = table.concat(visible, "\n")
+        task.spawn(AutoScroll)
+    end
+    print(line)
+end
+
+-- ============================================================
+-- Hotkeys
+-- ============================================================
+Track(UserInputService.InputBegan:Connect(function(inp, gpe)
+    if gpe then return end
+    local kc = inp.KeyCode
+    if kc == Enum.KeyCode.F3 then
+        AK.Enabled = not AK.Enabled
+        if AK.Enabled then
+            AK.Start()
+            toggleBtn.Text       = "[ ON ]  Toggle Aura Kill"
+            toggleBtn.TextColor3 = Color3.fromRGB(65, 210, 100)
+            lblStatus.Text       = "Status  : ON"
+            lblStatus.TextColor3 = Color3.fromRGB(65, 210, 100)
+        else
+            AK.Stop()
+            toggleBtn.Text       = "[ OFF ]  Toggle Aura Kill"
+            toggleBtn.TextColor3 = Color3.fromRGB(200, 200, 220)
+            lblStatus.Text       = "Status  : OFF"
+            lblStatus.TextColor3 = Color3.fromRGB(210, 65, 65)
+        end
+    elseif kc == Enum.KeyCode.F1 then
+        AK.MeleeDelay = math.max(0.10, AK.MeleeDelay - 0.05)
+        lblDelay.Text = string.format("Delay : %.3fs  Lead: %.2fs  Offset: %.1fst",
+            AK.MeleeDelay, AK.FNPLead, AK.SpoofOffset)
+        Log("Delay → " .. AK.MeleeDelay)
+    elseif kc == Enum.KeyCode.F2 then
+        AK.MeleeDelay = math.min(1.0, AK.MeleeDelay + 0.05)
+        lblDelay.Text = string.format("Delay : %.3fs  Lead: %.2fs  Offset: %.1fst",
+            AK.MeleeDelay, AK.FNPLead, AK.SpoofOffset)
+        Log("Delay → " .. AK.MeleeDelay)
+    elseif kc == Enum.KeyCode.F4 then
+        AK.Range = math.max(5, AK.Range - 50)
+        lblRange.Text = string.format("Range : %.0fst  Batch: %d  Interval: %.2fs",
+            AK.Range, AK.BatchSize, AK.Interval)
+        Log("Range → " .. AK.Range)
+    elseif kc == Enum.KeyCode.F5 then
+        AK.Range = math.min(9999, AK.Range + 50)
+        lblRange.Text = string.format("Range : %.0fst  Batch: %d  Interval: %.2fs",
+            AK.Range, AK.BatchSize, AK.Interval)
+        Log("Range → " .. AK.Range)
+    elseif kc == Enum.KeyCode.F6 then
+        AK.FNPLead = math.min(AK.MeleeDelay - 0.02, AK.FNPLead + 0.02)
+        lblDelay.Text = string.format("Delay : %.3fs  Lead: %.2fs  Offset: %.1fst",
+            AK.MeleeDelay, AK.FNPLead, AK.SpoofOffset)
+        Log("FNPLead → " .. AK.FNPLead)
+    elseif kc == Enum.KeyCode.F7 then
+        AK.FNPLead = math.max(0.02, AK.FNPLead - 0.02)
+        lblDelay.Text = string.format("Delay : %.3fs  Lead: %.2fs  Offset: %.1fst",
+            AK.MeleeDelay, AK.FNPLead, AK.SpoofOffset)
+        Log("FNPLead → " .. AK.FNPLead)
+    elseif kc == Enum.KeyCode.F8 then
+        -- F8: tăng ImpactRepeat
+        AK.ImpactRepeat = math.min(6, AK.ImpactRepeat + 1)
+        lblRepeat.Text = string.format("Impact×%d  Spacing: %.0fms  50Hz tick",
+            AK.ImpactRepeat, AK.ImpactSpacing * 1000)
+        Log("ImpactRepeat → " .. AK.ImpactRepeat)
+    elseif kc == Enum.KeyCode.F9 then
+        -- F9: giảm ImpactRepeat
+        AK.ImpactRepeat = math.max(1, AK.ImpactRepeat - 1)
+        lblRepeat.Text = string.format("Impact×%d  Spacing: %.0fms  50Hz tick",
+            AK.ImpactRepeat, AK.ImpactSpacing * 1000)
+        Log("ImpactRepeat → " .. AK.ImpactRepeat)
+    elseif kc == Enum.KeyCode.F10 then
+        -- F10: toggle console visible
+        consoleFrame.Visible = not consoleFrame.Visible
+        Console.Enabled = consoleFrame.Visible
+    end
+end))
+
+-- Stats + UI refresh ticker
+local _lastTick2 = 0
+Track(RunService.Heartbeat:Connect(function()
+    local now = tick()
+    if now - _lastTick2 < 1 then return end
+    _lastTick2 = now
+
+    local net = Network
+    lblNet.Text = net
+        and ("Network : OK  key[1]=" .. tostring(net._key[1]))
+        or   "Network : --"
+
+    local n = 0
+    if ReplicatorService and rawget(ReplicatorService, "Actors") then
+        for _ in pairs(ReplicatorService.Actors) do n = n + 1 end
+    end
+    lblActors.Text = "Actors  : " .. n
+
+    lblStats.Text = string.format("Fires: %d  Hits: %d  Miss: %d",
+        AK._fireCount, AK._hitCount, AK._missCount)
+end))
+
+-- ============================================================
+-- INIT
+-- ============================================================
+Log("LRM v6.0 init — SimulatedPosition chain + PacketBoost")
+Log("F3=Toggle  F1/F2=Delay±0.05  F4/F5=Range±50")
+Log("F6/F7=Lead±0.02  F8/F9=Impact repeat±1  F10=Console")
+
+task.spawn(function()
+    Log("GC scan start...")
+    for attempt = 1, 30 do
+        DoScan()
+        if not Network then AK_FindNet() end
+        if ReplicatorService and Network then break end
+        Log("Attempt " .. attempt .. " — RS:" .. tostring(ReplicatorService ~= nil)
+            .. " Net:" .. tostring(Network ~= nil))
+        task.wait(1)
+    end
+    local net = Network
+    if net then
+        Log("Network READY — code:" .. net._code:sub(1,8) .. " key[1]:" .. tostring(net._key[1]))
+    else
+        Log("Network FAIL — press Rescan after entering game")
+    end
+    if ReplicatorService then
+        local n = 0
+        for _ in pairs(ReplicatorService.Actors) do n = n + 1 end
+        Log("RS READY — actors: " .. n)
+    else
+        Log("RS FAIL — press Rescan Actors")
+    end
+end)
