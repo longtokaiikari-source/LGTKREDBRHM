@@ -979,32 +979,38 @@ local function targetPart(uid)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- AURA KILL  v13 — ForceNextPosition-only spoof, no SimulatedPosition
+-- AURA KILL  v14 — Full triple-field spoof: SimulatedPosition + ForceNextPosition
+--                  + ServerPosition  (user method from CharacterController.lua)
 -- ─────────────────────────────────────────────────────────────────────────────
--- Why v13 is different from v12:
+-- ReplicatorService.Update() (RS line 291):
+--   local v138 = v136.ForceNextPosition or v136.SimulatedPosition
+--   FireUnreliableServer("ReplicateMovement", ..., v138.X, v138.Y, v138.Z, ...)
+--   v136.ForceNextPosition = nil
 --
---   CharacterController.lua line 1549:
---     v390.SimulatedPosition = p387._position
---   This runs EVERY Heartbeat frame — CharacterController overwrites SimulatedPosition
---   unconditionally. Setting it from exploit code is lost within one frame.
---   v12 set both SimulatedPosition AND ForceNextPosition; the SimulatedPosition half
---   was always a no-op.
+--   ForceNextPosition is the primary override — RS reads it first and clears it.
+--   SimulatedPosition is the fallback — if RS.Update fires again within the
+--   spoof window (before ForceNextPosition is set again), SimulatedPosition
+--   keeps spoofPos going to the server until CC overwrites it next Heartbeat.
+--   Setting BOTH creates a consistent two-packet window instead of one.
 --
---   ForceNextPosition is NEVER read inside CharacterController. Only
---   ReplicatorService.Update() reads and clears it:
---     local v138 = v136.ForceNextPosition or v136.SimulatedPosition
---     FireUnreliableServer("ReplicateMovement", ..., v138.X, v138.Y, v138.Z, ...)
---     v136.ForceNextPosition = nil
---   Setting actor.ForceNextPosition = spoofPos causes ZERO physical movement.
---   The server receives spoofPos as our position for that one ReplicateMovement
---   packet and validates Impact packets against it.
+--   ServerPosition (ActorClass.lua line 2728, Replicate fn):
+--     p600.ServerPosition = p610   -- 11th arg = server's confirmed position
+--   This is what the server last confirmed our position to be.  Setting it to
+--   spoofPos signals "server agrees we're at spoofPos" — reduces the delta
+--   that anti-cheat compares against SimulatedPosition and prevents the
+--   spotted-tracking inconsistency check from flagging us.
+--   GetActorPosition (RS line 273): UseClient=true for LocalActor → uses
+--   actor.Position (not ServerPosition) — so this field doesn't affect the
+--   movement packet; it's purely for reconciliation logic.
 --
---   Anti-cheat: if the server detects an impossible jump it sends a Teleport
---   correction. To prevent the correction landing visibly we immediately re-send
---   our real position after the Impact batch clears, collapsing the spoof window.
+--   Physical movement comes from actor.Position and actor.CFrame — those are
+--   NOT touched here.  ForceNextPosition alone never moves the character model.
 --
---   Packet spam: all actors are hit with AuraPackets Impacts per swing — no
---   client-side distance gate. Server decides what connects.
+--   Anti-cheat: real position restored immediately after Impact burst so any
+--   server correction arrives pointing at realPos (where we already are).
+--
+--   Packet spam: all actors hit with AuraPackets Impacts per swing — zero
+--   client-side distance gate.  Server decides what connects.
 -- ─────────────────────────────────────────────────────────────────────────────
 local function auraStep()
     local me = replicator and replicator.LocalActor
@@ -1046,10 +1052,14 @@ local function auraStep()
     -- teleport correction that lands somewhere unexpected.
     local realPos = getOrigin()
 
-    -- ForceNextPosition ONLY.  SimulatedPosition is overwritten by CharacterController
-    -- every single Heartbeat frame (CC line 1549) — setting it here does nothing.
+    -- Triple-field spoof (user method):
+    --   SimulatedPosition = RS.Update fallback if ForceNextPosition already consumed
+    --   ForceNextPosition = primary RS.Update override, sent this packet
+    --   ServerPosition    = "server confirmed" field, reduces reconciliation delta
     pcall(function()
+        me.SimulatedPosition = spoofPos
         me.ForceNextPosition = spoofPos
+        me.ServerPosition    = spoofPos
     end)
 
     local n = math.random(1, 3)
@@ -1072,10 +1082,13 @@ local function auraStep()
             return
         end
 
-        -- Re-spoof: RS.Update throttles at 100 ms and may have already consumed
-        -- ForceNextPosition, so set it again for the Impact burst
+        -- Re-spoof before Impact burst: RS.Update (100 ms throttle) may have already
+        -- consumed the first ForceNextPosition.  Set all three again so the Impact
+        -- packets are validated against spoofPos no matter which RS cycle fires next.
         pcall(function()
+            me.SimulatedPosition = snapPos
             me.ForceNextPosition = snapPos
+            me.ServerPosition    = snapPos
         end)
 
         -- AOE: fire Impact for ALL alive actors — zero client-side distance gate.
@@ -1113,19 +1126,24 @@ local function auraStep()
         end
 
         -- Restore real position immediately after the Impact burst.
-        -- RS.Update will send realPos in the next 100 ms packet, telling the server
-        -- we are back where we actually are.  This collapses the spoof window so any
-        -- anti-cheat teleport correction arrives pointing at our real position
-        -- (where we already are) instead of at spoofPos.
+        -- Set all three fields back to realPos so the next RS.Update packet tells
+        -- the server we're at our true location.  This collapses the spoof window:
+        -- any anti-cheat Teleport correction arrives pointing at realPos (where we
+        -- already are) rather than at spoofPos, so the visible teleport never fires.
         task.delay(0.02, function()
             if realPos then
                 pcall(function()
+                    me.SimulatedPosition = realPos
                     me.ForceNextPosition = realPos
+                    me.ServerPosition    = realPos
                 end)
             end
             task.delay(0.06, function()
-                -- Final clear: let decoy system own ForceNextPosition again
-                pcall(function() me.ForceNextPosition = nil end)
+                -- Final clear: let CC and decoy system own these fields again
+                pcall(function()
+                    me.ForceNextPosition = nil
+                    me.ServerPosition    = nil
+                end)
             end)
         end)
     end)
